@@ -1,0 +1,23 @@
+# launch-pad project config. Run `npx @agentsystemlabs/launch-pad deploy` from
+# this directory. Each [[service]] is built into its own image and placed on the
+# named node. A service with a `domain`+`port` is a web service (gets Caddy +
+# HTTPS); one without is a background worker.
+project = "example-express"
+
+[[service]]
+name = "web"
+node = "node-dev-1"
+dockerfile = "./Dockerfile"
+cpu = 512               # vCPU shares (1024 = 1 vCPU)
+memory = 512            # MB
+domain = "testing.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+
+[[service]]
+name = "worker"
+node = "node-dev-1"
+dockerfile = "./worker.Dockerfile"
+cpu = 256
+memory = 256
+env = { NODE_ENV = "production" }

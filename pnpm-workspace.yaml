@@ -1,0 +1,11 @@
+packages:
+  - "packages/*"
+  - "examples/*"
+
+allowBuilds:
+  esbuild: set this to true or false
+
+# esbuild ships a native binary built via a postinstall script; tsup/tsx/vitest
+# all depend on it, so this build must be allowed to run.
+onlyBuiltDependencies:
+  - esbuild

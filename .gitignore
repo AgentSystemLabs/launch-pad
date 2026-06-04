@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+*.log
+.DS_Store
+.turbo/
+coverage/
+
+# launch-pad local prefs/cache should never be committed from a project
+.launch-pad-cache/
