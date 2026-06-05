@@ -6,17 +6,26 @@ project = "example-express"
 
 [[service]]
 name = "web"
-node = "node-dev-1"
+node = "yt-example"
 dockerfile = "./Dockerfile"
-cpu = 512               # vCPU shares (1024 = 1 vCPU)
-memory = 512            # MB
-domain = "testing.agentsystem.dev"
+cpu = 256 # vCPU shares (1024 = 1 vCPU)
+memory = 256 # MB
+replicas = 2            # Caddy load-balances across both; rolling updates are zero-downtime
+domain = "other.agentsystem.dev"
 port = 3000
 env = { NODE_ENV = "production" }
 
+  [service.healthCheck]
+  path = "/healthz"     # a new replica must pass this before the old one is drained
+
+  [service.rollout]
+  maxSurge = 1
+  drainTimeout = "20s"
+  stopGrace = "30s"
+
 [[service]]
 name = "worker"
-node = "node-dev-1"
+node = "yt-example"
 dockerfile = "./worker.Dockerfile"
 cpu = 256
 memory = 256

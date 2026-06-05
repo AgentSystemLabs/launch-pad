@@ -1,19 +1,26 @@
 import { execa } from "execa";
 import { LABELS, type ServiceConfig, serviceKey } from "@agentsystemlabs/launch-pad-shared";
 
-export interface ManagedContainer {
+export interface ManagedReplica {
   id: string;
   name: string;
+  index: number;
   /** docker container state: running | exited | created | ... */
   state: string;
   project: string;
   service: string;
   /** The desired image recorded on the container (launchpad.image label). */
   image: string;
+  /** vCPU shares (1024 = 1 vCPU) from launchpad.cpu label. */
+  cpu: number;
+  /** Memory limit in MB from launchpad.memory label. */
+  memory: number;
+  /** Published host port (null for workers / unpublished). */
+  hostPort: number | null;
 }
 
-export function containerName(project: string, service: string): string {
-  return `launchpad_${project}_${service}`;
+export function containerName(project: string, service: string, index: number): string {
+  return `launchpad_${project}_${service}_${index}`;
 }
 
 interface DockerInspect {
@@ -21,11 +28,22 @@ interface DockerInspect {
   Name: string;
   State?: { Status?: string };
   Config?: { Labels?: Record<string, string>; Image?: string };
+  NetworkSettings?: { Ports?: Record<string, Array<{ HostIp?: string; HostPort?: string }> | null> };
 }
 
-/** Inspect all launch-pad-managed containers, keyed by `project/service`. */
-export async function inspectManaged(): Promise<Map<string, ManagedContainer>> {
-  const map = new Map<string, ManagedContainer>();
+function parseHostPort(net: DockerInspect["NetworkSettings"]): number | null {
+  const map = net?.Ports;
+  if (!map) return null;
+  for (const bindings of Object.values(map)) {
+    const hp = bindings?.[0]?.HostPort;
+    if (hp) return Number.parseInt(hp, 10);
+  }
+  return null;
+}
+
+/** Inspect all managed containers, grouped per `project/service` (sorted by index). */
+export async function inspectManaged(): Promise<Map<string, ManagedReplica[]>> {
+  const map = new Map<string, ManagedReplica[]>();
   const ids = (
     await execa("docker", ["ps", "-aq", "--filter", `label=${LABELS.managed}=true`])
   ).stdout.trim();
@@ -38,15 +56,24 @@ export async function inspectManaged(): Promise<Map<string, ManagedContainer>> {
     const project = labels[LABELS.project];
     const service = labels[LABELS.service];
     if (!project || !service) continue;
-    map.set(serviceKey(project, service), {
+    const index = Number.parseInt(labels[LABELS.replica] ?? "0", 10) || 0;
+    const key = serviceKey(project, service);
+    const list = map.get(key) ?? [];
+    list.push({
       id: c.Id,
       name: (c.Name ?? "").replace(/^\//, ""),
+      index,
       state: c.State?.Status ?? "unknown",
       project,
       service,
       image: labels[LABELS.image] ?? c.Config?.Image ?? "",
+      cpu: Number.parseInt(labels[LABELS.cpu] ?? "0", 10) || 0,
+      memory: Number.parseInt(labels[LABELS.memory] ?? "0", 10) || 0,
+      hostPort: parseHostPort(c.NetworkSettings),
     });
+    map.set(key, list);
   }
+  for (const list of map.values()) list.sort((a, b) => a.index - b.index);
   return map;
 }
 
@@ -54,19 +81,28 @@ export async function pull(image: string): Promise<void> {
   await execa("docker", ["pull", image]);
 }
 
-export async function removeContainer(name: string): Promise<void> {
-  // -f stops and removes; ignore "no such container".
-  await execa("docker", ["rm", "-f", name]).catch(() => undefined);
+/** Hard remove (SIGKILL after 10s) — used for cleanup / non-graceful paths. */
+export async function removeContainer(nameOrId: string): Promise<void> {
+  await execa("docker", ["rm", "-f", nameOrId]).catch(() => undefined);
 }
 
-export async function startContainer(name: string): Promise<void> {
-  await execa("docker", ["start", name]);
+/** Graceful stop (SIGTERM → wait grace → SIGKILL) then remove. */
+export async function stopContainer(nameOrId: string, graceSeconds: number): Promise<void> {
+  await execa("docker", ["stop", "--time", String(graceSeconds), nameOrId]).catch(() => undefined);
+  await execa("docker", ["rm", nameOrId]).catch(() => undefined);
+}
+
+export async function startContainer(nameOrId: string): Promise<void> {
+  await execa("docker", ["start", nameOrId]);
 }
 
 export interface RunSpec {
   config: ServiceConfig;
-  /** Host port for a web service; undefined for workers (no port binding). */
+  index: number;
+  /** Host port for a web replica; undefined for workers. */
   hostPort?: number | undefined;
+  /** "127.0.0.1" (co-located) or "0.0.0.0" (reachable by a remote edge). */
+  bindHost: string;
 }
 
 export async function runContainer(spec: RunSpec): Promise<void> {
@@ -75,7 +111,7 @@ export async function runContainer(spec: RunSpec): Promise<void> {
     "run",
     "-d",
     "--name",
-    containerName(c.project, c.service),
+    containerName(c.project, c.service, spec.index),
     "--label",
     `${LABELS.managed}=true`,
     "--label",
@@ -84,6 +120,12 @@ export async function runContainer(spec: RunSpec): Promise<void> {
     `${LABELS.service}=${c.service}`,
     "--label",
     `${LABELS.image}=${c.image}`,
+    "--label",
+    `${LABELS.replica}=${spec.index}`,
+    "--label",
+    `${LABELS.cpu}=${c.cpu}`,
+    "--label",
+    `${LABELS.memory}=${c.memory}`,
     "--restart",
     "unless-stopped",
     "--cpus",
@@ -94,9 +136,8 @@ export async function runContainer(spec: RunSpec): Promise<void> {
   for (const [key, value] of Object.entries(c.env)) {
     args.push("-e", `${key}=${value}`);
   }
-  // Web services bind to localhost only; Caddy (also local) is the public entry.
   if (c.ingress && spec.hostPort !== undefined) {
-    args.push("-p", `127.0.0.1:${spec.hostPort}:${c.ingress.port}`);
+    args.push("-p", `${spec.bindHost}:${spec.hostPort}:${c.ingress.port}`);
   }
   args.push(c.image);
   await execa("docker", args);

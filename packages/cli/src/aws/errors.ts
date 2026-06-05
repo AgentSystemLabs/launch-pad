@@ -14,6 +14,29 @@ export function awsStatusCode(error: unknown): number | undefined {
   return (error as AwsLikeError | undefined)?.$metadata?.httpStatusCode;
 }
 
+export function isEc2InstanceNotFound(error: unknown): boolean {
+  const name = awsErrorName(error);
+  return name === "InvalidInstanceID.NotFound" || name === "InvalidInstanceId";
+}
+
+export function isEc2SecurityGroupNotFound(error: unknown): boolean {
+  const name = awsErrorName(error);
+  return name === "InvalidGroup.NotFound" || name === "InvalidGroupId.NotFound";
+}
+
+export function isEc2AllocationNotFound(error: unknown): boolean {
+  return awsErrorName(error) === "InvalidAllocationID.NotFound";
+}
+
+/** EC2 errors that mean the destroy target is already gone — safe to skip. */
+export function isDestroyAlreadyGoneError(error: unknown): boolean {
+  return (
+    isEc2InstanceNotFound(error) ||
+    isEc2SecurityGroupNotFound(error) ||
+    isEc2AllocationNotFound(error)
+  );
+}
+
 /**
  * Translate the common AWS auth/permission failures into a CliError with a helpful
  * hint. Re-throws anything else unchanged.

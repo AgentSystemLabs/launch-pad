@@ -1,0 +1,46 @@
+# One config, many environments — no edits to ship a new one.
+#
+#   launch-pad deploy                 → the literal production domains below
+#   launch-pad deploy --env <name>    → a parallel, isolated footprint on the
+#                                       SAME shared edge, with projected domains
+#
+# Both `api` and `ui` route through one edge (node-edge). Under --env <name> the
+# footprint owner becomes "shop-<name>" so environments coexist on node-app.
+project = "shop"
+
+# Project-wide default: under --env <name>, a domain becomes "<service>-<name>.shop.example.com".
+# A per-service `domainPattern` (see `ui`) overrides this.
+domainPattern = "{service}-{env}.shop.example.com"
+
+[[service]]
+name = "api"
+node = "node-app"
+edge = "node-edge"
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+domain = "api.shop.example.com"
+port = 3000
+env = { NODE_ENV = "production" }
+  # omit --env  → api.shop.example.com
+  # --env <name> → api-<name>.shop.example.com (project default pattern)
+  [service.healthCheck]
+  path = "/healthz"
+
+[[service]]
+name = "ui"
+node = "node-app"
+edge = "node-edge"
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+domain = "shop.example.com"
+domainPattern = "{env}.shop.example.com"
+port = 3000
+env = { NODE_ENV = "production" }
+  # omit --env  → shop.example.com
+  # --env <name> → <name>.shop.example.com (per-service override)
+  [service.healthCheck]
+  path = "/healthz"

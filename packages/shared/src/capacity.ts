@@ -10,6 +10,8 @@
  * result with {@link rawToCapacity}.
  */
 
+import { DEFAULT_RESERVED_CPU, DEFAULT_RESERVED_MEMORY } from "./constants";
+
 export const CPU_SHARES_PER_VCPU = 1024;
 
 export interface RawInstanceCapacity {
@@ -63,6 +65,15 @@ export interface CapacityServiceDemand {
   service: string;
   cpu: number;
   memory: number;
+  /**
+   * Extra CPU shares this service needs *transiently* while it is mid-rollout
+   * (`min(maxSurge, replicas) × per-replica cpu`). Only the single largest surge
+   * across all services is reserved, because a node rolls one service at a time.
+   * Defaults to 0 (no rollout headroom).
+   */
+  surgeCpu?: number;
+  /** Extra memory (MB) needed transiently while this service is mid-rollout. */
+  surgeMemory?: number;
 }
 
 export interface CapacityCheckInput {
@@ -77,8 +88,15 @@ export interface CapacityCheckResult {
   ok: boolean;
   allocatableCpu: number;
   allocatableMemory: number;
+  /** Peak demand checked against allocatable: steady-state sum + the largest single surge. */
   usedCpu: number;
   usedMemory: number;
+  /** Steady-state demand (sum of all services), excluding rollout surge. */
+  steadyCpu: number;
+  steadyMemory: number;
+  /** Rollout headroom reserved: the largest single-service surge (cpu and memory independently). */
+  surgeCpu: number;
+  surgeMemory: number;
   /** Positive ⇒ this many shares over the limit. */
   cpuOverBy: number;
   /** Positive ⇒ this many MB over the limit. */
@@ -86,15 +104,26 @@ export interface CapacityCheckResult {
 }
 
 /**
- * Admission check: does the full set of services fit on the node?
- * `services` must be the *complete* set that would run on the node (this
- * project's new services PLUS every other project's existing services).
+ * Admission check: does the full set of services fit on the node — including the
+ * transient surge of a rolling update? `services` must be the *complete* set that
+ * would run on the node (this project's new services PLUS every other project's
+ * existing services).
+ *
+ * A node rolls **one service at a time** (the agent applies rollout actions
+ * sequentially), so the transient peak adds only the single largest surge, not the
+ * sum of all surges. CPU and memory are maxed independently: the cpu-heaviest and
+ * memory-heaviest rolling services may differ, and each resource must hold at its
+ * own peak.
  */
 export function checkCapacity(input: CapacityCheckInput): CapacityCheckResult {
   const allocatableCpu = input.totalCpu - input.reservedCpu;
   const allocatableMemory = input.totalMemory - input.reservedMemory;
-  const usedCpu = input.services.reduce((sum, s) => sum + s.cpu, 0);
-  const usedMemory = input.services.reduce((sum, s) => sum + s.memory, 0);
+  const steadyCpu = input.services.reduce((sum, s) => sum + s.cpu, 0);
+  const steadyMemory = input.services.reduce((sum, s) => sum + s.memory, 0);
+  const surgeCpu = input.services.reduce((m, s) => Math.max(m, s.surgeCpu ?? 0), 0);
+  const surgeMemory = input.services.reduce((m, s) => Math.max(m, s.surgeMemory ?? 0), 0);
+  const usedCpu = steadyCpu + surgeCpu;
+  const usedMemory = steadyMemory + surgeMemory;
   const cpuOverBy = usedCpu - allocatableCpu;
   const memoryOverBy = usedMemory - allocatableMemory;
   return {
@@ -103,6 +132,10 @@ export function checkCapacity(input: CapacityCheckInput): CapacityCheckResult {
     allocatableMemory,
     usedCpu,
     usedMemory,
+    steadyCpu,
+    steadyMemory,
+    surgeCpu,
+    surgeMemory,
     cpuOverBy,
     memoryOverBy,
   };
@@ -111,4 +144,63 @@ export function checkCapacity(input: CapacityCheckInput): CapacityCheckResult {
 /** Render shares back to vCPU for display, e.g. 512 ⇒ "0.5". */
 export function sharesToVcpu(shares: number): number {
   return shares / CPU_SHARES_PER_VCPU;
+}
+
+export interface SmallestTypeOptions {
+  /** Held-back CPU shares (default {@link DEFAULT_RESERVED_CPU}). */
+  reservedCpu?: number;
+  /** Held-back memory MB (default {@link DEFAULT_RESERVED_MEMORY}). */
+  reservedMemory?: number;
+  /** Never return a type smaller than this (default "t3.small" — t3.micro's 1 GB is
+   * tight for the OS + agent + Caddy). */
+  floor?: string;
+}
+
+/** Burstable t-series first (cheap, the right default for small nodes), then others. */
+function familyRank(instanceType: string): number {
+  if (instanceType.startsWith("t3.")) return 0;
+  if (instanceType.startsWith("t3a.")) return 1;
+  if (instanceType.startsWith("t2.")) return 2;
+  return 3;
+}
+
+/**
+ * Smallest known instance type whose **allocatable** capacity (total − reserved)
+ * fits `cpuShares` + `memoryMb`, never returning something below `floor`. Returns
+ * `null` when nothing in the table fits. Used to auto-size a node that `deploy`
+ * provisions for the services placed on it — zero demand resolves to the floor.
+ */
+export function smallestInstanceTypeFor(
+  cpuShares: number,
+  memoryMb: number,
+  opts: SmallestTypeOptions = {},
+): { instanceType: string; capacity: InstanceCapacity } | null {
+  const reservedCpu = opts.reservedCpu ?? DEFAULT_RESERVED_CPU;
+  const reservedMemory = opts.reservedMemory ?? DEFAULT_RESERVED_MEMORY;
+  const floorCap = lookupInstanceCapacity(opts.floor ?? "t3.small");
+
+  const candidates = Object.entries(INSTANCE_CAPACITY_TABLE)
+    .map(([instanceType, raw]) => ({ instanceType, capacity: rawToCapacity(raw) }))
+    .filter(({ capacity }) =>
+      floorCap
+        ? capacity.totalCpu >= floorCap.totalCpu && capacity.totalMemory >= floorCap.totalMemory
+        : true,
+    )
+    .sort(
+      (a, b) =>
+        a.capacity.totalCpu - b.capacity.totalCpu ||
+        a.capacity.totalMemory - b.capacity.totalMemory ||
+        familyRank(a.instanceType) - familyRank(b.instanceType) ||
+        a.instanceType.localeCompare(b.instanceType),
+    );
+
+  for (const c of candidates) {
+    if (
+      c.capacity.totalCpu - reservedCpu >= cpuShares &&
+      c.capacity.totalMemory - reservedMemory >= memoryMb
+    ) {
+      return c;
+    }
+  }
+  return null;
 }

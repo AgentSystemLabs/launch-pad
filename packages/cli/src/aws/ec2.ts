@@ -12,7 +12,9 @@ import {
   DescribeVpcsCommand,
   DisassociateAddressCommand,
   type EC2Client,
+  type Instance,
   type IpPermission,
+  ModifyInstanceAttributeCommand,
   ReleaseAddressCommand,
   RunInstancesCommand,
   type RunInstancesCommandInput,
@@ -23,9 +25,18 @@ import {
   waitUntilInstanceStopped,
   waitUntilInstanceTerminated,
 } from "@aws-sdk/client-ec2";
-import { type InstanceCapacity, rawToCapacity } from "@agentsystemlabs/launch-pad-shared";
+import {
+  HOST_PORT_MAX,
+  HOST_PORT_MIN,
+  type InstanceCapacity,
+  type NodeRole,
+  nodeResourceTags,
+  nodeUsesElasticIp,
+  rawToCapacity,
+} from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
-import { awsErrorName } from "./errors";
+import { awsErrorName, isEc2InstanceNotFound, isEc2SecurityGroupNotFound } from "./errors";
+import { ensureEc2ResourceTags, ensureSecurityGroupTags } from "./tags";
 
 export async function getDefaultVpcId(ec2: EC2Client): Promise<string> {
   const res = await ec2.send(
@@ -59,12 +70,31 @@ export async function describeInstanceTypeCapacity(
   }
 }
 
+export interface SecurityGroupOptions {
+  ssh: boolean;
+  role: NodeRole;
+  /** For an app node: the edge SG allowed to reach the host-port range (no public ingress). */
+  edgeSecurityGroupId?: string | undefined;
+}
+
+export interface SecurityGroupTagContext {
+  clusterId: string;
+  nodeId: string;
+}
+
 export async function ensureSecurityGroup(
   ec2: EC2Client,
   name: string,
   vpcId: string,
-  opts: { ssh: boolean },
+  opts: SecurityGroupOptions,
+  tagCtx: SecurityGroupTagContext,
 ): Promise<string> {
+  const tags = nodeResourceTags({
+    clusterId: tagCtx.clusterId,
+    nodeId: tagCtx.nodeId,
+    role: opts.role,
+  });
+
   const existing = await ec2.send(
     new DescribeSecurityGroupsCommand({
       Filters: [
@@ -74,22 +104,44 @@ export async function ensureSecurityGroup(
     }),
   );
   const found = existing.SecurityGroups?.[0]?.GroupId;
-  if (found) return found;
+  if (found) {
+    await ensureSecurityGroupTags(ec2, found, tags);
+    return found;
+  }
 
   const created = await ec2.send(
     new CreateSecurityGroupCommand({
       GroupName: name,
-      Description: "launch-pad node ingress (Caddy http/https)",
+      Description: `launch-pad ${opts.role} node ingress`,
       VpcId: vpcId,
     }),
   );
   const sgId = created.GroupId;
   if (!sgId) throw new CliError(`failed to create security group ${name}`);
+  await ensureSecurityGroupTags(ec2, sgId, tags);
 
-  const perms: IpPermission[] = [
-    { IpProtocol: "tcp", FromPort: 80, ToPort: 80, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "http" }] },
-    { IpProtocol: "tcp", FromPort: 443, ToPort: 443, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "https" }] },
-  ];
+  const perms: IpPermission[] = [];
+  if (opts.role === "edge" || opts.role === "both") {
+    // Public HTTP/HTTPS — this node terminates TLS.
+    perms.push(
+      { IpProtocol: "tcp", FromPort: 80, ToPort: 80, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "http" }] },
+      { IpProtocol: "tcp", FromPort: 443, ToPort: 443, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "https" }] },
+    );
+  }
+  if (opts.role === "app") {
+    // App containers reachable ONLY by the edge SG, on the host-port range.
+    if (!opts.edgeSecurityGroupId) {
+      throw new CliError("an app node needs an edge to reach it", {
+        hint: "pass --edge <edge-node-id> when creating an app node",
+      });
+    }
+    perms.push({
+      IpProtocol: "tcp",
+      FromPort: HOST_PORT_MIN,
+      ToPort: HOST_PORT_MAX,
+      UserIdGroupPairs: [{ GroupId: opts.edgeSecurityGroupId, Description: "edge to app host ports" }],
+    });
+  }
   if (opts.ssh) {
     perms.push({
       IpProtocol: "tcp",
@@ -98,7 +150,9 @@ export async function ensureSecurityGroup(
       IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "ssh" }],
     });
   }
-  await ec2.send(new AuthorizeSecurityGroupIngressCommand({ GroupId: sgId, IpPermissions: perms }));
+  if (perms.length > 0) {
+    await ec2.send(new AuthorizeSecurityGroupIngressCommand({ GroupId: sgId, IpPermissions: perms }));
+  }
   return sgId;
 }
 
@@ -109,10 +163,24 @@ export interface RunNodeParams {
   securityGroupId: string;
   instanceProfileName: string;
   keyName?: string;
+  clusterId: string;
   nodeId: string;
+  role: NodeRole;
 }
 
 export async function runNode(ec2: EC2Client, p: RunNodeParams): Promise<string> {
+  const ec2Tags = nodeResourceTags({
+    clusterId: p.clusterId,
+    nodeId: p.nodeId,
+    role: p.role,
+  }).map((t) => ({ Key: t.Key, Value: t.Value }));
+
+  // Both roles get a public IPv4 from the default subnet. For edge/both it's the
+  // ingress address (soon replaced by a stable Elastic IP); for app nodes it is
+  // EGRESS-ONLY — launch-pad provisions no NAT gateway / VPC endpoints, so an app
+  // node needs outbound internet to pull from ECR and read S3 to bootstrap. App
+  // nodes stay private at the INBOUND edge: their security group admits only the
+  // edge's security group, so nothing on the internet can reach their services.
   const input: RunInstancesCommandInput = {
     ImageId: p.imageId,
     InstanceType: p.instanceType as RunInstancesCommandInput["InstanceType"],
@@ -123,13 +191,8 @@ export async function runNode(ec2: EC2Client, p: RunNodeParams): Promise<string>
     UserData: Buffer.from(p.userData).toString("base64"),
     MetadataOptions: { HttpTokens: "required", HttpEndpoint: "enabled" },
     TagSpecifications: [
-      {
-        ResourceType: "instance",
-        Tags: [
-          { Key: "Name", Value: `launch-pad-${p.nodeId}` },
-          { Key: "launch-pad:node", Value: p.nodeId },
-        ],
-      },
+      { ResourceType: "instance", Tags: ec2Tags },
+      { ResourceType: "volume", Tags: ec2Tags },
     ],
     ...(p.keyName ? { KeyName: p.keyName } : {}),
   };
@@ -156,6 +219,7 @@ export async function runNode(ec2: EC2Client, p: RunNodeParams): Promise<string>
 
 export interface InstanceNetwork {
   publicIp: string | null;
+  privateIp: string | null;
   availabilityZone: string | null;
 }
 
@@ -168,23 +232,87 @@ export async function waitForRunning(
   const inst = res.Reservations?.[0]?.Instances?.[0];
   return {
     publicIp: inst?.PublicIpAddress ?? null,
+    privateIp: inst?.PrivateIpAddress ?? null,
     availabilityZone: inst?.Placement?.AvailabilityZone ?? null,
   };
 }
 
-/** Current public IP for an instance, or null. */
-export async function describeInstanceIp(ec2: EC2Client, instanceId: string): Promise<string | null> {
-  try {
-    const res = await ec2.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
-    return res.Reservations?.[0]?.Instances?.[0]?.PublicIpAddress ?? null;
-  } catch {
-    return null;
+/**
+ * A node's EC2 instance as drift reconciliation sees it — the live EC2 state
+ * normalized to the cases the registry cares about. `missing` covers terminated,
+ * fully deregistered, or "exists in another account/region we can't see".
+ */
+export type Ec2Observation =
+  | { kind: "running"; publicIp: string | null; privateIp: string | null; availabilityZone: string | null }
+  | { kind: "stopped" }
+  | { kind: "transitional"; state: string }
+  | { kind: "missing" };
+
+function observationFromInstance(inst: Instance): Ec2Observation {
+  const state = inst.State?.Name ?? "unknown";
+  if (state === "running") {
+    return {
+      kind: "running",
+      publicIp: inst.PublicIpAddress ?? null,
+      privateIp: inst.PrivateIpAddress ?? null,
+      availabilityZone: inst.Placement?.AvailabilityZone ?? null,
+    };
   }
+  if (state === "stopped") return { kind: "stopped" };
+  if (state === "terminated") return { kind: "missing" };
+  // pending, stopping, shutting-down, rebooting, or anything unexpected → not stable yet.
+  return { kind: "transitional", state };
+}
+
+/**
+ * Observe a batch of instances by id in one call. Uses an `instance-id` filter
+ * (not `InstanceIds`) so ids that no longer exist are simply absent from the
+ * result rather than throwing `InvalidInstanceID.NotFound` for the whole batch —
+ * any requested id we don't see back is reported as `missing`.
+ */
+export async function describeInstancesById(
+  ec2: EC2Client,
+  ids: string[],
+): Promise<Map<string, Ec2Observation>> {
+  const out = new Map<string, Ec2Observation>();
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return out;
+
+  let token: string | undefined;
+  do {
+    const res = await ec2.send(
+      new DescribeInstancesCommand({
+        Filters: [{ Name: "instance-id", Values: unique }],
+        ...(token ? { NextToken: token } : {}),
+      }),
+    );
+    for (const reservation of res.Reservations ?? []) {
+      for (const inst of reservation.Instances ?? []) {
+        if (inst.InstanceId) out.set(inst.InstanceId, observationFromInstance(inst));
+      }
+    }
+    token = res.NextToken;
+  } while (token);
+
+  for (const id of unique) {
+    if (!out.has(id)) out.set(id, { kind: "missing" });
+  }
+  return out;
 }
 
 export async function terminateInstance(ec2: EC2Client, instanceId: string): Promise<void> {
-  await ec2.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
-  await waitUntilInstanceTerminated({ client: ec2, maxWaitTime: 240 }, { InstanceIds: [instanceId] });
+  try {
+    await ec2.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+  } catch (error) {
+    if (isEc2InstanceNotFound(error)) return;
+    throw error;
+  }
+  try {
+    await waitUntilInstanceTerminated({ client: ec2, maxWaitTime: 240 }, { InstanceIds: [instanceId] });
+  } catch (error) {
+    if (isEc2InstanceNotFound(error)) return;
+    throw error;
+  }
 }
 
 export async function deleteSecurityGroup(ec2: EC2Client, groupId: string): Promise<void> {
@@ -193,6 +321,7 @@ export async function deleteSecurityGroup(ec2: EC2Client, groupId: string): Prom
       await ec2.send(new DeleteSecurityGroupCommand({ GroupId: groupId }));
       return;
     } catch (error) {
+      if (isEc2SecurityGroupNotFound(error)) return;
       // The instance's network interface can linger briefly after termination.
       if (awsErrorName(error) === "DependencyViolation" && attempt < 6) {
         await sleep(5000);
@@ -229,25 +358,29 @@ export async function findNodeEip(ec2: EC2Client, nodeId: string): Promise<NodeE
 
 /** Ensure the node has an Elastic IP (reuse the tagged one or allocate) and point it
  * at the instance. Returns the stable IP + its allocation id. */
+export interface EipTagContext {
+  clusterId: string;
+  nodeId: string;
+  role: NodeRole;
+}
+
 export async function ensureEipForInstance(
   ec2: EC2Client,
-  nodeId: string,
+  tagCtx: EipTagContext,
   instanceId: string,
 ): Promise<{ allocationId: string; publicIp: string }> {
-  let eip = await findNodeEip(ec2, nodeId);
+  const eipTags = nodeResourceTags({
+    clusterId: tagCtx.clusterId,
+    nodeId: tagCtx.nodeId,
+    role: tagCtx.role,
+  }).map((t) => ({ Key: t.Key, Value: t.Value }));
+
+  let eip = await findNodeEip(ec2, tagCtx.nodeId);
   if (!eip) {
     const allocated = await ec2.send(
       new AllocateAddressCommand({
         Domain: "vpc",
-        TagSpecifications: [
-          {
-            ResourceType: "elastic-ip",
-            Tags: [
-              { Key: "Name", Value: `launch-pad-${nodeId}` },
-              { Key: "launch-pad:node", Value: nodeId },
-            ],
-          },
-        ],
+        TagSpecifications: [{ ResourceType: "elastic-ip", Tags: eipTags }],
       }),
     );
     if (!allocated.AllocationId || !allocated.PublicIp) {
@@ -259,6 +392,8 @@ export async function ensureEipForInstance(
       associationId: null,
       instanceId: null,
     };
+  } else {
+    await ensureEc2ResourceTags(ec2, eip.allocationId, nodeResourceTags(tagCtx));
   }
 
   await ec2.send(
@@ -295,4 +430,25 @@ export async function stopInstance(ec2: EC2Client, instanceId: string): Promise<
 export async function startInstance(ec2: EC2Client, instanceId: string): Promise<InstanceNetwork> {
   await ec2.send(new StartInstancesCommand({ InstanceIds: [instanceId] }));
   return waitForRunning(ec2, instanceId);
+}
+
+// ── resize (change instance type) ────────────────────────────────────────────────
+
+/**
+ * Change an instance's type. EC2 requires the instance to be **stopped** first;
+ * callers (`resizeNode`) stop → modify → start. AWS rejects incompatible swaps
+ * (e.g. across architectures / virtualization types) — that error surfaces to the
+ * caller unchanged.
+ */
+export async function modifyInstanceType(
+  ec2: EC2Client,
+  instanceId: string,
+  instanceType: string,
+): Promise<void> {
+  await ec2.send(
+    new ModifyInstanceAttributeCommand({
+      InstanceId: instanceId,
+      InstanceType: { Value: instanceType },
+    }),
+  );
 }

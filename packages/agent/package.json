@@ -12,7 +12,7 @@
   },
   "files": ["dist"],
   "scripts": {
-    "build": "tsup",
+    "build": "pnpm --filter @agentsystemlabs/launch-pad-shared build && tsup",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"

@@ -2,13 +2,14 @@ import {
   type CaddyStatus,
   type DesiredState,
   type NodeStatus,
+  type ReplicaStatus,
   type ServiceState,
   type ServiceStatus,
   serviceKey,
 } from "@agentsystemlabs/launch-pad-shared";
 import type { CaddyOutcome } from "./caddy";
 import type { AgentConfig } from "./config";
-import type { ManagedContainer } from "./docker";
+import type { ManagedReplica } from "./docker";
 
 function mapDockerState(state: string): ServiceState {
   switch (state) {
@@ -25,50 +26,62 @@ function mapDockerState(state: string): ServiceState {
   }
 }
 
+/** Roll a service's replica states up into a single state for the watcher/back-compat. */
+function rollupState(
+  replicas: ReplicaStatus[],
+  desiredReplicas: number,
+  hasError: boolean,
+): ServiceState {
+  if (hasError) return "error";
+  const running = replicas.filter((r) => r.state === "running").length;
+  if (running >= desiredReplicas && desiredReplicas > 0) return "running";
+  if (running > 0) return "starting";
+  if (replicas.length > 0) return replicas[0]?.state ?? "pending";
+  return "pending";
+}
+
 /** Build the NodeStatus to publish after a reconcile pass. */
 export function buildStatus(
   config: AgentConfig,
   agentVersion: string,
   desired: DesiredState,
-  after: Map<string, ManagedContainer>,
+  live: Map<string, ManagedReplica[]>,
   errors: Map<string, string>,
   caddy: CaddyOutcome,
 ): NodeStatus {
+  const now = new Date().toISOString();
+
   const services: ServiceStatus[] = desired.services.map((d) => {
     const key = serviceKey(d.project, d.service);
-    const updatedAt = new Date().toISOString();
+    const reps = live.get(key) ?? [];
     const error = errors.get(key);
-    if (error) {
+
+    const replicas: ReplicaStatus[] = reps.map((r) => {
+      const state = mapDockerState(r.state);
       return {
-        project: d.project,
-        service: d.service,
-        image: d.image,
-        state: "error",
-        message: error,
-        containerId: null,
-        updatedAt,
+        index: r.index,
+        containerId: r.id,
+        hostPort: r.hostPort,
+        state,
+        image: r.image,
+        healthy: state === "running",
       };
-    }
-    const container = after.get(key);
-    if (!container) {
-      return {
-        project: d.project,
-        service: d.service,
-        image: d.image,
-        state: "pending",
-        message: "container not found after reconcile",
-        containerId: null,
-        updatedAt,
-      };
-    }
+    });
+
+    const running = replicas.filter((r) => r.state === "running");
+    const state = rollupState(replicas, d.replicas, error !== undefined);
+
     return {
       project: d.project,
       service: d.service,
-      image: container.image,
-      state: mapDockerState(container.state),
-      message: container.state,
-      containerId: container.id,
-      updatedAt,
+      image: running[0]?.image ?? d.image,
+      state,
+      message: error ?? state,
+      containerId: running[0]?.containerId ?? null,
+      replicas,
+      desiredReplicas: d.replicas,
+      runningReplicas: running.length,
+      updatedAt: now,
     };
   });
 
@@ -81,10 +94,11 @@ export function buildStatus(
   return {
     nodeId: config.nodeId,
     agentId: config.agentId,
-    lastSeen: new Date().toISOString(),
+    lastSeen: now,
     agentVersion,
     services,
     caddy: caddyStatus,
+    edgeRoutes: [],
   };
 }
 
@@ -101,5 +115,6 @@ export function heartbeatStatus(
     agentVersion,
     services: [],
     caddy: { managed: false, lastReloadAt: null, error: message },
+    edgeRoutes: [],
   };
 }

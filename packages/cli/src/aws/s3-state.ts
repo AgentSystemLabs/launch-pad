@@ -1,6 +1,7 @@
 import {
   CreateBucketCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListObjectsV2Command,
@@ -10,9 +11,10 @@ import {
   PutPublicAccessBlockCommand,
   type S3Client,
 } from "@aws-sdk/client-s3";
-import { NODES_PREFIX } from "@agentsystemlabs/launch-pad-shared";
+import { bucketTags, CLUSTERS_PREFIX, clusterNodesPrefix } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 import { awsErrorName, awsStatusCode } from "./errors";
+import { ensureBucketTags } from "./tags";
 
 export interface S3Json {
   /** Decoded JSON body (not yet validated against any schema). */
@@ -30,9 +32,17 @@ export class PreconditionFailedError extends Error {
 }
 
 /** Idempotently ensure the state bucket exists with sane defaults. */
-export async function ensureBucket(s3: S3Client, bucket: string, region: string): Promise<void> {
+export async function ensureBucket(
+  s3: S3Client,
+  bucket: string,
+  region: string,
+  clusterId: string,
+): Promise<void> {
+  const tags = bucketTags({ clusterId });
+
   try {
     await s3.send(new HeadBucketCommand({ Bucket: bucket }));
+    await ensureBucketTags(s3, bucket, tags);
     return;
   } catch (error) {
     const status = awsStatusCode(error);
@@ -93,6 +103,7 @@ export async function ensureBucket(s3: S3Client, bucket: string, region: string)
       VersioningConfiguration: { Status: "Enabled" },
     }),
   );
+  await ensureBucketTags(s3, bucket, tags);
 }
 
 /** Read + JSON-decode an object, or null if it doesn't exist. */
@@ -148,23 +159,80 @@ export async function deleteObject(s3: S3Client, bucket: string, key: string): P
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }
 
-/** List the node ids that have a `nodes/<id>/` prefix in the bucket. */
-export async function listNodeIds(s3: S3Client, bucket: string): Promise<string[]> {
+/**
+ * Delete every object under a prefix. Used to fully sweep a node's state on
+ * `cluster destroy` — `node.json`/`desired.json`/`status.json` plus advisory
+ * objects (`edge.json`, `upstream/*.json`) a per-key delete would orphan. Pages
+ * through ListObjectsV2 and batch-deletes (≤1000 keys per DeleteObjects call).
+ * Returns the number of objects deleted.
+ */
+export async function deletePrefix(s3: S3Client, bucket: string, prefix: string): Promise<number> {
+  let deleted = 0;
+  let token: string | undefined;
+  do {
+    const listed = await s3.send(
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
+    );
+    const keys = (listed.Contents ?? []).flatMap((o) => (o.Key ? [{ Key: o.Key }] : []));
+    if (keys.length > 0) {
+      await s3.send(
+        new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: keys, Quiet: true } }),
+      );
+      deleted += keys.length;
+    }
+    token = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+  } while (token);
+  return deleted;
+}
+
+/**
+ * List the named cluster ids that have state in S3 (the `clusters/<id>/` prefix).
+ * The implicit `default` cluster lives at the legacy un-prefixed `nodes/` root and
+ * is NOT listed here — it always exists and has no `cluster.json`. Since the bucket
+ * is account+region scoped, every id returned lives in this bucket's region.
+ */
+export async function listClusterIds(s3: S3Client, bucket: string): Promise<string[]> {
   const ids: string[] = [];
   let token: string | undefined;
   do {
     const res = await s3.send(
       new ListObjectsV2Command({
         Bucket: bucket,
-        Prefix: NODES_PREFIX,
+        Prefix: CLUSTERS_PREFIX,
         Delimiter: "/",
         ContinuationToken: token,
       }),
     );
-    for (const prefix of res.CommonPrefixes ?? []) {
-      const value = prefix.Prefix;
+    for (const cp of res.CommonPrefixes ?? []) {
+      const value = cp.Prefix;
       if (value) {
-        const id = value.slice(NODES_PREFIX.length, -1);
+        const id = value.slice(CLUSTERS_PREFIX.length, -1);
+        if (id) ids.push(id);
+      }
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return ids;
+}
+
+/** List the node ids registered in a cluster's prefix. */
+export async function listNodeIds(s3: S3Client, bucket: string, clusterId: string): Promise<string[]> {
+  const prefix = clusterNodesPrefix(clusterId);
+  const ids: string[] = [];
+  let token: string | undefined;
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        Delimiter: "/",
+        ContinuationToken: token,
+      }),
+    );
+    for (const cp of res.CommonPrefixes ?? []) {
+      const value = cp.Prefix;
+      if (value) {
+        const id = value.slice(prefix.length, -1);
         if (id) ids.push(id);
       }
     }

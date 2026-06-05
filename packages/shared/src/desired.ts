@@ -1,11 +1,14 @@
 import { z } from "zod";
 import { PROTOCOL_VERSION } from "./constants";
+import { HealthCheckSchema, RolloutSchema } from "./health";
 
 /** Web ingress. Null on a service means it's a background worker (no Caddy). */
 export const IngressSchema = z
   .object({
     domain: z.string().min(1),
     port: z.number().int().min(1).max(65535),
+    /** Node id of a remote edge that fronts this service, or null = co-located Caddy. */
+    edge: z.string().min(1).nullable().default(null),
   })
   .strict();
 
@@ -21,8 +24,12 @@ export const ServiceConfigSchema = z
     image: z.string().min(1),
     cpu: z.number().int().positive(),
     memory: z.number().int().positive(),
+    /** How many replicas of this service run on THIS node. */
+    replicas: z.number().int().min(1).default(1),
     env: z.record(z.string(), z.string()).default({}),
     ingress: IngressSchema.nullable(),
+    healthCheck: HealthCheckSchema.nullable().default(null),
+    rollout: RolloutSchema.default({}),
   })
   .strict();
 
@@ -42,6 +49,11 @@ export type DesiredState = z.infer<typeof DesiredStateSchema>;
 /** Stable composite key for a service on a node. */
 export function serviceKey(project: string, service: string): string {
   return `${project}/${service}`;
+}
+
+/** True when a service's domain is served by a remote edge node (not co-located). */
+export function isRemoteEdge(c: ServiceConfig): boolean {
+  return c.ingress != null && c.ingress.edge != null;
 }
 
 export function parseDesiredState(input: unknown): DesiredState {

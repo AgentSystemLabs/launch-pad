@@ -12,6 +12,7 @@
     "dev": "pnpm -r --parallel run dev",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
+    "e2e": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e",
     "clean": "pnpm -r exec rm -rf dist .turbo *.tsbuildinfo"
   },
   "devDependencies": {

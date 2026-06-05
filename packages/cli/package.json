@@ -4,14 +4,15 @@
   "description": "Deploy your apps to your own AWS infrastructure — one command.",
   "type": "module",
   "bin": {
-    "launch-pad": "./dist/index.js"
+    "launch-pad": "./dist/index.js",
+    "lpd": "./dist/index.js"
   },
   "files": ["dist"],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "pnpm --filter @agentsystemlabs/launch-pad-shared build && tsup",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
@@ -19,6 +20,7 @@
   "dependencies": {
     "@agentsystemlabs/launch-pad-agent": "workspace:*",
     "@agentsystemlabs/launch-pad-shared": "workspace:*",
+    "@aws-sdk/client-cloudwatch-logs": "^3.726.0",
     "@aws-sdk/client-ec2": "^3.726.0",
     "@aws-sdk/client-ecr": "^3.726.0",
     "@aws-sdk/client-iam": "^3.726.0",

@@ -1,9 +1,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { HOST_PORT_COUNT, HOST_PORT_MIN } from "@agentsystemlabs/launch-pad-shared";
 
 const STATE_PATH = process.env.LAUNCHPAD_STATE ?? "/var/lib/launch-pad/state.json";
-const PORT_MIN = 20000;
-const PORT_RANGE = 10000;
+const PORT_MIN = HOST_PORT_MIN;
+const PORT_RANGE = HOST_PORT_COUNT;
 
 export interface LocalState {
   /** Stable host-port allocations keyed by `project/service`. */
@@ -36,16 +37,22 @@ function hash(input: string): number {
   return h;
 }
 
-/** Deterministically allocate a stable host port for a service key. */
-export function allocatePort(state: LocalState, key: string): number {
-  const existing = state.ports[key];
+/** Deterministically allocate a stable host port for a (service, replica index). */
+export function allocatePort(state: LocalState, key: string, index: number): number {
+  const mapKey = `${key}#${index}`;
+  const existing = state.ports[mapKey];
   if (existing) return existing;
 
   const used = new Set(Object.values(state.ports));
-  let port = PORT_MIN + (hash(key) % PORT_RANGE);
+  let port = PORT_MIN + (hash(mapKey) % PORT_RANGE);
   while (used.has(port)) {
     port = PORT_MIN + ((port + 1 - PORT_MIN) % PORT_RANGE);
   }
-  state.ports[key] = port;
+  state.ports[mapKey] = port;
   return port;
+}
+
+/** Free a replica's port allocation (called on scale-down / rollout cleanup). */
+export function releasePort(state: LocalState, key: string, index: number): void {
+  delete state.ports[`${key}#${index}`];
 }

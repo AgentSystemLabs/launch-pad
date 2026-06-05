@@ -5,15 +5,31 @@ import {
   type ECRClient,
   GetAuthorizationTokenCommand,
 } from "@aws-sdk/client-ecr";
+import { ecrRepoTags } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 import { awsErrorName } from "./errors";
+import { ensureEcrRepoTags } from "./tags";
+
+export interface EnsureRepositoryOptions {
+  project: string;
+  service: string;
+}
 
 /** Idempotently ensure an ECR repository exists; returns its repository URI. */
-export async function ensureRepository(ecr: ECRClient, name: string): Promise<string> {
+export async function ensureRepository(
+  ecr: ECRClient,
+  name: string,
+  opts: EnsureRepositoryOptions,
+): Promise<string> {
+  const tags = ecrRepoTags({ project: opts.project, service: opts.service });
+
   try {
     const res = await ecr.send(new DescribeRepositoriesCommand({ repositoryNames: [name] }));
     const uri = res.repositories?.[0]?.repositoryUri;
-    if (uri) return uri;
+    if (uri) {
+      await ensureEcrRepoTags(ecr, name, tags);
+      return uri;
+    }
   } catch (error) {
     if (awsErrorName(error) !== "RepositoryNotFoundException") throw error;
   }
@@ -27,6 +43,7 @@ export async function ensureRepository(ecr: ECRClient, name: string): Promise<st
   );
   const uri = created.repository?.repositoryUri;
   if (!uri) throw new CliError(`failed to create ECR repository ${name}`);
+  await ensureEcrRepoTags(ecr, name, tags);
   return uri;
 }
 

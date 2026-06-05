@@ -9,8 +9,11 @@ function svc(project: string, service: string, cpu = 256, memory = 256): Service
     image: `ecr/${project}/${service}:abc`,
     cpu,
     memory,
+    replicas: 1,
     env: {},
     ingress: null,
+    healthCheck: null,
+    rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
   };
 }
 

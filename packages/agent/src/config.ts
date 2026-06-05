@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { DEFAULT_CLUSTER, NodeRoleSchema } from "@agentsystemlabs/launch-pad-shared";
 import { z } from "zod";
 
 const AgentConfigSchema = z
@@ -7,6 +8,10 @@ const AgentConfigSchema = z
     agentId: z.string().min(1),
     bucket: z.string().min(1),
     region: z.string().min(1),
+    /** The cluster this node belongs to — scopes its S3 keys. Defaults so pre-cluster agent.json parses. */
+    clusterId: z.string().min(1).default(DEFAULT_CLUSTER),
+    /** "app" | "edge" | "both" — defaults to "both" so pre-role agent.json parses. */
+    role: NodeRoleSchema.default("both"),
   })
   .strict();
 

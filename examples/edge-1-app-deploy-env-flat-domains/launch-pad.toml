@@ -1,0 +1,40 @@
+# Dedicated edge router + many environments on ONE app node (`--env`).
+#
+#   node-edge   (role: edge)  — public 80/443, Caddy only
+#   node-app    (role: app)   — isolated footprints per --env, side by side
+#
+#   launch-pad deploy              → app.agentsystem.dev, api.agentsystem.dev
+#   launch-pad deploy --env <name> → projected domains from domainPattern
+project = "edge-env"
+domainPattern = "{service}-{env}.agentsystem.dev"
+
+[[service]]
+name = "api"
+node = "node-app"
+edge = "node-edge"
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+domain = "api.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+  # --env <name> → api-<name>.agentsystem.dev (project default pattern)
+  [service.healthCheck]
+  path = "/healthz"
+
+[[service]]
+name = "web"
+node = "node-app"
+edge = "node-edge"
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+domain = "app.agentsystem.dev"
+domainPattern = "{env}.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+  # --env <name> → <name>.agentsystem.dev (per-service override)
+  [service.healthCheck]
+  path = "/healthz"

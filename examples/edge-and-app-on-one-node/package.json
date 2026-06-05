@@ -1,11 +1,10 @@
 {
-  "name": "node-express-app",
+  "name": "edge-1-app-express-web",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "worker": "node worker.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.21.2"

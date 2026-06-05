@@ -11,15 +11,34 @@ export const ServiceStateSchema = z.enum([
 ]);
 export type ServiceState = z.infer<typeof ServiceStateSchema>;
 
+/** One replica of a service, so the edge can build per-replica upstreams. */
+export const ReplicaStatusSchema = z
+  .object({
+    index: z.number().int().min(0),
+    containerId: z.string().nullable(),
+    /** Host port the replica is published on (null for workers). */
+    hostPort: z.number().int().nullable(),
+    state: ServiceStateSchema,
+    image: z.string(),
+    /** Last health-probe result (web replicas only). */
+    healthy: z.boolean().default(false),
+  })
+  .strict();
+
 export const ServiceStatusSchema = z
   .object({
     project: z.string(),
     service: z.string(),
-    /** Image the agent actually has running (compare to desired to detect drift). */
+    /** Rollup image: the converged image, or the in-progress one mid-rollout. */
     image: z.string(),
+    /** Rollup state across replicas. */
     state: ServiceStateSchema,
     message: z.string().default(""),
+    /** Rollup container id (first running replica), kept for back-compat. */
     containerId: z.string().nullable().default(null),
+    replicas: z.array(ReplicaStatusSchema).default([]),
+    desiredReplicas: z.number().int().min(0).default(0),
+    runningReplicas: z.number().int().min(0).default(0),
     updatedAt: z.string(),
   })
   .strict();
@@ -32,6 +51,14 @@ export const CaddyStatusSchema = z
   })
   .strict();
 
+/** What an edge node is currently routing (one entry per fronted domain). */
+export const EdgeRouteStatusSchema = z
+  .object({
+    domain: z.string(),
+    upstreams: z.number().int().min(0),
+  })
+  .strict();
+
 export const NodeStatusSchema = z
   .object({
     nodeId: z.string(),
@@ -41,11 +68,15 @@ export const NodeStatusSchema = z
     agentVersion: z.string(),
     services: z.array(ServiceStatusSchema),
     caddy: CaddyStatusSchema,
+    /** Populated on edge nodes; [] elsewhere. */
+    edgeRoutes: z.array(EdgeRouteStatusSchema).default([]),
   })
   .strict();
 
+export type ReplicaStatus = z.infer<typeof ReplicaStatusSchema>;
 export type ServiceStatus = z.infer<typeof ServiceStatusSchema>;
 export type CaddyStatus = z.infer<typeof CaddyStatusSchema>;
+export type EdgeRouteStatus = z.infer<typeof EdgeRouteStatusSchema>;
 export type NodeStatus = z.infer<typeof NodeStatusSchema>;
 
 export function parseNodeStatus(input: unknown): NodeStatus {

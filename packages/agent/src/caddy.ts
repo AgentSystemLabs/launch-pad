@@ -11,7 +11,10 @@ const ADMIN_BLOCK = {
 
 export interface WebRoute {
   domain: string;
-  hostPort: number;
+  /** Reverse-proxy upstream dials, e.g. "127.0.0.1:20001" or "10.0.1.5:20001". */
+  upstreams: string[];
+  /** Active-health-check path (web replicas only). */
+  healthPath?: string | undefined;
 }
 
 export interface CaddyOutcome {
@@ -29,8 +32,46 @@ let lastReloadAt: string | null = null;
  * Caddy's automatic HTTPS provisions a certificate for each matched host and
  * stands up the :80 ACME/redirect server on its own.
  */
+function reverseProxyHandler(route: WebRoute): unknown {
+  return {
+    handler: "reverse_proxy",
+    upstreams: route.upstreams.map((dial) => ({ dial })),
+    load_balancing: {
+      selection_policy: { policy: "round_robin" },
+      // Zero-downtime on rollout: when a request hits a draining/dead replica
+      // (e.g. an old replica that already called server.close() while the edge's
+      // shard poll still lists it), transparently retry it on another upstream
+      // instead of returning an error to the client.
+      retries: 3,
+      try_duration: "5s",
+      try_interval: "250ms",
+    },
+    health_checks: {
+      // Passive: a request that fails (refused connection or 5xx) immediately
+      // evicts that upstream for fail_duration, so subsequent requests skip it —
+      // covers the window before the active check or the next shard poll catches up.
+      passive: {
+        fail_duration: "10s",
+        max_fails: 1,
+        unhealthy_status: [500, 502, 503, 504],
+      },
+      ...(route.healthPath
+        ? {
+            active: {
+              uri: route.healthPath,
+              interval: "5s",
+              timeout: "2s",
+              expect_status: 2,
+            },
+          }
+        : {}),
+    },
+  };
+}
+
 export function buildConfig(routes: WebRoute[]): unknown {
-  if (routes.length === 0) {
+  const live = routes.filter((r) => r.upstreams.length > 0);
+  if (live.length === 0) {
     return { admin: ADMIN_BLOCK, apps: { http: { servers: {} } } };
   }
   return {
@@ -40,14 +81,9 @@ export function buildConfig(routes: WebRoute[]): unknown {
         servers: {
           launchpad: {
             listen: [":443"],
-            routes: routes.map((r) => ({
+            routes: live.map((r) => ({
               match: [{ host: [r.domain] }],
-              handle: [
-                {
-                  handler: "reverse_proxy",
-                  upstreams: [{ dial: `127.0.0.1:${r.hostPort}` }],
-                },
-              ],
+              handle: [reverseProxyHandler(r)],
             })),
           },
         },

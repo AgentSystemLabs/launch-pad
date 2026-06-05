@@ -13,6 +13,7 @@ export interface WatchTarget {
   project: string;
   service: string;
   image: string;
+  expectedReplicas: number;
 }
 
 export interface WatchResult {
@@ -34,13 +35,20 @@ function evaluate(status: NodeStatus | null, target: WatchTarget): WatchResult {
       message: status ? "not yet reported by the agent" : "no agent status yet",
     };
   }
-  if (svc.state === "running" && svc.image === target.image) {
-    return { target, state: "running", ok: true, message: svc.message || "running" };
-  }
   if (svc.state === "error") {
     return { target, state: "error", ok: false, message: svc.message || "error" };
   }
-  return { target, state: svc.state, ok: false, message: svc.message || svc.state };
+  // Converged: every expected replica is running the deployed image.
+  const onImage = svc.replicas.filter((r) => r.image === target.image && r.state === "running").length;
+  if (svc.runningReplicas >= target.expectedReplicas && onImage >= target.expectedReplicas) {
+    return { target, state: "running", ok: true, message: `${onImage}/${target.expectedReplicas} replicas` };
+  }
+  return {
+    target,
+    state: svc.state,
+    ok: false,
+    message: `${onImage}/${target.expectedReplicas} on new image (${svc.runningReplicas} running)`,
+  };
 }
 
 /**
@@ -50,6 +58,7 @@ function evaluate(status: NodeStatus | null, target: WatchTarget): WatchResult {
 export async function waitForConvergence(
   s3: S3Client,
   bucket: string,
+  clusterId: string,
   targets: WatchTarget[],
   timeoutMs: number,
   onTick?: (results: WatchResult[]) => void,
@@ -61,7 +70,7 @@ export async function waitForConvergence(
   for (;;) {
     const statusByNode = new Map<string, NodeStatus | null>();
     for (const nodeId of nodeIds) {
-      const obj = await getJson(s3, bucket, statusKey(nodeId));
+      const obj = await getJson(s3, bucket, statusKey(clusterId, nodeId));
       let status: NodeStatus | null = null;
       if (obj) {
         try {

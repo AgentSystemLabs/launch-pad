@@ -1,0 +1,35 @@
+# A "lower" cluster: app nodes that share ONE edge router, in one AWS account.
+#
+# Unlike examples/edge-2-app-nodes-rolling-replicas (which pins explicit `nodes` + `edge` names), this
+# config omits placement. Pass --cluster on deploy; the CLI picks the cluster's app nodes and routes
+# the domain through the cluster's default edge — so the app config never mentions infrastructure names.
+#
+# Set the cluster up once (the first edge/both node becomes the default edge):
+#   launch-pad cluster create lower --region us-east-1
+#   launch-pad node create edge-lower --cluster lower --role edge
+#   launch-pad node create app-a      --cluster lower --role app
+#   launch-pad node create app-b      --cluster lower --role app
+#
+# Then deploy into it:
+#   launch-pad deploy --cluster lower      # or add --cluster to your CI invocation
+project = "example-clusters"
+
+[[service]]
+name = "web"
+# no node/nodes — placement comes from `deploy --cluster lower`
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+replicas = 4               # …e.g. 2 on app-a + 2 on app-b
+domain = "app.agentsystem.dev"   # …and routes this domain through the cluster's edge
+port = 3000
+env = { NODE_ENV = "production" }
+
+  [service.healthCheck]
+  path = "/healthz"
+
+  [service.rollout]
+  maxSurge = 1
+  drainTimeout = "20s"
+  stopGrace = "30s"

@@ -7,6 +7,7 @@ import { ZodError } from "zod";
 import { LABEL_REGEX, parseLaunchPadConfig } from "@agentsystemlabs/launch-pad-shared";
 import { CONFIG_FILENAME, formatZodError } from "../config/load";
 import { CliError } from "../errors";
+import { assertValidNodeId } from "../validate-node-id";
 import { applyGlobalOptions, type GlobalOpts } from "../globals";
 import { panel } from "../ui/box";
 import { isJsonMode, log, printJson } from "../ui/log";
@@ -23,7 +24,7 @@ interface InitOptions extends GlobalOpts {
   force?: boolean;
 }
 
-interface ServiceValues {
+export interface ServiceValues {
   name: string;
   node: string;
   dockerfile: string;
@@ -62,7 +63,7 @@ function q(value: string): string {
   return JSON.stringify(value);
 }
 
-function renderToml(project: string, svc: ServiceValues): string {
+export function renderToml(project: string, svc: ServiceValues): string {
   const lines: string[] = [
     "# launch-pad project config.",
     `# Deploy with: npx @agentsystemlabs/launch-pad deploy`,
@@ -76,6 +77,7 @@ function renderToml(project: string, svc: ServiceValues): string {
     `memory = ${svc.memory}   # MB`,
   ];
 
+  const isWeb = svc.domain !== undefined && svc.port !== undefined;
   if (svc.domain !== undefined && svc.port !== undefined) {
     lines.push(`domain = ${q(svc.domain)}`, `port = ${svc.port}`);
   } else {
@@ -87,7 +89,19 @@ function renderToml(project: string, svc: ServiceValues): string {
     );
   }
 
-  lines.push('env = { NODE_ENV = "production" }', "");
+  lines.push('env = { NODE_ENV = "production" }');
+
+  // Web services require a health check: a surged replica must pass it before
+  // it joins the load balancer, so rolling updates stay zero-downtime.
+  if (isWeb) {
+    lines.push(
+      "",
+      "  [service.healthCheck]",
+      '  path = "/healthz"   # the route your app returns 2xx on when ready',
+    );
+  }
+
+  lines.push("");
   return `${lines.join("\n")}\n`;
 }
 
@@ -142,6 +156,8 @@ async function gatherValues(opts: InitOptions, cwd: string): Promise<{ project: 
       port = positiveInt(await ask("Port your app listens on", String(DEFAULT_PORT)));
     }
   }
+
+  assertValidNodeId(node);
 
   const svc: ServiceValues = {
     name,

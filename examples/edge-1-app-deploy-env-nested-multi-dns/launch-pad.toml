@@ -1,0 +1,43 @@
+# Nested env domains under multi.agentsystem.dev — see README for DNS.
+#
+#   launch-pad deploy              → multi.agentsystem.dev, api.multi.agentsystem.dev
+#   launch-pad deploy --env <name> → ui-<name>.multi…, api-<name>.multi…
+#
+# Dedicated edge (node-edge) + all footprints on node-app.
+project = "multi"
+
+# API: fold env into the first label (api-<name>.multi.agentsystem.dev).
+domainPattern = "{service}-{env}.multi.agentsystem.dev"
+
+[[service]]
+name = "api"
+node = "node-app"
+edge = "node-edge"
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+domain = "api.multi.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+  # omit --env  → api.multi.agentsystem.dev
+  # --env <name> → api-<name>.multi.agentsystem.dev
+  [service.healthCheck]
+  path = "/healthz"
+
+[[service]]
+name = "ui"
+node = "node-app"
+edge = "node-edge"
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+domain = "multi.agentsystem.dev"
+domainPattern = "ui-{env}.multi.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+  # omit --env  → multi.agentsystem.dev
+  # --env <name> → ui-<name>.multi.agentsystem.dev
+  [service.healthCheck]
+  path = "/healthz"

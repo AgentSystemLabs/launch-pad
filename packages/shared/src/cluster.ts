@@ -1,0 +1,25 @@
+import { z } from "zod";
+
+/**
+ * `cluster.json` at `clusters/<clusterId>/cluster.json` — the authoritative
+ * topology of a named cluster. A cluster is a set of nodes sharing one VPC,
+ * one account/region, and (for web services) one edge router. The AWS account
+ * + region a cluster lives in are resolved from local CLI config, not stored
+ * here. The `default` cluster is implicit and has no cluster.json.
+ */
+export const ClusterConfigSchema = z
+  .object({
+    clusterId: z.string().min(1),
+    /** Node id of the edge that fronts this cluster's web services, or null. */
+    defaultEdge: z.string().min(1).nullable().default(null),
+    region: z.string().min(1),
+    createdAt: z.string(),
+    createdBy: z.string(),
+  })
+  .strict();
+
+export type ClusterConfig = z.infer<typeof ClusterConfigSchema>;
+
+export function parseClusterConfig(input: unknown): ClusterConfig {
+  return ClusterConfigSchema.parse(input);
+}

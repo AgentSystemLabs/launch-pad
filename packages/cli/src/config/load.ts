@@ -58,6 +58,9 @@ export function loadConfig(startDir: string = process.cwd()): LoadedConfig {
     if (error instanceof ZodError) {
       throw new CliError(`invalid ${CONFIG_FILENAME}:\n${formatZodError(error)}`);
     }
+    if (error instanceof Error && error.message) {
+      throw new CliError(`invalid ${CONFIG_FILENAME}:\n  ${error.message}`);
+    }
     throw error;
   }
 }

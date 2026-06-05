@@ -1,3 +1,4 @@
+import { CloudWatchLogsClient } from "@aws-sdk/client-cloudwatch-logs";
 import { EC2Client } from "@aws-sdk/client-ec2";
 import { ECRClient } from "@aws-sdk/client-ecr";
 import { IAMClient } from "@aws-sdk/client-iam";
@@ -15,6 +16,7 @@ export interface AwsClients {
   ec2: EC2Client;
   iam: IAMClient;
   ssm: SSMClient;
+  logs: CloudWatchLogsClient;
 }
 
 /**
@@ -51,5 +53,6 @@ export async function createClients(opts: GlobalOpts): Promise<AwsClients> {
     ec2: new EC2Client(config),
     iam: new IAMClient(config),
     ssm: new SSMClient(config),
+    logs: new CloudWatchLogsClient(config),
   };
 }

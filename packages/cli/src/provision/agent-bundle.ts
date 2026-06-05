@@ -6,8 +6,8 @@ import { nodePrefix } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 
 /** S3 key the agent bundle is uploaded to for a node. */
-export function agentBundleKey(nodeId: string): string {
-  return `${nodePrefix(nodeId)}agent.cjs`;
+export function agentBundleKey(clusterId: string, nodeId: string): string {
+  return `${nodePrefix(clusterId, nodeId)}agent.cjs`;
 }
 
 /** Locate the bundled agent (`@agentsystemlabs/launch-pad-agent` main = dist/index.cjs). */
@@ -26,13 +26,14 @@ export function resolveAgentBundlePath(): string {
 export async function uploadAgentBundle(
   s3: S3Client,
   bucket: string,
+  clusterId: string,
   nodeId: string,
 ): Promise<void> {
   const body = readFileSync(resolveAgentBundlePath());
   await s3.send(
     new PutObjectCommand({
       Bucket: bucket,
-      Key: agentBundleKey(nodeId),
+      Key: agentBundleKey(clusterId, nodeId),
       Body: body,
       ContentType: "application/javascript",
     }),
@@ -43,10 +44,11 @@ export async function uploadAgentBundle(
 export async function presignAgentBundle(
   s3: S3Client,
   bucket: string,
+  clusterId: string,
   nodeId: string,
   expiresInSeconds = 3600,
 ): Promise<string> {
-  return getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: agentBundleKey(nodeId) }), {
+  return getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: agentBundleKey(clusterId, nodeId) }), {
     expiresIn: expiresInSeconds,
   });
 }

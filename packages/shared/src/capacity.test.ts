@@ -4,6 +4,7 @@ import {
   lookupInstanceCapacity,
   rawToCapacity,
   sharesToVcpu,
+  smallestInstanceTypeFor,
 } from "./capacity";
 
 describe("instance capacity", () => {
@@ -59,5 +60,86 @@ describe("checkCapacity", () => {
     const r = checkCapacity({ ...base, services: [] });
     expect(r.ok).toBe(true);
     expect(r.usedCpu).toBe(0);
+  });
+
+  it("reserves only the single largest surge (one service rolls at a time), not the sum", () => {
+    const r = checkCapacity({
+      ...base,
+      services: [
+        { project: "a", service: "web", cpu: 512, memory: 512, surgeCpu: 512, surgeMemory: 512 },
+        { project: "b", service: "api", cpu: 256, memory: 256, surgeCpu: 256, surgeMemory: 256 },
+      ],
+    });
+    expect(r.steadyCpu).toBe(768);
+    expect(r.steadyMemory).toBe(768);
+    // max(512, 256) reserved once — NOT 512 + 256.
+    expect(r.surgeCpu).toBe(512);
+    expect(r.surgeMemory).toBe(512);
+    expect(r.usedCpu).toBe(768 + 512);
+    expect(r.usedMemory).toBe(768 + 512);
+  });
+
+  it("maxes cpu and memory surge independently across services", () => {
+    const r = checkCapacity({
+      ...base,
+      services: [
+        // cpu-heavy roller
+        { project: "a", service: "cruncher", cpu: 256, memory: 128, surgeCpu: 256, surgeMemory: 128 },
+        // memory-heavy roller
+        { project: "b", service: "cache", cpu: 64, memory: 512, surgeCpu: 64, surgeMemory: 512 },
+      ],
+    });
+    expect(r.surgeCpu).toBe(256); // from cruncher
+    expect(r.surgeMemory).toBe(512); // from cache
+  });
+
+  it("rejects a set that fits at steady state but not once the rollout surge is added", () => {
+    // e.g. 3×512 = 1536 steady ≤ allocatable 1792, but a maxSurge=1 roll adds 512 → 2048 > 1792.
+    const r = checkCapacity({
+      ...base,
+      services: [{ project: "a", service: "web", cpu: 1536, memory: 256, surgeCpu: 512, surgeMemory: 256 }],
+    });
+    expect(r.steadyCpu).toBe(1536);
+    expect(r.steadyCpu).toBeLessThanOrEqual(r.allocatableCpu); // fits without the surge
+    expect(r.usedCpu).toBe(1536 + 512);
+    expect(r.ok).toBe(false);
+    expect(r.cpuOverBy).toBe(2048 - 1792); // 256 over
+  });
+});
+
+describe("smallestInstanceTypeFor", () => {
+  it("returns the floor for zero demand (e.g. a dedicated edge)", () => {
+    expect(smallestInstanceTypeFor(0, 0)?.instanceType).toBe("t3.small");
+  });
+
+  it("never returns below the floor even for a tiny demand", () => {
+    // 256 shares / 256 MB would fit t3.micro, but the floor is t3.small.
+    expect(smallestInstanceTypeFor(256, 256)?.instanceType).toBe("t3.small");
+  });
+
+  it("steps up to the next size when memory exceeds the floor's allocatable", () => {
+    // t3.small allocatable mem = 2048 − 512 = 1536; 3000 needs the 4096 tier.
+    expect(smallestInstanceTypeFor(0, 3000)?.instanceType).toBe("t3.medium");
+  });
+
+  it("respects reserved capacity at the boundary", () => {
+    // t3.small allocatable cpu = 2048 − 256 = 1792; exactly 1792 still fits.
+    expect(smallestInstanceTypeFor(1792, 0)?.instanceType).toBe("t3.small");
+    // one share over and no 2-vCPU type fits → smallest 4-vCPU box (by memory).
+    expect(smallestInstanceTypeFor(1793, 0)?.instanceType).toBe("c5.xlarge");
+  });
+
+  it("prefers the t3 family over equal-capacity alternatives", () => {
+    // c5.large / t2.medium / t3.medium all = 2 vCPU · 4096 MB → t3 wins.
+    expect(smallestInstanceTypeFor(0, 3584)?.instanceType).toBe("t3.medium");
+  });
+
+  it("returns null when nothing in the table fits", () => {
+    expect(smallestInstanceTypeFor(999_999, 0)).toBeNull();
+  });
+
+  it("honors a custom floor + reserved overrides", () => {
+    const r = smallestInstanceTypeFor(0, 0, { floor: "t3.micro", reservedCpu: 0, reservedMemory: 0 });
+    expect(r?.instanceType).toBe("t3.micro");
   });
 });

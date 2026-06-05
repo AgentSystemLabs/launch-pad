@@ -1,0 +1,18 @@
+# Dedicated edge router + one Express web app on a private app node.
+#
+#   node-edge  (role: edge)  — public 80/443, Caddy only
+#   node-app   (role: app)   — Express container, reachable only from the edge
+project = "edge-express-web"
+
+[[service]]
+name = "web"
+node = "node-app"
+dockerfile = "./Dockerfile"
+cpu = 256
+memory = 256
+domain = "app.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+
+  [service.healthCheck]
+  path = "/healthz"

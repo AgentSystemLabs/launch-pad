@@ -1,0 +1,6 @@
+node_modules
+npm-debug.log
+launch-pad.toml
+*.md
+.dockerignore
+Dockerfile

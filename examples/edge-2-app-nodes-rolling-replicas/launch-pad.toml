@@ -1,0 +1,30 @@
+# Dedicated edge router + two app nodes with rolling replicas.
+#
+#   node-edge    (role: edge)  — public 80/443, runs Caddy, no app containers
+#   node-app-a   (role: app)   — private, reachable only by the edge
+#   node-app-b   (role: app)   — private, reachable only by the edge
+#
+# Replicas are spread round-robin across both app nodes; the edge load-balances
+# app.agentsystem.dev across every healthy replica.
+project = "example-edge"
+
+[[service]]
+name = "web"
+nodes = ["node-app-a", "node-app-b"]
+edge = "node-edge"
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+replicas = 4
+domain = "app.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+
+  [service.healthCheck]
+  path = "/healthz"
+
+  [service.rollout]
+  maxSurge = 1
+  drainTimeout = "20s"
+  stopGrace = "30s"
