@@ -57,6 +57,7 @@ import { buildProvisionPlan, type NodeAction, type NodeDemand } from "../deploy/
 import { waitForConvergence, type WatchResult, type WatchTarget } from "../deploy/watch";
 import { CliError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
+import type { AgentType } from "../provision/agent-bundle";
 import { provisionNode } from "../provision/provision-node";
 import { panel, table } from "../ui/box";
 import { isJsonMode, log, printJson, spinner } from "../ui/log";
@@ -79,6 +80,8 @@ interface DeployOptions extends GlobalOpts {
   repair?: boolean;
   /** commander sets this false for `--no-recreate` (a terminated instance is replaced by default). */
   recreate?: boolean;
+  /** Agent runtime to install on auto-provisioned nodes: "ts" (default) or "rust". */
+  agent?: string;
 }
 
 interface BuiltService {
@@ -475,6 +478,11 @@ async function writeConfigBaseline(
 async function runDeploy(opts: DeployOptions): Promise<void> {
   const { config, dir } = loadConfig();
 
+  if (opts.agent !== undefined && opts.agent !== "ts" && opts.agent !== "rust") {
+    throw new CliError(`invalid --agent "${opts.agent}" (expected ts | rust)`);
+  }
+  const agentType: AgentType = opts.agent === "rust" ? "rust" : "ts";
+
   const env = opts.env;
   if (env !== undefined && !LABEL_REGEX.test(env)) {
     throw new CliError(`invalid --env "${env}"`, {
@@ -747,6 +755,7 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
             amiId,
             vpcId,
             edgeNodeId: a.edgeNodeId,
+            agentType,
             onProgress: (t) => {
               spin.text = t;
             },
@@ -1012,6 +1021,7 @@ export function registerDeploy(program: Command): void {
     .option("--timeout <seconds>", "how long to wait for convergence", "180")
     .option("--yes", "skip confirmation prompts (required to auto-provision in CI)")
     .option("--dry-run", "do everything except push images, write state, or create nodes")
+    .option("--agent <runtime>", "agent runtime for auto-provisioned nodes: ts (default) or rust", "ts")
     .addHelpText(
       "after",
       [

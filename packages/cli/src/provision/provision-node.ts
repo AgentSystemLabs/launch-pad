@@ -32,7 +32,7 @@ import { getJson, PreconditionFailedError, putJson } from "../aws/s3-state";
 import { resolveLatestAl2023Ami } from "../aws/ssm";
 import { adoptEdgeIfUnset, ensureClusterConfig } from "../cluster/store";
 import { CliError } from "../errors";
-import { presignAgentBundle, uploadAgentBundle } from "./agent-bundle";
+import { type AgentType, uploadAndPresignAgent } from "./agent-bundle";
 import { planResizedEntry } from "./resize-plan";
 import { renderUserData } from "./user-data";
 
@@ -69,6 +69,8 @@ export interface ProvisionNodeParams {
   /** The edge node fronting this node — required when role === "app". */
   edgeNodeId?: string;
   keyName?: string;
+  /** Agent runtime to install: "ts" (Node CJS bundle, default) or "rust" (static binary). */
+  agentType?: AgentType;
   /** Spinner bridge: called with the current step label. */
   onProgress?: (text: string) => void;
 }
@@ -95,10 +97,10 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
     role,
   };
 
-  report("uploading agent bundle");
-  await uploadAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
-  const bundleUrl = await presignAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
-  const userData = renderUserData({ agent: agentConfig, bundleUrl });
+  const agentType: AgentType = p.agentType ?? "ts";
+  report(agentType === "rust" ? "uploading rust agent binary" : "uploading agent bundle");
+  const bundleUrl = await uploadAndPresignAgent(aws.s3, aws.bucket, aws.clusterId, nodeId, agentType);
+  const userData = renderUserData({ agent: agentConfig, bundleUrl, agentType });
 
   report("ensuring IAM role + instance profile");
   const { profileName } = await ensureNodeIam(aws.iam, {
@@ -344,6 +346,8 @@ export interface ReplaceInstanceParams {
   node: NodeRegistryEntry;
   /** Agent version to install on the replacement (the caller's CLI version). */
   agentVersion: string;
+  /** Agent runtime to install: "ts" (default) or "rust". */
+  agentType?: AgentType;
   amiId?: string;
   onProgress?: (text: string) => void;
 }
@@ -379,10 +383,10 @@ export async function replaceInstance(p: ReplaceInstanceParams): Promise<NodeReg
     role,
   };
 
-  report("uploading agent bundle");
-  await uploadAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
-  const bundleUrl = await presignAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
-  const userData = renderUserData({ agent: agentConfig, bundleUrl });
+  const agentType: AgentType = p.agentType ?? "ts";
+  report(agentType === "rust" ? "uploading rust agent binary" : "uploading agent bundle");
+  const bundleUrl = await uploadAndPresignAgent(aws.s3, aws.bucket, aws.clusterId, nodeId, agentType);
+  const userData = renderUserData({ agent: agentConfig, bundleUrl, agentType });
 
   report(`launching ${node.instanceType}`);
   const instanceId = await runNode(aws.ec2, {

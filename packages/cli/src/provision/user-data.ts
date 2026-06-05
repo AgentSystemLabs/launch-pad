@@ -1,4 +1,5 @@
 import type { NodeRole } from "@agentsystemlabs/launch-pad-shared";
+import type { AgentType } from "./agent-bundle";
 import { renderCloudWatchInstall } from "./cloudwatch";
 import { renderSystemdUnit } from "./systemd-unit";
 
@@ -13,8 +14,10 @@ export interface AgentConfig {
 
 export interface UserDataParams {
   agent: AgentConfig;
-  /** Presigned S3 URL the node curls to fetch the bundled agent. */
+  /** Presigned S3 URL the node curls to fetch the agent artifact. */
   bundleUrl: string;
+  /** Agent runtime: "ts" (Node CJS bundle, default) or "rust" (static binary). */
+  agentType?: AgentType;
 }
 
 /** Caddy install + permissive-admin systemd service (only for edge/both nodes). */
@@ -63,14 +66,29 @@ systemctl enable --now caddy
  * from a presigned S3 URL, then start it under systemd.
  */
 export function renderUserData(params: UserDataParams): string {
+  const agentType = params.agentType ?? "ts";
   const agentJson = JSON.stringify(params.agent, null, 2);
-  const unit = renderSystemdUnit();
+  const unit = renderSystemdUnit(agentType);
   const caddy = params.agent.role === "app" ? "" : `\n${caddyBlock()}`;
   const cloudwatch = renderCloudWatchInstall({
     clusterId: params.agent.clusterId,
     nodeId: params.agent.nodeId,
     role: params.agent.role,
   });
+
+  // The Rust agent is a self-contained binary — no Node runtime needed on-box.
+  const runtimeBlock =
+    agentType === "rust"
+      ? `# --- agent runtime: Rust (static binary, no Node needed) ---`
+      : `# --- Node.js 22 ---
+curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+dnf install -y nodejs`;
+
+  const fetchAgent =
+    agentType === "rust"
+      ? `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent
+chmod +x /opt/launch-pad/agent`
+      : `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent.cjs`;
 
   return `#!/bin/bash
 set -euxo pipefail
@@ -82,16 +100,14 @@ mkdir -p /etc/launch-pad /var/lib/launch-pad /opt/launch-pad
 dnf install -y docker
 systemctl enable --now docker
 
-# --- Node.js 22 ---
-curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-dnf install -y nodejs
+${runtimeBlock}
 ${caddy}
 # --- launch-pad agent ---
 cat > /etc/launch-pad/agent.json <<'AGENTCONF'
 ${agentJson}
 AGENTCONF
 
-curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent.cjs
+${fetchAgent}
 
 cat > /etc/systemd/system/launch-pad-agent.service <<'UNIT'
 ${unit}UNIT

@@ -38,6 +38,7 @@ import { applyNodeDrift } from "../../deploy/drift-apply";
 import { type NodeDrift, planNodeDrift } from "../../deploy/drift-plan";
 import { CliError } from "../../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
+import type { AgentType } from "../../provision/agent-bundle";
 import { installLoggingOnNode } from "../../provision/install-logging";
 import { registerMonitor } from "./monitor";
 import {
@@ -105,6 +106,7 @@ interface CreateOptions extends GlobalOpts {
   keyName?: string;
   ami?: string;
   agentVersion?: string;
+  agent?: string;
   yes?: boolean;
   dryRun?: boolean;
 }
@@ -114,6 +116,10 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
   if (opts.edge !== undefined) assertValidNodeId(opts.edge);
   const aws = await prepareAws(opts);
   const agentVersion = opts.agentVersion ?? readVersion();
+  if (opts.agent !== undefined && opts.agent !== "ts" && opts.agent !== "rust") {
+    throw new CliError(`invalid --agent "${opts.agent}" (expected ts | rust)`);
+  }
+  const agentType: AgentType = opts.agent === "rust" ? "rust" : "ts";
 
   const roleResult = NodeRoleSchema.safeParse(opts.role);
   if (!roleResult.success) {
@@ -137,7 +143,11 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
   if (opts.dryRun) {
     const userData = renderUserData({
       agent: agentConfig,
-      bundleUrl: "https://<state-bucket>…/agent.cjs?<presigned-at-launch>",
+      bundleUrl:
+        agentType === "rust"
+          ? "https://<state-bucket>…/agent?<presigned-at-launch>"
+          : "https://<state-bucket>…/agent.cjs?<presigned-at-launch>",
+      agentType,
     });
     printDryRun(name, opts, aws, capacity, amiId, vpcId, userData);
     return;
@@ -193,6 +203,7 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
       vpcId,
       edgeNodeId,
       keyName: opts.keyName,
+      agentType,
       onProgress: (t) => {
         spin.text = t;
       },
@@ -1269,6 +1280,7 @@ export function registerNode(program: Command): void {
     .option("--key-name <keypair>", "EC2 key pair for SSH (omit to disable SSH)")
     .option("--ami <id>", "AMI id (default: latest Amazon Linux 2023)")
     .option("--agent-version <semver>", "agent version to install (default: this CLI's version)")
+    .option("--agent <runtime>", "agent runtime: ts (default) or rust", "ts")
     .option("--dry-run", "show the provisioning plan + bootstrap without creating anything")
     .option("--yes", "skip the launch confirmation prompt")
     .action(async (name: string, _opts, command: Command) => {
