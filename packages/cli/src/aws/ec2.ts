@@ -38,6 +38,22 @@ import { CliError } from "../errors";
 import { awsErrorName, isEc2InstanceNotFound, isEc2SecurityGroupNotFound } from "./errors";
 import { ensureEc2ResourceTags, ensureSecurityGroupTags } from "./tags";
 
+// AWS is eventually consistent: a resource you just created (an instance profile,
+// a security group's freed ENI) can be briefly invisible to the next call. These
+// bound the retry loops that absorb that window. Tuned per-operation because the
+// inconsistency windows differ.
+const MAX_CONSISTENCY_RETRIES = 6;
+/** Backoff after RunInstances rejects a not-yet-visible fresh instance profile. */
+const RUN_INSTANCE_RETRY_MS = 2500;
+/** Backoff while a terminated instance's ENI still pins its security group. */
+const SECURITY_GROUP_RETRY_MS = 5000;
+
+// EC2 state-transition waiter ceilings (seconds). "running" is quick; stop and
+// terminate involve a full guest shutdown, so they get longer.
+const WAIT_RUNNING_SECONDS = 180;
+const WAIT_STOPPED_SECONDS = 240;
+const WAIT_TERMINATED_SECONDS = 240;
+
 export async function getDefaultVpcId(ec2: EC2Client): Promise<string> {
   const res = await ec2.send(
     new DescribeVpcsCommand({ Filters: [{ Name: "isDefault", Values: ["true"] }] }),
@@ -208,8 +224,8 @@ export async function runNode(ec2: EC2Client, p: RunNodeParams): Promise<string>
       const name = awsErrorName(error);
       const retriable =
         name === "InvalidParameterValue" || name === "InvalidIamInstanceProfile";
-      if (retriable && attempt < 6) {
-        await sleep(2500);
+      if (retriable && attempt < MAX_CONSISTENCY_RETRIES) {
+        await sleep(RUN_INSTANCE_RETRY_MS);
         continue;
       }
       throw error;
@@ -227,7 +243,10 @@ export async function waitForRunning(
   ec2: EC2Client,
   instanceId: string,
 ): Promise<InstanceNetwork> {
-  await waitUntilInstanceRunning({ client: ec2, maxWaitTime: 180 }, { InstanceIds: [instanceId] });
+  await waitUntilInstanceRunning(
+    { client: ec2, maxWaitTime: WAIT_RUNNING_SECONDS },
+    { InstanceIds: [instanceId] },
+  );
   const res = await ec2.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
   const inst = res.Reservations?.[0]?.Instances?.[0];
   return {
@@ -308,7 +327,10 @@ export async function terminateInstance(ec2: EC2Client, instanceId: string): Pro
     throw error;
   }
   try {
-    await waitUntilInstanceTerminated({ client: ec2, maxWaitTime: 240 }, { InstanceIds: [instanceId] });
+    await waitUntilInstanceTerminated(
+      { client: ec2, maxWaitTime: WAIT_TERMINATED_SECONDS },
+      { InstanceIds: [instanceId] },
+    );
   } catch (error) {
     if (isEc2InstanceNotFound(error)) return;
     throw error;
@@ -323,8 +345,8 @@ export async function deleteSecurityGroup(ec2: EC2Client, groupId: string): Prom
     } catch (error) {
       if (isEc2SecurityGroupNotFound(error)) return;
       // The instance's network interface can linger briefly after termination.
-      if (awsErrorName(error) === "DependencyViolation" && attempt < 6) {
-        await sleep(5000);
+      if (awsErrorName(error) === "DependencyViolation" && attempt < MAX_CONSISTENCY_RETRIES) {
+        await sleep(SECURITY_GROUP_RETRY_MS);
         continue;
       }
       throw error;
@@ -424,7 +446,10 @@ export async function releaseEip(ec2: EC2Client, allocationId: string): Promise<
 
 export async function stopInstance(ec2: EC2Client, instanceId: string): Promise<void> {
   await ec2.send(new StopInstancesCommand({ InstanceIds: [instanceId] }));
-  await waitUntilInstanceStopped({ client: ec2, maxWaitTime: 240 }, { InstanceIds: [instanceId] });
+  await waitUntilInstanceStopped(
+    { client: ec2, maxWaitTime: WAIT_STOPPED_SECONDS },
+    { InstanceIds: [instanceId] },
+  );
 }
 
 export async function startInstance(ec2: EC2Client, instanceId: string): Promise<InstanceNetwork> {

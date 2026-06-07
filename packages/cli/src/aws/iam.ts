@@ -86,6 +86,13 @@ export function iamSlug(clusterId: string, nodeId: string): string {
   return `${clusterId}-${nodeId}`.replace(/[^a-zA-Z0-9+=,.@_-]/g, "-");
 }
 
+// ⚠️ IAM role/profile names max out at 64 chars, so these slice(0, 64). If a
+// cluster id + node id is long enough that the slug overflows, two nodes that
+// differ only past char 64 collapse to the SAME role/profile name — the second
+// provision would attach to the first's IAM resources, and tearing one down would
+// delete the other's. Keep cluster/node ids short, or add a disambiguating hash
+// here if longer ids ever need supporting.
+
 /** Per-node IAM role name for new nodes (existing nodes may still use the legacy shared role). */
 export function nodeRoleName(clusterId: string, nodeId: string): string {
   return `launch-pad-node-${iamSlug(clusterId, nodeId)}`.slice(0, 64);
@@ -274,6 +281,19 @@ function buildNodePolicy(params: EnsureNodeIamParams): string {
 /**
  * Idempotently ensure a per-node IAM role + instance profile with least-privilege
  * inline policy. Existing nodes provisioned with the legacy shared role are unchanged.
+ */
+/**
+ * Idempotently create the node's IAM role + instance profile.
+ *
+ * ⚠️ The step ORDER below is load-bearing, not incidental:
+ *   1. CreateRole
+ *   2. PutRolePolicy (inline least-privilege policy)
+ *   3. attach the SSM managed policy BY ROLE NAME — must happen before the profile
+ *      exists; resolving it via the profile was a NoSuchEntity bug on fresh nodes
+ *   4. CreateInstanceProfile
+ *   5. read-back-with-retry (IAM create-then-read eventual consistency)
+ * Reordering "to clean up" can reintroduce the fresh-provision failures these
+ * steps were sequenced to avoid.
  */
 export async function ensureNodeIam(
   iam: IAMClient,

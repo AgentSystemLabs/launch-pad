@@ -29,6 +29,13 @@ interface LogsOptions extends GlobalOpts {
 
 const DEFAULT_SINCE = "15m";
 const FOLLOW_INTERVAL_MS = 2000;
+/**
+ * Cap on the dedup set during `--follow`. Each polled event id is remembered so a
+ * line isn't printed twice across overlapping poll windows; past this many ids we
+ * drop the whole set (the oldest ids are already outside the poll window, so they
+ * can't reappear). Just a memory bound on a long-lived stream, not a correctness knob.
+ */
+const FOLLOW_DEDUP_CACHE_MAX = 50_000;
 
 /** Parse a relative window like `15m`, `1h`, `24h`, `7d` (also `s`) into milliseconds. */
 export function parseSince(input: string): number {
@@ -109,7 +116,7 @@ async function streamFollow(
         if (e.timestamp > from) from = e.timestamp;
       }
       // Bound memory on a long-lived follow — old ids fall outside the poll window.
-      if (seen.size > 50_000) seen.clear();
+      if (seen.size > FOLLOW_DEDUP_CACHE_MAX) seen.clear();
     } catch (error) {
       if (!isLogGroupMissing(error)) throw error;
       // Group not created yet — keep waiting for the first events.

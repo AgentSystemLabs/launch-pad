@@ -66,6 +66,17 @@ import { color } from "../ui/theme";
 import { assertValidNodeId } from "../validate-node-id";
 import { readVersion } from "../version";
 
+/**
+ * Optimistic-concurrency retries when writing a node's desired.json / edge.json.
+ * Each attempt re-reads, re-merges, and conditionally writes; a concurrent deploy
+ * to the same node loses the CAS and retries. 5 is enough to absorb a couple of
+ * racing deploys without spinning forever.
+ */
+const MAX_PUBLISH_RETRIES = 5;
+
+/** Default time `deploy` waits for nodes to report convergence (overridable via --timeout). */
+const DEFAULT_CONVERGE_TIMEOUT_SECONDS = 180;
+
 interface DeployOptions extends GlobalOpts {
   service?: string;
   node?: string;
@@ -314,7 +325,7 @@ async function publishDesired(
   project: string,
   incoming: ServiceConfig[],
 ): Promise<void> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < MAX_PUBLISH_RETRIES; attempt += 1) {
     const existing = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, nodeId));
     const state = existing ? parseDesiredState(existing.raw) : emptyDesiredState(nodeId, nowIso());
     const merged = mergeProjectServices(state.services, project, incoming);
@@ -338,7 +349,7 @@ async function publishDesired(
 
 /** Advisory edge.json: union this project's fronted domains into the edge's list. */
 async function publishEdgeConfig(aws: AwsEnv, edgeId: string, domains: string[]): Promise<void> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < MAX_PUBLISH_RETRIES; attempt += 1) {
     const existing = await getJson(aws.s3, aws.bucket, edgeConfigKey(aws.clusterId, edgeId));
     const current = (existing?.raw as { domains?: string[] } | undefined)?.domains ?? [];
     const union = [...new Set([...current, ...domains])].sort();
@@ -940,7 +951,22 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
     reportPublished(built, ownerProject);
     return;
   }
-  await watchAndReport(aws, targets, Number(opts.timeout ?? "180") * 1000, built);
+  await watchAndReport(aws, targets, resolveTimeoutMs(opts.timeout), built);
+}
+
+/**
+ * Parse the --timeout flag (seconds) to milliseconds. A bare `Number()` here would
+ * turn a typo like `--timeout abc` into NaN, which `waitForConvergence` reads as an
+ * instantly-elapsed deadline — a deploy that "times out" the moment it starts with
+ * no explanation. Validate to a positive integer instead (mirrors --tail/--interval).
+ */
+function resolveTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_CONVERGE_TIMEOUT_SECONDS * 1000;
+  const seconds = Number.parseInt(raw, 10);
+  if (!Number.isInteger(seconds) || seconds < 1) {
+    throw new CliError(`invalid --timeout "${raw}"`, { hint: "pass whole seconds ≥ 1, e.g. --timeout 180" });
+  }
+  return seconds * 1000;
 }
 
 function reportPublished(built: BuiltService[], project: string): void {
@@ -1018,7 +1044,11 @@ export function registerDeploy(program: Command): void {
     .option("--no-repair", "fail on console-side EC2 drift instead of repairing it before publishing")
     .option("--no-recreate", "repair stopped nodes but fail (don't replace) a terminated instance")
     .option("--no-wait", "don't wait for the agent to report convergence")
-    .option("--timeout <seconds>", "how long to wait for convergence", "180")
+    .option(
+      "--timeout <seconds>",
+      "how long to wait for convergence",
+      String(DEFAULT_CONVERGE_TIMEOUT_SECONDS),
+    )
     .option("--yes", "skip confirmation prompts (required to auto-provision in CI)")
     .option("--dry-run", "do everything except push images, write state, or create nodes")
     .option("--agent <runtime>", "agent runtime for auto-provisioned nodes: ts (default) or rust", "ts")

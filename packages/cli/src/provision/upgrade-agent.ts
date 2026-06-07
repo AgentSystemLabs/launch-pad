@@ -14,6 +14,17 @@ import {
   ssmRunBashScript,
 } from "./agent-upgrade";
 
+/**
+ * Lifetime of the presigned agent-bundle URL used during an upgrade. Short on
+ * purpose — it only needs to outlive the SSM install (or a human copy-paste of
+ * the manual fallback). `manualUpgradeHint` derives its "valid for N min" text
+ * from this, so the displayed expiry can't drift from the real one.
+ */
+const UPGRADE_PRESIGN_TTL_SECONDS = 900;
+
+/** Cap on SSM stdout/stderr echoed into an error message. */
+const SSM_ERROR_DETAIL_MAX = 400;
+
 export type UpgradeDelivery = "ssm" | "manual" | "upload-only";
 
 export interface UpgradeAgentResult {
@@ -67,7 +78,13 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
   report(`uploading agent bundle for ${nodeId}`);
   await uploadAgentBundle(aws.s3, aws.bucket, clusterId, nodeId);
 
-  const bundleUrl = await presignAgentBundle(aws.s3, aws.bucket, clusterId, nodeId, 900);
+  const bundleUrl = await presignAgentBundle(
+    aws.s3,
+    aws.bucket,
+    clusterId,
+    nodeId,
+    UPGRADE_PRESIGN_TTL_SECONDS,
+  );
 
   if (p.uploadOnly) {
     await updateRegistryAgentVersion(aws, entry, agentVersion);
@@ -89,7 +106,7 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
       throw new Error("SSM returned no invocation result");
     }
     if (result.status !== "Success") {
-      const detail = (result.stderr || result.stdout).trim().slice(0, 400);
+      const detail = (result.stderr || result.stdout).trim().slice(0, SSM_ERROR_DETAIL_MAX);
       throw new Error(detail || `SSM status ${result.status}`);
     }
   } catch (error) {
@@ -117,13 +134,21 @@ async function updateRegistryAgentVersion(
 }
 
 /** EC2 Instance Connect / SSH fallback steps when SSM is unavailable. */
-export function manualUpgradeHint(nodeId: string, bundleUrl: string): string {
+export function manualUpgradeHint(
+  nodeId: string,
+  bundleUrl: string,
+  ttlSeconds = UPGRADE_PRESIGN_TTL_SECONDS,
+): string {
+  // Inline the real (quoted) URL into the curl line so the block is copy-paste
+  // runnable as-is — the old `<presigned-url>` placeholder forced the operator to
+  // hunt for the URL on a separate line. The TTL note is derived from the same
+  // constant used to sign the URL, so it can't claim a wrong expiry.
   return [
     `  ${nodeId}:`,
-    `    curl -fsSL '<presigned-url>' -o ${AGENT_INSTALL_PATH}`,
+    `    curl -fsSL '${bundleUrl}' -o ${AGENT_INSTALL_PATH}`,
     `    sudo systemctl restart ${AGENT_SYSTEMD_UNIT}`,
     "",
     "  Connect with EC2 Instance Connect (console) or SSH if the node has port 22 open.",
-    `  Presigned URL (15 min): ${bundleUrl}`,
+    `  (Presigned URL valid for ~${Math.round(ttlSeconds / 60)} min.)`,
   ].join("\n");
 }

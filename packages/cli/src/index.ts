@@ -52,6 +52,10 @@ function showsClusterBanner(path: string): boolean {
 
 program.hook("preAction", (_thisCommand, actionCommand) => {
   const opts = actionCommand.optsWithGlobals() as GlobalOpts;
+  // `--no-color` is intentionally read from the ROOT program opts, NOT from the
+  // merged `opts` above — it's a root-only global (see globals.ts). Do NOT
+  // "consistency-fix" this to `opts.color`; the flag isn't on subcommands, so that
+  // would silently always read undefined and break --no-color.
   if (program.opts<GlobalOpts>().color === false) configureColor(false);
   if (opts.json) setJsonMode(true);
   if (!opts.json && process.stderr.isTTY) {
