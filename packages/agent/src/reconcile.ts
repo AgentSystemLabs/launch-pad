@@ -135,7 +135,7 @@ export async function applyActions(actions: Action[], ctx: ApplyContext): Promis
       if ("config" in action) {
         ctx.errors.set(
           serviceKey(action.config.project, action.config.service),
-          (error as Error).message,
+          error instanceof Error ? error.message : String(error),
         );
       }
     }
@@ -211,5 +211,3 @@ async function rolloutService(
 
   if (hasIngress) await ctx.refreshCaddy();
 }
-
-export { containerName };

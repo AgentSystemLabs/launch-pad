@@ -46,9 +46,3 @@ export const RolloutSchema = z
   })
   .strict();
 export type Rollout = z.infer<typeof RolloutSchema>;
-
-export const DEFAULT_ROLLOUT: Rollout = {
-  maxSurge: 1,
-  drainTimeout: "20s",
-  stopGrace: "30s",
-};

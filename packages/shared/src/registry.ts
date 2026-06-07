@@ -66,13 +66,3 @@ export function parseNodeRegistryEntry(input: unknown): NodeRegistryEntry {
 export function agentIdForNode(nodeId: string): string {
   return `agent-${nodeId}`;
 }
-
-export function allocatableCpu(node: Pick<NodeRegistryEntry, "totalCpu" | "reservedCpu">): number {
-  return node.totalCpu - node.reservedCpu;
-}
-
-export function allocatableMemory(
-  node: Pick<NodeRegistryEntry, "totalMemory" | "reservedMemory">,
-): number {
-  return node.totalMemory - node.reservedMemory;
-}

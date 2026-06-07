@@ -23,6 +23,4 @@ export const symbols = {
   warn: "⚠",
   info: "ℹ",
   step: "▸",
-  bullet: "•",
-  arrow: "→",
 } as const;

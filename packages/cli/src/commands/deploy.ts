@@ -24,6 +24,7 @@ import {
   snapshotConfigBaseline,
   emptyDesiredState,
   envProject,
+  isWebService,
   LABEL_REGEX,
   mergeProjectServices,
   nodeRegistryKey,
@@ -551,7 +552,7 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
   const edgeIds = new Set<string>();
   for (const s of services) {
     const nodeIds = usesClusterPlacement(s) ? [...clusterAppNodeIds] : targetNodes(s);
-    const isWeb = s.domain !== undefined && s.port !== undefined;
+    const isWeb = isWebService(s);
     const edge = isWeb ? (s.edge ?? clusterDefaultEdge) : null;
     if (isWeb && nodeIds.length > 1 && !edge) {
       throw new CliError(`service "${s.name}" spans ${nodeIds.length} nodes but has no edge to load-balance them`, {
@@ -596,7 +597,7 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
   const frontingEdgesByNode = new Map<string, Set<string>>();
   for (const s of services) {
     const r = resolved.get(s.name) as Resolved;
-    const isWeb = s.domain !== undefined && s.port !== undefined;
+    const isWeb = isWebService(s);
     for (const p of distributeReplicas(r.nodeIds, s.replicas)) {
       const d = demandByNode.get(p.nodeId) ?? { cpu: 0, memory: 0, surgeCpu: 0, surgeMemory: 0 };
       d.cpu += s.cpu * p.replicas;

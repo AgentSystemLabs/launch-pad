@@ -13,13 +13,13 @@ import {
 import type { ManagedReplica } from "./docker";
 
 /** Where docker's json-file driver writes each container's stdout/stderr. */
-export const DOCKER_CONTAINERS_DIR = "/var/lib/docker/containers";
+const DOCKER_CONTAINERS_DIR = "/var/lib/docker/containers";
 
 /** The combined (system + container) config the agent applies; replaces the boot-time base. */
-export const CW_COMBINED_CONFIG_PATH = "/etc/launch-pad/cw-agent-combined.json";
+const CW_COMBINED_CONFIG_PATH = "/etc/launch-pad/cw-agent-combined.json";
 
 /** CloudWatch Agent control binary on Amazon Linux 2023. */
-export const CW_AGENT_CTL = "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl";
+const CW_AGENT_CTL = "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl";
 
 /** Docker json-file log path for a container id. */
 export function containerLogFilePath(containerId: string): string {

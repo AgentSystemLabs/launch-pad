@@ -115,6 +115,6 @@ export async function applyCaddy(routes: WebRoute[]): Promise<CaddyOutcome> {
     lastReloadAt = new Date().toISOString();
     return { managed, lastReloadAt, error: null };
   } catch (error) {
-    return { managed, lastReloadAt, error: (error as Error).message };
+    return { managed, lastReloadAt, error: error instanceof Error ? error.message : String(error) };
   }
 }

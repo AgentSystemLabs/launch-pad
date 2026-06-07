@@ -51,11 +51,6 @@ export function serviceKey(project: string, service: string): string {
   return `${project}/${service}`;
 }
 
-/** True when a service's domain is served by a remote edge node (not co-located). */
-export function isRemoteEdge(c: ServiceConfig): boolean {
-  return c.ingress != null && c.ingress.edge != null;
-}
-
 export function parseDesiredState(input: unknown): DesiredState {
   return DesiredStateSchema.parse(input);
 }

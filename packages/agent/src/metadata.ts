@@ -32,8 +32,3 @@ export async function getPrivateIp(): Promise<string> {
   cachedPrivateIp = ip;
   return ip;
 }
-
-/** Test hook: reset cached IMDS value. */
-export function resetPrivateIpCache(): void {
-  cachedPrivateIp = null;
-}
