@@ -86,9 +86,9 @@ dnf install -y nodejs`;
 
   const fetchAgent =
     agentType === "rust"
-      ? `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent
+      ? `curl -fsSL ${shellQuote(params.bundleUrl)} -o /opt/launch-pad/agent
 chmod +x /opt/launch-pad/agent`
-      : `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent.cjs`;
+      : `curl -fsSL ${shellQuote(params.bundleUrl)} -o /opt/launch-pad/agent.cjs`;
 
   return `#!/bin/bash
 set -euxo pipefail
@@ -116,4 +116,8 @@ systemctl daemon-reload
 systemctl enable --now launch-pad-agent
 
 ${cloudwatch}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

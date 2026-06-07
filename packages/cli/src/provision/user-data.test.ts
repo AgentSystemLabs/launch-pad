@@ -38,6 +38,16 @@ describe("renderUserData", () => {
     expect(script).toContain("systemctl enable --now launch-pad-agent");
   });
 
+  it("shell-quotes the agent bundle URL", () => {
+    const unsafeUrl = "https://example.s3.amazonaws.com/agent.cjs?x=$(touch /tmp/pwn)&quote='";
+    const unsafeScript = renderUserData({ agent, bundleUrl: unsafeUrl });
+
+    expect(unsafeScript).toContain(
+      "curl -fsSL 'https://example.s3.amazonaws.com/agent.cjs?x=$(touch /tmp/pwn)&quote='\\''' -o /opt/launch-pad/agent.cjs",
+    );
+    expect(unsafeScript).not.toContain(`curl -fsSL "${unsafeUrl}"`);
+  });
+
   it("runs Caddy on an edge/both node", () => {
     expect(script).toContain("caddy run --config /etc/launch-pad/caddy-init.json");
     expect(script).toContain("systemctl enable --now caddy");
