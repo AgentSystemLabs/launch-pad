@@ -1,14 +1,23 @@
 import { z } from "zod";
 import { type LaunchPadConfig, type ServiceDecl } from "./config";
-import { LAUNCH_PAD_ENVIRONMENT } from "./constants";
+import { CONFIG_BASELINE_VERSION, LAUNCH_PAD_ENVIRONMENT } from "./constants";
 import type { HealthCheck, Rollout } from "./health";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import type { Ingress } from "./desired";
 
-/** Frozen snapshot of launch-pad.toml written after the first successful deploy. */
+/**
+ * Frozen snapshot of launch-pad.toml written after the first successful deploy.
+ *
+ * ⚠️ The per-service shape below is a hand-maintained mirror of `ServiceDeclSchema`
+ * (config.ts). The config lock can only forbid post-deploy changes to fields it
+ * SNAPSHOTS — so if you add a field to `ServiceDeclSchema` that should be locked,
+ * you MUST add it here AND to `serviceSnapshot` below, or the lock will silently
+ * fail to catch changes to that field. (cpu/memory are deliberately excluded from
+ * locking; see `lockedServiceView`.)
+ */
 export const ConfigBaselineSchema = z
   .object({
-    version: z.literal(1),
+    version: z.literal(CONFIG_BASELINE_VERSION),
     project: z.string().min(1),
     domainPattern: z.string().min(1).optional(),
     services: z
@@ -71,7 +80,7 @@ function serviceSnapshot(decl: ServiceDecl): ConfigBaseline["services"][number] 
 /** Build a deterministic baseline snapshot from a parsed launch-pad.toml. */
 export function snapshotConfigBaseline(config: LaunchPadConfig, lockedAt: string): ConfigBaseline {
   return {
-    version: 1,
+    version: CONFIG_BASELINE_VERSION,
     project: config.project,
     ...(config.domainPattern !== undefined ? { domainPattern: config.domainPattern } : {}),
     services: [...config.service]
@@ -141,7 +150,7 @@ export function baselineFromDeployedFootprints(
   lockedAt: string,
 ): ConfigBaseline {
   return {
-    version: 1,
+    version: CONFIG_BASELINE_VERSION,
     project: ownerProject,
     services: footprints
       .map((f) => ({

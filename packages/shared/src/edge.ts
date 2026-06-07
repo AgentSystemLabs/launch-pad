@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { DesiredState } from "./desired";
+import { type DesiredState, serviceKey } from "./desired";
 import type { NodeRegistryEntry } from "./registry";
 import type { NodeStatus } from "./status";
 
@@ -52,12 +52,19 @@ export interface ClusterNode {
 }
 
 /**
- * Build the per-domain upstream list an edge should route to: for every app node
- * in the cluster, join its desired services (domain + edge ownership) with its
- * status (running, healthy replicas + host ports), keeping only services routed
- * by `edgeNodeId`.
+ * Build the per-domain upstream list by CROSS-READING other nodes' desired.json +
+ * status.json: for every app node in the cluster, join its desired services
+ * (domain + edge ownership) with its status (running, healthy replicas + host
+ * ports), keeping only services routed by `edgeNodeId`.
+ *
+ * ⚠️ This is NOT the production routing path and intentionally VIOLATES the
+ * "push-based routing, never cross-reads" invariant (see CLAUDE.md). The live
+ * edge agent uses `buildEdgeBackendsFromShards` (below), which reads only its own
+ * `upstream/*` prefix. This function is retained for tests / debugging that need
+ * to compute the expected routing table from raw node state — do not call it from
+ * the agent.
  */
-export function buildEdgeBackends(
+export function buildEdgeBackendsByCrossRead(
   edgeNodeId: string,
   nodes: ClusterNode[],
 ): Map<string, EdgeBackend[]> {
@@ -68,11 +75,13 @@ export function buildEdgeBackends(
     const privateIp = node.entry.privateIp;
     if (!privateIp || !node.desired || !node.status) continue;
 
-    const statusByKey = new Map(node.status.services.map((s) => [`${s.project}/${s.service}`, s]));
+    const statusByKey = new Map(
+      node.status.services.map((s) => [serviceKey(s.project, s.service), s]),
+    );
 
     for (const ds of node.desired.services) {
       if (!ds.ingress || ds.ingress.edge !== edgeNodeId) continue;
-      const st = statusByKey.get(`${ds.project}/${ds.service}`);
+      const st = statusByKey.get(serviceKey(ds.project, ds.service));
       if (!st) continue;
 
       for (const replica of st.replicas) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DesiredState } from "./desired";
 import {
-  buildEdgeBackends,
+  buildEdgeBackendsByCrossRead,
   buildEdgeBackendsFromShards,
   type ClusterNode,
   edgeHealthPathForDomain,
@@ -87,7 +87,7 @@ function status(nodeId: string, replicas: ReplicaStatus[]): NodeStatus {
   };
 }
 
-describe("buildEdgeBackends", () => {
+describe("buildEdgeBackendsByCrossRead", () => {
   it("collects running + healthy replicas across app nodes for owned domains", () => {
     const nodes: ClusterNode[] = [
       { entry: entry("edge-1", "10.0.0.1"), status: null, desired: null },
@@ -105,7 +105,7 @@ describe("buildEdgeBackends", () => {
         ]),
       },
     ];
-    const backends = buildEdgeBackends("edge-1", nodes);
+    const backends = buildEdgeBackendsByCrossRead("edge-1", nodes);
     const app = backends.get("app.example.com") ?? [];
     expect(app).toHaveLength(3); // app-1×2 + app-2×1
     expect(app).toContainEqual({ domain: "app.example.com", privateIp: "10.0.1.5", hostPort: 20001 });
@@ -125,7 +125,7 @@ describe("buildEdgeBackends", () => {
         status: status("app-2", [replica(0, 20001, "running", true)]),
       },
     ];
-    expect(buildEdgeBackends("edge-1", nodes).size).toBe(0);
+    expect(buildEdgeBackendsByCrossRead("edge-1", nodes).size).toBe(0);
   });
 });
 

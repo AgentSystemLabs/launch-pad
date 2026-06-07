@@ -36,6 +36,9 @@ export const ServiceStatusSchema = z
     message: z.string().default(""),
     /** Rollup container id (first running replica), kept for back-compat. */
     containerId: z.string().nullable().default(null),
+    // The per-replica model was added after the original rollup-only status.json,
+    // so these all carry back-compat defaults — an older document omits them and
+    // must still parse. Do NOT remove the defaults.
     replicas: z.array(ReplicaStatusSchema).default([]),
     desiredReplicas: z.number().int().min(0).default(0),
     runningReplicas: z.number().int().min(0).default(0),

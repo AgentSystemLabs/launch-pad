@@ -2,7 +2,17 @@ import { z } from "zod";
 import { PROTOCOL_VERSION } from "./constants";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 
-/** Web ingress. Null on a service means it's a background worker (no Caddy). */
+/**
+ * Web ingress. There are THREE distinct states a service can be in, encoded by
+ * two nullable fields — this tri-state is the most easily-misread part of the
+ * contract:
+ *
+ *   ingress === null            → background worker (no domain, no Caddy at all)
+ *   ingress.edge === null       → web service fronted by THIS node's co-located Caddy
+ *   ingress.edge === "<nodeId>" → web service fronted by a remote dedicated edge node
+ *
+ * Use `isRemoteEdge()` rather than re-checking the field by hand.
+ */
 export const IngressSchema = z
   .object({
     domain: z.string().min(1),
