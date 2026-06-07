@@ -92,12 +92,14 @@ async function main(): Promise<void> {
   // Listing cache so a stable edge / `both` node skips redundant per-shard GETs.
   const shardCache: ShardListCache = { fingerprint: null, shards: [] };
 
-  const port = (key: string, index: number): number => {
+  // Note: these allocate/release AND persist (saveState) — they are side-effecting
+  // actions, not plain getters, hence the verb names.
+  const allocateAndSavePort = (key: string, index: number): number => {
     const p = allocatePort(state, key, index);
     saveState(state);
     return p;
   };
-  const releasePortFn = (key: string, index: number): void => {
+  const releaseAndSavePort = (key: string, index: number): void => {
     releasePort(state, key, index);
     saveState(state);
   };
@@ -148,14 +150,15 @@ async function main(): Promise<void> {
       // Rebuild Caddy from co-located replicas + (for both) remote upstream shards.
       const refreshCaddy = async (excludeIds: Set<string> = new Set()): Promise<void> => {
         if (!hasCoLocatedWeb && !frontsRemoteApps) {
+          // This node never programs Caddy — nothing to route.
           caddyOutcome = NO_CADDY;
           return;
         }
+        // If we reach here the node DOES manage Caddy, so empty routes means "clear
+        // any stale config": fall through to applyCaddy([]), which pushes an empty
+        // server set. (An earlier guard re-testing !hasCoLocatedWeb && !frontsRemoteApps
+        // here was dead — it can never be true past the return above.)
         const routes = await buildCaddyRoutes(excludeIds);
-        if (routes.length === 0 && !hasCoLocatedWeb && !frontsRemoteApps) {
-          caddyOutcome = NO_CADDY;
-          return;
-        }
         caddyOutcome = await applyCaddy(routes);
       };
 
@@ -190,12 +193,12 @@ async function main(): Promise<void> {
         }
       };
 
-      const before = await inspectManaged();
-      const actions = planReconcile(desired, before);
+      const liveReplicas = await inspectManaged();
+      const actions = planReconcile(desired, liveReplicas);
       await applyActions(actions, {
         bindHost,
-        port,
-        releasePort: releasePortFn,
+        port: allocateAndSavePort,
+        releasePort: releaseAndSavePort,
         refreshCaddy,
         heartbeat,
         errors,

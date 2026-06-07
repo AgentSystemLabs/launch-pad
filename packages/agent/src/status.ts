@@ -64,6 +64,11 @@ export function buildStatus(
         hostPort: r.hostPort,
         state,
         image: r.image,
+        // NOTE: this mirrors RUNNING state, not the active health-probe result —
+        // a container can be running while still failing its health check. The
+        // edge only routes to replicas the agent already health-gated into the LB
+        // during rollout, so "running" is a sufficient signal here; rename/wire in
+        // the real probe result if that ever stops being true.
         healthy: state === "running",
       };
     });

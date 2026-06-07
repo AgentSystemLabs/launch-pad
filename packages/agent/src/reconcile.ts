@@ -16,6 +16,20 @@ import {
 } from "./docker";
 import { waitHealthy } from "./health";
 
+/**
+ * Floor on how long a rollout waits for a freshly-surged replica to pass its
+ * health check before aborting — even a service with very tight probe timings
+ * gets at least this long to cold-start.
+ */
+const MIN_HEALTH_CEILING_MS = 30_000;
+
+/**
+ * How many full health-check cycles (timeout+interval, repeated `healthyThreshold`
+ * times) a surged replica is allowed before the rollout gives up. 8× is generous
+ * slack so a slow cold start isn't mistaken for a failed deploy.
+ */
+const HEALTH_CEILING_CYCLES = 8;
+
 export type Action =
   | { type: "create"; config: ServiceConfig; index: number }
   | { type: "start"; config: ServiceConfig; index: number; id: string }
@@ -55,6 +69,12 @@ export function planReconcile(
       continue;
     }
 
+    // A `start` is a bare `docker start` of the EXISTING container, so it's only
+    // safe because the `replicaNeedsReplace` branch above already short-circuited
+    // (via `continue`) any replica whose image/cpu/memory drifted — a stopped
+    // replica that reaches here is guaranteed to still match desired. Do not move
+    // this branch above the replace check or a `start` could resurrect a stale
+    // container.
     const stopped = have.filter((r) => r.state !== "running");
     for (const r of stopped) {
       actions.push({ type: "start", config: c, index: r.index, id: r.id });
@@ -132,6 +152,12 @@ export async function applyActions(actions: Action[], ctx: ApplyContext): Promis
           break;
       }
     } catch (error) {
+      // Per-action failures are intentionally ISOLATED: record the error against
+      // the service (it surfaces in the service's status message) and keep going,
+      // so one bad service — a failed pull, an unschedulable container — can't
+      // wedge reconciliation for every other service. The next tick retries this
+      // action from scratch, which is why the loop is crash-safe. Never rethrow
+      // here.
       if ("config" in action) {
         ctx.errors.set(
           serviceKey(action.config.project, action.config.service),
@@ -148,40 +174,55 @@ export async function applyActions(actions: Action[], ctx: ApplyContext): Promis
  * ≥1 healthy upstream for the domain, so there is no downtime.
  */
 async function rolloutService(
-  c: ServiceConfig,
+  config: ServiceConfig,
   current: ManagedReplica[],
   ctx: ApplyContext,
 ): Promise<void> {
-  const key = serviceKey(c.project, c.service);
-  const want = c.replicas;
-  const surge = c.rollout.maxSurge;
-  const drainMs = parseDurationMs(c.rollout.drainTimeout);
-  const graceSec = Math.max(1, Math.ceil(parseDurationMs(c.rollout.stopGrace) / 1000));
-  const hc = c.healthCheck;
-  const hasIngress = c.ingress != null;
+  const key = serviceKey(config.project, config.service);
+  const want = config.replicas;
+  const surge = config.rollout.maxSurge;
+  const drainMs = parseDurationMs(config.rollout.drainTimeout);
+  const graceSec = Math.max(1, Math.ceil(parseDurationMs(config.rollout.stopGrace) / 1000));
+  const healthCheck = config.healthCheck;
+  const hasIngress = config.ingress != null;
 
-  await pull(c.image);
+  await pull(config.image);
 
-  const oldQueue = current.filter((r) => replicaNeedsReplace(r, c));
-  let newCount = current.filter((r) => !replicaNeedsReplace(r, c)).length;
+  const oldQueue = current.filter((r) => replicaNeedsReplace(r, config));
+  let newCount = current.filter((r) => !replicaNeedsReplace(r, config)).length;
   let nextIndex = current.reduce((m, r) => Math.max(m, r.index), -1) + 1;
   const draining = new Set<string>();
 
+  // Hand-rolled state machine with three branches, run until convergence:
+  //   1. surge   — too few new replicas and headroom under want+surge → start one
+  //   2. drain   — new replicas satisfied but old ones remain → retire one old
+  //   3. break   — no old left and new count met → done
+  // Termination: every surge increments newCount (or returns on health failure)
+  // and every drain shrinks oldQueue, so `oldQueue.length + newCount` strictly
+  // progresses toward `want` — the loop cannot spin forever.
   for (;;) {
     const total = oldQueue.length + newCount;
     if (newCount < want && total < want + surge) {
-      // Surge a new replica.
+      // Branch 1: surge a new replica.
       const idx = nextIndex;
       nextIndex += 1;
       const hostPort = hasIngress ? ctx.port(key, idx) : undefined;
-      await runContainer({ config: c, index: idx, hostPort, bindHost: ctx.bindHost(c) });
+      await runContainer({ config, index: idx, hostPort, bindHost: ctx.bindHost(config) });
 
-      if (hc && hostPort !== undefined) {
-        const ceiling = Math.max(30_000, (hc.timeoutMs + hc.intervalMs) * hc.healthyThreshold * 8);
-        if (!(await waitHealthy(hostPort, hc, ceiling))) {
-          await stopContainer(containerName(c.project, c.service, idx), graceSec);
+      if (healthCheck && hostPort !== undefined) {
+        const ceiling = Math.max(
+          MIN_HEALTH_CEILING_MS,
+          (healthCheck.timeoutMs + healthCheck.intervalMs) *
+            healthCheck.healthyThreshold *
+            HEALTH_CEILING_CYCLES,
+        );
+        if (!(await waitHealthy(hostPort, healthCheck, ceiling))) {
+          await stopContainer(containerName(config.project, config.service, idx), graceSec);
           ctx.releasePort(key, idx);
-          ctx.errors.set(key, `rollout aborted: new replica failed health check for ${c.image}`);
+          ctx.errors.set(
+            key,
+            `rollout aborted: new replica failed health check for ${config.image}`,
+          );
           if (hasIngress) await ctx.refreshCaddy(draining);
           return;
         }
@@ -192,7 +233,7 @@ async function rolloutService(
         await ctx.heartbeat();
       }
     } else if (oldQueue.length > 0) {
-      // Drain + graceful-stop one old replica.
+      // Branch 2: drain + graceful-stop one old replica.
       const old = oldQueue.shift() as ManagedReplica;
       if (hasIngress) {
         draining.add(old.id);

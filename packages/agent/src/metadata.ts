@@ -1,5 +1,10 @@
+// 169.254.169.254 is the AWS link-local Instance Metadata Service (IMDS) address.
 const IMDS_BASE = "http://169.254.169.254";
 const IMDS_LOCAL_IP = `${IMDS_BASE}/latest/meta-data/local-ipv4`;
+/** IMDSv2 token lifetime — 6h, the AWS maximum, as a string for the HTTP header. */
+const IMDS_TOKEN_TTL_SECONDS = "21600";
+/** Per-request timeout for IMDS calls (it's link-local, so it should answer fast). */
+const IMDS_TIMEOUT_MS = 2_000;
 
 let cachedPrivateIp: string | null = null;
 
@@ -7,8 +12,8 @@ let cachedPrivateIp: string | null = null;
 async function imdsToken(): Promise<string> {
   const res = await fetch(`${IMDS_BASE}/latest/api/token`, {
     method: "PUT",
-    headers: { "X-aws-ec2-metadata-token-ttl-seconds": "21600" },
-    signal: AbortSignal.timeout(2_000),
+    headers: { "X-aws-ec2-metadata-token-ttl-seconds": IMDS_TOKEN_TTL_SECONDS },
+    signal: AbortSignal.timeout(IMDS_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`IMDS token returned ${res.status}`);
@@ -22,7 +27,7 @@ export async function getPrivateIp(): Promise<string> {
   const token = await imdsToken();
   const res = await fetch(IMDS_LOCAL_IP, {
     headers: { "X-aws-ec2-metadata-token": token },
-    signal: AbortSignal.timeout(2_000),
+    signal: AbortSignal.timeout(IMDS_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`IMDS local-ipv4 returned ${res.status}`);
