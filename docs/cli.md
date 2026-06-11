@@ -816,3 +816,17 @@ mid-rollout) doesn't alert. It **exits non-zero** when there's any alert, so a s
 gate on it; with `--webhook` it also POSTs a Slack/Discord-compatible payload (`text` summary +
 structured `alerts`). The webhook URL is operator-supplied (keep it out of source — use the env
 var or a CI secret).
+
+## `completions`
+
+Print a shell-completion script for `launch-pad` / `lpd`, generated from the live command tree
+(so it never drifts from the real commands).
+
+```bash
+launch-pad completions bash  >> ~/.bash_completion
+launch-pad completions zsh   > "${fpath[1]}/_launch-pad"   # then run: compinit
+launch-pad completions fish  > ~/.config/fish/completions/launch-pad.fish
+```
+
+Completes top-level commands, their subcommands (e.g. `node create`, `cluster use`), and the
+global flags. Supported shells: `bash`, `zsh`, `fish`.

@@ -168,7 +168,12 @@ Shipped:
 - [ ] **`launch-pad init` improvements** — detect existing Dockerfile/ports; scaffold health check path from framework; multi-service monorepo template.
 - [ ] **Monorepo / multi-service deploy** — first-class “deploy changed services only” (git diff → `--service` list).
 - [ ] **Preview environments** — `deploy --env pr-123` with automatic DNS pattern + TTL teardown (env flag exists; full PR lifecycle automation does not).
-- [ ] **Shell completions** — bash/zsh/fish for `launch-pad` / `lpd`.
+- [x] **Shell completions** — `launch-pad completions <bash|zsh|fish>` prints a completion script
+  generated from the **live commander tree** (so it never drifts from the real commands), wired for
+  both `launch-pad` and `lpd` bins. Completes top-level commands, their subcommands (`node create`,
+  `cluster use`, …), and global flags. Pure `commandTree` + per-shell `generateCompletion`
+  (`cli/src/completions/generate.ts`) unit-tested (5); each generated script validated for syntax
+  (`bash -n`, `zsh -n`) + a functional bash check (prefix-filter + subcommand expansion).
 - [ ] **Global npm install story** — `npx` works; document global install, version pinning, and upgrade path for non-Node shops.
 
 ### Platform & integrations
