@@ -36,6 +36,7 @@ function svc(project: string, service: string, image: string, replicas = 1): Ser
     ingress: null,
     healthCheck: null,
     rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+    volumes: [],
   };
 }
 

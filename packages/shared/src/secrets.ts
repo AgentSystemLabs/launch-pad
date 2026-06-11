@@ -68,13 +68,19 @@ function stableJson(value: unknown): string {
 
 /**
  * Fingerprint of runtime config the agent stamps on containers. Uses secret ref
- * paths (not SSM values) plus plain env and restartAt.
+ * paths (not SSM values) plus plain env, restartAt, and volume mounts — so a change
+ * to any of them forces the container to be replaced on the next reconcile. (Volumes
+ * are config-locked and so normally never change, but stamping them is cheap defense.)
  */
 export function serviceConfigStamp(config: ServiceConfig): string {
   const refs = [...(config.secretRefs ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  const volumes = [...(config.volumes ?? [])].sort((a, b) => a.name.localeCompare(b.name));
   return stableJson({
     env: config.env,
     secretRefs: refs,
     restartAt: config.restartAt ?? null,
+    // Omitted when empty so a volume-less service keeps its pre-volumes stamp — an
+    // agent upgrade then doesn't needlessly roll every existing (volume-less) container.
+    ...(volumes.length > 0 ? { volumes } : {}),
   });
 }

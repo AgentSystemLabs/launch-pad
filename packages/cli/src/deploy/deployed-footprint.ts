@@ -54,6 +54,7 @@ export function buildPlacementSnapshot(
           ingress: s.ingress,
           healthCheck: s.healthCheck,
           rollout: { ...s.rollout },
+          volumes: s.volumes.map((v) => ({ ...v })),
         });
         continue;
       }

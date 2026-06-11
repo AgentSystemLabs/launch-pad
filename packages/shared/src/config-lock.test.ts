@@ -31,6 +31,7 @@ const baseConfig: LaunchPadConfig = {
       healthCheck: { path: "/healthz", intervalMs: 2000, timeoutMs: 2000, healthyThreshold: 2 },
       rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
       secrets: [],
+      volumes: [],
     },
   ],
 };
@@ -56,6 +57,7 @@ const webFootprint: DeployedFootprint = {
   ingress: { domain: "app.agentsystem.dev", port: 3000, edge: "node-edge" },
   healthCheck: { path: "/healthz", port: 3000, intervalMs: 2000, timeoutMs: 2000, healthyThreshold: 2 },
   rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+  volumes: [],
 };
 
 describe("snapshotConfigBaseline", () => {
@@ -277,5 +279,64 @@ describe("findConfigLockViolations (baseline reconstructed from desired.json)", 
     const recon = baselineFromDeployedFootprints("edge-express-web", [envFootprint], "now");
     // current TOML declares only NODE_ENV — the injected var must not look like a change.
     expect(findConfigLockViolations(recon, baseline(), opts)).toEqual([]);
+  });
+});
+
+describe("config lock — persistent volumes are locked identity", () => {
+  // A volume-bearing service must be pinned, so it carries `node` (no edge/web here).
+  const pinnedWithVol = (volumes: Array<{ name: string; path: string }>): LaunchPadConfig => ({
+    project: "edge-express-web",
+    service: [
+      {
+        name: "web",
+        node: "node-app",
+        edge: "node-edge",
+        schedule: "even",
+        topology: "auto",
+        dockerfile: "./Dockerfile",
+        context: ".",
+        replicas: 1,
+        cpu: 256,
+        memory: 256,
+        env: { NODE_ENV: "production" },
+        domain: "app.agentsystem.dev",
+        port: 3000,
+        healthCheck: { path: "/healthz", intervalMs: 2000, timeoutMs: 2000, healthyThreshold: 2 },
+        rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+        secrets: [],
+        volumes,
+      },
+    ],
+  });
+
+  it("allows an unchanged volume set", () => {
+    const base = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/data" }]), "t");
+    const cur = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/data" }]), "t2");
+    expect(findConfigLockViolations(base, cur)).toEqual([]);
+  });
+
+  it("rejects adding, removing, or changing a volume after the first deploy", () => {
+    const base = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/data" }]), "t");
+    const added = snapshotConfigBaseline(
+      pinnedWithVol([{ name: "data", path: "/data" }, { name: "cache", path: "/cache" }]),
+      "t2",
+    );
+    const movedPath = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/var/data" }]), "t2");
+    const removed = snapshotConfigBaseline(pinnedWithVol([]), "t2");
+    for (const cur of [added, movedPath, removed]) {
+      const v = findConfigLockViolations(base, cur);
+      expect(v.length).toBeGreaterThan(0);
+      expect(v[0]!.path).toContain("web");
+    }
+  });
+
+  it("compares equal to a baseline reconstructed from desired.json (volumes carried on the wire)", () => {
+    const base = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/data" }]), "t");
+    const reconstructed = baselineFromDeployedFootprints(
+      "edge-express-web",
+      [{ ...webFootprint, volumes: [{ name: "data", path: "/data" }] }],
+      "t2",
+    );
+    expect(findConfigLockViolations(base, reconstructed, { baselineFromDesired: true })).toEqual([]);
   });
 });

@@ -279,6 +279,7 @@ export function toServiceConfig(
       ? { ...b.decl.healthCheck, port: b.decl.healthCheck.port ?? b.decl.port }
       : null,
     rollout: b.decl.rollout,
+    volumes: b.decl.volumes.map((v) => ({ ...v })),
   };
   if (restart) cfg.restartAt = nowIso();
   return cfg;
@@ -455,6 +456,22 @@ function assertCapacity(nodeId: string, node: NodeRegistryEntry, merged: Capacit
         .map((l) => `  ${l}`)
         .join("\n"),
     { hint: "reduce cpu/memory/replicas, move a service to another node, or use a larger instance type" },
+  );
+}
+
+/**
+ * Persistent volumes are mounted only by the TypeScript agent today. Publishing a
+ * volume-bearing service to a rust-agent node would parse fine but silently drop the
+ * mount (losing the data), so refuse it up front with a clear remedy.
+ */
+export function assertVolumesSupported(nodeId: string, node: NodeRegistryEntry, placed: NodeService[]): void {
+  if (node.agentType !== "rust") return;
+  const withVolumes = placed.filter((p) => p.built.decl.volumes.length > 0).map((p) => p.built.decl.name);
+  if (withVolumes.length === 0) return;
+  throw new CliError(
+    `node "${nodeId}" runs the rust agent, which doesn't mount persistent volumes yet — ` +
+      `service(s) ${withVolumes.join(", ")} declare [[service.volumes]]`,
+    { hint: `re-create the node with the TypeScript agent: launch-pad node create ${nodeId} --agent ts` },
   );
 }
 
@@ -1334,6 +1351,13 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     priorPlacement && !opts.service
       ? priorPlacement.occupiedNodeIds.filter((id) => !nodePlacements.has(id))
       : [];
+
+  // Persistent volumes are only mounted by the TypeScript agent today — refuse to
+  // publish a volume-bearing service to a rust-agent node, which would silently drop
+  // the mount and lose the data. Checked here, before any build or write.
+  for (const [id, placed] of nodePlacements) {
+    assertVolumesSupported(id, nodes.get(id) as NodeRegistryEntry, placed);
+  }
 
   // Capacity pre-flight per node BEFORE building.
   for (const [id, placed] of nodePlacements) {

@@ -58,6 +58,8 @@ importers:
         specifier: ^4.21.2
         version: 4.22.2
 
+  examples/worker-with-volume: {}
+
   packages/agent:
     dependencies:
       '@agentsystemlabs/launch-pad-shared':

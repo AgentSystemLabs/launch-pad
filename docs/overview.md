@@ -281,8 +281,9 @@ auto-updates on new pushes.
 **Shipped since this MVP framing** (originally listed out of scope, now built): the
 multi-node **cluster scheduler** (auto-placement by `schedule`/`topology`),
 **health-check-gated zero-downtime rollouts** (described below), the **secrets manager**
-(SSM SecureString + `launch-pad secret`), and an experimental local **dashboard**
-(`packages/dashboard`).
+(SSM SecureString + `launch-pad secret`), node-local **persistent volumes**
+(`[[service.volumes]]` — data survives a container replace), and an experimental local
+**dashboard** (`packages/dashboard`).
 
 **Still out of scope:** a hosted **API / control-plane** and managed **web app**, **billing**,
 and a central **orchestrator** (the agent is a per-node reconciler, not a central scheduler).

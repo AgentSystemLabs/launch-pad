@@ -15,6 +15,7 @@ const baseConfig: ServiceConfig = {
   ingress: null,
   healthCheck: null,
   rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+  volumes: [],
 };
 
 describe("resolveServiceEnv", () => {

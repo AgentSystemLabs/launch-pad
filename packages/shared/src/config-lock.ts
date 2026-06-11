@@ -4,6 +4,8 @@ import {
   type ServiceDecl,
   ServiceScheduleSchema,
   ServiceTopologySchema,
+  type VolumeDecl,
+  VolumeDeclSchema,
 } from "./config";
 import { CONFIG_BASELINE_VERSION, LAUNCH_PAD_ENVIRONMENT } from "./constants";
 import type { HealthCheck, Rollout } from "./health";
@@ -50,6 +52,9 @@ export const ConfigBaselineSchema = z
             healthCheck: HealthCheckSchema.optional(),
             rollout: RolloutSchema,
             secrets: z.array(z.string()).default([]),
+            // Locked identity: a service's persistent volumes can't change after the
+            // first deploy. Defaulted so baselines written before volumes existed parse.
+            volumes: z.array(VolumeDeclSchema).default([]),
           })
           .strict(),
       )
@@ -88,6 +93,7 @@ function serviceSnapshot(decl: ServiceDecl): ConfigBaseline["services"][number] 
       : {}),
     rollout: { ...decl.rollout },
     secrets: [...(decl.secrets ?? [])],
+    volumes: decl.volumes.map((v) => ({ ...v })),
   };
 }
 
@@ -126,6 +132,7 @@ export interface DeployedFootprint {
   healthCheck: HealthCheck | null;
   rollout: Rollout;
   secrets: string[];
+  volumes: VolumeDecl[];
 }
 
 export interface ConfigLockCompareOptions {
@@ -218,6 +225,7 @@ export function baselineFromDeployedFootprints(
         ...(f.healthCheck ? { healthCheck: { ...f.healthCheck } } : {}),
         rollout: { ...f.rollout },
         secrets: [...f.secrets],
+        volumes: f.volumes.map((v) => ({ ...v })),
       }))
       .sort((a, b) => a.name.localeCompare(b.name)),
     lockedAt,

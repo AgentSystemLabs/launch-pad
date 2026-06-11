@@ -85,6 +85,7 @@ const SUPPORTED_SERVICE_KEYS = new Set([
   "healthCheck",
   "rollout",
   "secrets",
+  "volumes",
 ]);
 
 /**
@@ -125,6 +126,38 @@ export type ServiceSchedule = z.infer<typeof ServiceScheduleSchema>;
 /** Ingress shape for cluster auto-placement (services without `node`/`nodes`). */
 export const ServiceTopologySchema = z.enum(["split", "co-located", "auto"]);
 export type ServiceTopology = z.infer<typeof ServiceTopologySchema>;
+
+export const VOLUME_PATH_HINT =
+  "an absolute container path with no '..' segments, e.g. /data or /var/lib/app";
+
+/** Returns a validation message, or null when the container mount path is well formed. */
+export function volumePathError(path: string): string | null {
+  if (!path.startsWith("/")) return `volume path must be absolute (start with /) — ${VOLUME_PATH_HINT}`;
+  if (path === "/") return "volume path can't be the container root /";
+  if (path.endsWith("/")) return "volume path must not end with a trailing /";
+  if (path.split("/").includes("..")) return "volume path must not contain '..' segments";
+  if (!/^\/[A-Za-z0-9._\-/]+$/.test(path)) return `volume path has invalid characters — ${VOLUME_PATH_HINT}`;
+  return null;
+}
+
+/**
+ * One `[[service.volumes]]` entry: a named, persistent docker volume mounted into the
+ * service's container(s) at `path`. The data lives on the node's disk and survives a
+ * container replacement (a rolling deploy / restart), so SQLite, uploads, and local
+ * caches don't reset on every deploy. See `docs/configuration.md`.
+ */
+export const VolumeDeclSchema = z
+  .object({
+    /** Volume name — unique within the service; used to derive the docker volume name. */
+    name: label("volume name"),
+    /** Absolute path inside the container where the volume is mounted. */
+    path: z.string().superRefine((p, ctx) => {
+      const err = volumePathError(p);
+      if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, message: err });
+    }),
+  })
+  .strict();
+export type VolumeDecl = z.infer<typeof VolumeDeclSchema>;
 
 /** One `[[service]]` block in launch-pad.toml. */
 export const ServiceDeclSchema = z
@@ -170,6 +203,8 @@ export const ServiceDeclSchema = z
     port: z.number().int().min(1).max(65535).optional(),
     healthCheck: HealthCheckSchema.optional(),
     rollout: RolloutSchema.default({}),
+    /** Persistent named volumes mounted into this service's container(s). */
+    volumes: z.array(VolumeDeclSchema).default([]),
   })
   .strict()
   .superRefine((s, ctx) => {
@@ -251,6 +286,46 @@ export const ServiceDeclSchema = z
         message:
           "a web service needs a [service.healthCheck] so rolling updates are gated on readiness (zero-downtime) — both the surge probe and Caddy's load-balancer health check depend on it",
         path: ["healthCheck"],
+      });
+    }
+    if (s.volumes.length > 0) {
+      // A persistent volume's data lives on ONE node's disk, so the service must be
+      // pinned there. Cluster auto-placement (or a future rebalance) could move it and
+      // strand the data; `nodes` would split a separate copy onto each node.
+      if (s.nodes !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "[[service.volumes]] can't be combined with `nodes` (multiple nodes) — the data would split per node; pin a single `node`",
+          path: ["volumes"],
+        });
+      } else if (s.node === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "a service with [[service.volumes]] must be pinned to a single `node` — its data lives on that node's disk, so cluster auto-placement isn't allowed",
+          path: ["volumes"],
+        });
+      }
+      const vNames = new Set<string>();
+      const vPaths = new Set<string>();
+      s.volumes.forEach((v, vi) => {
+        if (vNames.has(v.name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `duplicate volume name "${v.name}"`,
+            path: ["volumes", vi, "name"],
+          });
+        }
+        vNames.add(v.name);
+        if (vPaths.has(v.path)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `duplicate volume path "${v.path}"`,
+            path: ["volumes", vi, "path"],
+          });
+        }
+        vPaths.add(v.path);
       });
     }
   })

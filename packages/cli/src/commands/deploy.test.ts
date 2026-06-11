@@ -9,7 +9,14 @@ import { GetParametersCommand } from "@aws-sdk/client-ssm";
 import { describe, expect, it } from "vitest";
 import type { AwsEnv } from "../aws/context";
 import { CliError } from "../errors";
-import { assertSecretsPresent, enforceConfigLock, loadOverrideImage, toServiceConfig } from "./deploy";
+import type { NodeRegistryEntry } from "@agentsystemlabs/launch-pad-shared";
+import {
+  assertSecretsPresent,
+  assertVolumesSupported,
+  enforceConfigLock,
+  loadOverrideImage,
+  toServiceConfig,
+} from "./deploy";
 
 const OWNER = "edge-express-web";
 
@@ -324,5 +331,55 @@ describe("loadOverrideImage (deploy --image)", () => {
 
   it("rejects a tag that does not exist in ECR", async () => {
     await expect(loadOverrideImage(ecrAws(false), OWNER, decl(), VALID)).rejects.toThrow(/not found in ECR/);
+  });
+});
+
+describe("toServiceConfig — persistent volumes", () => {
+  const aws = { clusterId: "default" } as unknown as AwsEnv;
+
+  it("threads declared volumes into the published ServiceConfig", () => {
+    const decl = parseLaunchPadConfig({
+      project: "p",
+      service: [{ name: "db", node: "n1", cpu: 256, memory: 256, volumes: [{ name: "data", path: "/data" }] }],
+    }).service[0]!;
+    const cfg = toServiceConfig(aws, "p", { decl, image: "img:abc" }, 1, null, undefined, false);
+    expect(cfg.volumes).toEqual([{ name: "data", path: "/data" }]);
+  });
+
+  it("publishes an empty volume list for a service without volumes", () => {
+    const decl = parseLaunchPadConfig({
+      project: "p",
+      service: [{ name: "w", node: "n1", cpu: 256, memory: 256 }],
+    }).service[0]!;
+    const cfg = toServiceConfig(aws, "p", { decl, image: "img:abc" }, 1, null, undefined, false);
+    expect(cfg.volumes).toEqual([]);
+  });
+});
+
+describe("assertVolumesSupported — rust-agent gate", () => {
+  const node = (agentType: "ts" | "rust"): NodeRegistryEntry => ({ nodeId: "n1", agentType } as NodeRegistryEntry);
+  const placed = (volumes: Array<{ name: string; path: string }>) => {
+    const decl = parseLaunchPadConfig({
+      project: "p",
+      service: [{ name: "db", node: "n1", cpu: 256, memory: 256, volumes }],
+    }).service[0]!;
+    return [{ built: { decl }, replicas: 1 }] as unknown as Parameters<typeof assertVolumesSupported>[2];
+  };
+
+  it("refuses a volume-bearing service on a rust-agent node, naming the service + remedy", () => {
+    expect(() => assertVolumesSupported("n1", node("rust"), placed([{ name: "data", path: "/data" }]))).toThrow(
+      /rust agent.*doesn't mount persistent volumes/,
+    );
+    expect(() => assertVolumesSupported("n1", node("rust"), placed([{ name: "data", path: "/data" }]))).toThrow(
+      /db/,
+    );
+  });
+
+  it("allows a volume-bearing service on a TypeScript-agent node", () => {
+    expect(() => assertVolumesSupported("n1", node("ts"), placed([{ name: "data", path: "/data" }]))).not.toThrow();
+  });
+
+  it("allows a volume-less service on any agent (including rust)", () => {
+    expect(() => assertVolumesSupported("n1", node("rust"), placed([]))).not.toThrow();
   });
 });

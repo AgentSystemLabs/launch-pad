@@ -72,7 +72,15 @@ LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:history       # deploy history
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:node-iam      # node destroy deletes the per-node IAM role/profile (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:operator-iam  # the generated operator IAM policy is sufficient (and scoped)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rebalance     # rebalance + node evacuate move cluster-placed replicas
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:volumes       # persistent volume data survives a container replace (--agent ts)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:idle          # cost flags an idle (paused) node (no deploy)
 ```
+
+`e2e:volumes` provisions one `both` node on the **TypeScript agent** (`--agent ts`), deploys a
+worker pinned to it with a `/data` volume that appends a boot line on every container start, then
+`deploy --restart`s to replace the container and asserts (via `launch-pad logs`) the boot count
+went 1 → 2 — the same volume was re-mounted, so the data survived the replace. It also confirms
+the config lock refuses a post-deploy volume-path change.
 
 `e2e:rebalance` provisions two `both` nodes, deploys a cluster-placed worker at `replicas = 3`
 (even → 2+1), evacuates one node (replicas consolidate onto the other), `rebalance`s back (they

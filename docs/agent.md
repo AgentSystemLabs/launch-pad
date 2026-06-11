@@ -51,10 +51,15 @@ re-publishes every `LIVENESS_HEARTBEAT_MS` (30s) as a liveness heartbeat so the 
 staleness check (60s) stays reliable; mid-rollout and error paths always write.
 `LAUNCHPAD_DEBUG_S3=1` logs written-vs-skipped PUTs per tick.
 
-## Secrets, logs, stats
+## Secrets, volumes, logs, stats
 
 - **Secrets** (`secrets.ts`): resolves registered keys from SSM Parameter Store at container
   start and merges with plain `env` (plain wins on collision).
+- **Volumes** (`docker.ts` `volumeName`/`buildRunArgs`): mounts a service's declared
+  `[[service.volumes]]` as docker named volumes (`launchpadvol_<project>_<service>_<name>`,
+  index-independent so the data is re-mounted across rollouts). A `docker rm` leaves the
+  named volume intact, so the data outlives a container replacement. **TypeScript agent only**
+  today — deploy refuses to schedule a volume-bearing service onto a rust-agent node.
 - **Logs** (`cloudwatch-logs.ts`): reconciles the Amazon CloudWatch Agent config
   (write-on-change) so container stdout ships to per-service log groups; degraded-safe —
   logging failures never break reconciliation.

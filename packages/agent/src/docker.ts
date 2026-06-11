@@ -114,10 +114,27 @@ export interface RunSpec {
   bindHost: string;
 }
 
-export async function runContainer(spec: RunSpec): Promise<void> {
+/**
+ * Deterministic docker volume name for a service's persistent volume. Encodes the
+ * full (project, service, name) tuple so the SAME volume is re-mounted across container
+ * replacements (a rolling deploy / restart) — that's what makes the data persist. The
+ * three parts are all label-shaped (lowercase alnum + hyphen, no `_`), so the `_`
+ * separators stay unambiguous.
+ */
+export function volumeName(project: string, service: string, name: string): string {
+  return `launchpadvol_${project}_${service}_${name}`;
+}
+
+/**
+ * Build the `docker run` argv for a replica. Pure (env is resolved by the caller) so
+ * the mount/label/port wiring is unit-testable without spawning docker.
+ */
+export function buildRunArgs(
+  spec: RunSpec,
+  mergedEnv: Record<string, string>,
+  stamp: string,
+): string[] {
   const c = spec.config;
-  const mergedEnv = await resolveServiceEnv(c);
-  const stamp = serviceConfigStamp(c);
   const args = [
     "run",
     "-d",
@@ -146,6 +163,11 @@ export async function runContainer(spec: RunSpec): Promise<void> {
     "--memory",
     `${c.memory}m`,
   ];
+  // Persistent named volumes. Docker creates a missing named volume on first run and
+  // a `docker rm` (without -v) leaves it intact, so the data outlives the container.
+  for (const v of c.volumes ?? []) {
+    args.push("-v", `${volumeName(c.project, c.service, v.name)}:${v.path}`);
+  }
   for (const [key, value] of Object.entries(mergedEnv)) {
     args.push("-e", `${key}=${value}`);
   }
@@ -153,5 +175,12 @@ export async function runContainer(spec: RunSpec): Promise<void> {
     args.push("-p", `${spec.bindHost}:${spec.hostPort}:${c.ingress.port}`);
   }
   args.push(c.image);
-  await execa("docker", args);
+  return args;
+}
+
+export async function runContainer(spec: RunSpec): Promise<void> {
+  const c = spec.config;
+  const mergedEnv = await resolveServiceEnv(c);
+  const stamp = serviceConfigStamp(c);
+  await execa("docker", buildRunArgs(spec, mergedEnv, stamp));
 }

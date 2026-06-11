@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { VolumeDeclSchema } from "./config";
 import { PROTOCOL_VERSION } from "./constants";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import { SecretRefSchema } from "./secrets";
@@ -45,6 +46,13 @@ export const ServiceConfigSchema = z
     ingress: IngressSchema.nullable(),
     healthCheck: HealthCheckSchema.nullable().default(null),
     rollout: RolloutSchema.default({}),
+    /**
+     * Persistent named volumes the agent mounts into this service's container(s).
+     * Defaulted so a desired.json written before volumes existed still parses. The
+     * service is always pinned to one node (the config schema enforces it), so the
+     * volume's data has a stable home on that node's disk.
+     */
+    volumes: z.array(VolumeDeclSchema).default([]),
   })
   .strict();
 

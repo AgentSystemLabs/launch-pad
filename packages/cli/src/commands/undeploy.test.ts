@@ -29,6 +29,7 @@ function svc(project: string, service: string, patch: Partial<ServiceConfig> = {
     ingress: null,
     healthCheck: null,
     rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+    volumes: [],
     ...patch,
   };
 }

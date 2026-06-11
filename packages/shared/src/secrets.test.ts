@@ -74,6 +74,7 @@ describe("serviceConfigStamp", () => {
       ingress: null,
       healthCheck: null,
       rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+      volumes: [],
     };
     expect(serviceConfigStamp(cfg)).toBe(serviceConfigStamp({ ...cfg }));
   });
@@ -91,6 +92,7 @@ describe("serviceConfigStamp", () => {
       ingress: null,
       healthCheck: null,
       rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+      volumes: [],
     };
     expect(serviceConfigStamp(base)).not.toBe(
       serviceConfigStamp({ ...base, restartAt: "2026-06-09T00:00:00.000Z" }),
@@ -113,6 +115,7 @@ describe("serviceConfigStamp", () => {
       ingress: null,
       healthCheck: null,
       rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+      volumes: [],
     };
 
     const reversed = { ...base, secretRefs: [...base.secretRefs].reverse() };

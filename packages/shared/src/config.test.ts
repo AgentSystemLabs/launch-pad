@@ -386,3 +386,86 @@ describe("domainPattern validation", () => {
     expect(cfg.service[0]?.domainPattern).toBe("api-{env}.acme.com");
   });
 });
+
+describe("persistent volumes", () => {
+  const vol = (over: Record<string, unknown> = {}) => ({
+    name: "data",
+    cpu: 256,
+    memory: 256,
+    node: "node-dev-1",
+    volumes: [{ name: "data", path: "/data" }],
+    ...over,
+  });
+
+  it("parses a pinned service with a volume and defaults volumes to []", () => {
+    const cfg = parseLaunchPadConfig({ project: "p", service: [vol(), worker] });
+    expect(cfg.service[0]?.volumes).toEqual([{ name: "data", path: "/data" }]);
+    // a service without volumes gets the [] default
+    expect(cfg.service[1]?.volumes).toEqual([]);
+  });
+
+  it("allows a web service with a volume (single pinned node)", () => {
+    const cfg = parseLaunchPadConfig({
+      project: "p",
+      service: [{ ...web, volumes: [{ name: "uploads", path: "/var/uploads" }] }],
+    });
+    expect(cfg.service[0]?.volumes).toEqual([{ name: "uploads", path: "/var/uploads" }]);
+  });
+
+  it("requires a pinned `node` — rejects volumes on a cluster-placed service", () => {
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [{ name: "w", cpu: 256, memory: 256, volumes: [{ name: "data", path: "/data" }] }],
+      }),
+    ).toThrow(/must be pinned to a single `node`/);
+  });
+
+  it("rejects volumes combined with `nodes` (multi-node would split the data)", () => {
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [{ name: "w", cpu: 256, memory: 256, nodes: ["a", "b"], volumes: [{ name: "data", path: "/data" }] }],
+      }),
+    ).toThrow(/can't be combined with `nodes`/);
+  });
+
+  it("rejects a relative or root volume path", () => {
+    expect(() => parseLaunchPadConfig({ project: "p", service: [vol({ volumes: [{ name: "data", path: "data" }] })] })).toThrow(
+      /must be absolute/,
+    );
+    expect(() => parseLaunchPadConfig({ project: "p", service: [vol({ volumes: [{ name: "data", path: "/" }] })] })).toThrow(
+      /container root/,
+    );
+  });
+
+  it("rejects a volume path with a '..' segment", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [vol({ volumes: [{ name: "data", path: "/data/../etc" }] })] }),
+    ).toThrow(/'\.\.' segments/);
+  });
+
+  it("rejects duplicate volume names and duplicate paths", () => {
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [vol({ volumes: [{ name: "data", path: "/a" }, { name: "data", path: "/b" }] })],
+      }),
+    ).toThrow(/duplicate volume name/);
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [vol({ volumes: [{ name: "a", path: "/data" }, { name: "b", path: "/data" }] })],
+      }),
+    ).toThrow(/duplicate volume path/);
+  });
+
+  it("rejects an unknown key inside a volume", () => {
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [vol({ volumes: [{ name: "data", path: "/data", size: "10gb" }] })],
+      }),
+    ).toThrow();
+  });
+});

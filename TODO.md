@@ -107,7 +107,22 @@ Shipped:
 
 ### Data & stateful apps
 
-- [ ] **Persistent volumes** — EBS bind mounts / named volumes in TOML; survive container replace (critical for SQLite, uploads, local cache).
+- [x] **Persistent volumes** — `[[service.volumes]]` (`name` + container `path`) declares a node-local
+  docker named volume the agent mounts into the service's container(s); its data **survives a
+  container replace** (rolling deploy / `deploy --restart` / reboot) so SQLite, uploads, and local
+  caches don't reset on every deploy. A volume-bearing service must be **pinned to a single `node`**
+  (cluster auto-placement / `nodes` would move or split the data) and volumes are **config-locked
+  identity** (no add/remove/re-path after the first deploy). The volume name is per-service +
+  index-independent (`launchpadvol_<project>_<service>_<name>`) so it's re-mounted across the
+  index-renumbering rollout. TypeScript-agent only today — deploy **refuses** to publish a
+  volume-bearing service onto a rust-agent node (`assertVolumesSupported`) rather than silently drop
+  the mount. Schema in `shared/src/config.ts` (`VolumeDeclSchema` + validation) + `desired.ts`
+  (wire) + `config-lock.ts` (locked); mounts in `agent/src/docker.ts` (`buildRunArgs`/`volumeName`).
+  Unit-tested (config +8, config-lock +3, agent docker +4, deploy +7) + real-AWS regression
+  (`pnpm e2e:volumes`: deploy a `/data` worker → boot count 1 → `deploy --restart` replaces the
+  container → boot count 2 (data persisted) → config lock refuses a volume-path change). EBS-volume
+  attach (cross-node-failure durability) is a follow-up; named volumes give container-replace
+  durability on the node's root EBS. _(rust-agent volume support is a follow-up, like its secrets gap.)_
 - [ ] **Managed data plane helpers** — optional RDS Postgres / ElastiCache provisioning or “attach existing” wizard (indie hackers still need a database story).
 - [x] **Backup/restore** — `launch-pad backup` exports a cluster's authoritative S3 state (registry `cluster.json`/`node.json`, `desired.json`/`status.json`, config baselines, deploy events) to a local directory keyed by S3 key + a `manifest.json`; `launch-pad restore <dir>` re-uploads it (gated by a confirm / `--yes`). Read-only backup; state-only (no plaintext secrets — `desired.json` carries SSM refs, not values). Restore fails closed against a tampered backup dir: three pre-AWS guards (clean relative key / within the target cluster's keyspace / present in the manifest) + a per-file size cap, and symlinks are skipped. Default cluster sweeps the legacy `nodes/`+`projects/` roots; a named cluster sweeps `clusters/<id>/`. Pure planner (`cli/src/backup/plan.ts` — `backupPrefixesForCluster`/`isSafeBackupKey`/`keyUnderPrefixes`) unit-tested; security-reviewed (traversal guards confirmed sound; manifest-enforcement + size-cap hardening added). Real-AWS regression (`pnpm e2e:backup`: set up cluster + synthetic object → backup → delete from S3 → restore → assert byte-for-byte → cluster resolves again). ECR images are out of scope (immutable, rebuildable).
 

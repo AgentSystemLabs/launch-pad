@@ -53,6 +53,7 @@ port = 3000
 | `port` | Container port the app listens on (web services only). |
 | `[service.healthCheck]` | HTTP health check — **required for every web service**. |
 | `[service.rollout]` | Rolling-update tuning (`maxSurge`, `drainTimeout`, `stopGrace`). |
+| `[[service.volumes]]` | Persistent named volumes (`name` + container `path`) — data survives a container replace. Requires a pinned `node`. |
 
 ### Web service vs. background worker
 
@@ -89,6 +90,47 @@ even at `replicas = 1`.
 
 Apps should handle `SIGTERM` for graceful drain (see
 [`examples/both-node-web-worker`](../examples/both-node-web-worker)).
+
+### Persistent volumes
+
+A service can declare persistent named volumes. The data lives on the node's disk (a docker
+named volume on the root EBS volume) and **survives a container replacement** — a rolling
+deploy, a `deploy --restart`, or a node reboot — instead of resetting on every deploy. This is
+what SQLite databases, user uploads, and local caches need.
+
+```toml
+[[service]]
+name = "ledger"
+node = "node-1"          # required — see below
+cpu = 256
+memory = 256
+
+  [[service.volumes]]
+  name = "data"          # unique within the service
+  path = "/data"         # absolute container mount path
+
+  [[service.volumes]]
+  name = "uploads"
+  path = "/var/uploads"
+```
+
+Rules:
+
+- **A volume-bearing service must be pinned to a single `node`.** A volume's data has a home on
+  exactly one node's disk, so cluster auto-placement (which could move the service) and `nodes`
+  (which would split a separate copy onto each node) are rejected. For an exclusive-writer store
+  like SQLite, also keep `replicas = 1` — replicas on the same node share the volume.
+- **Volumes are config-locked identity** — like `domain`/`port`/placement, you can't add,
+  remove, or re-path a volume after the first deploy (re-create the footprint to change them).
+- The data is **kept** on `undeploy` / `node destroy` of the data (the volume isn't deleted), so
+  a redeploy reattaches it. It is **not** replicated and does **not** survive terminating the
+  instance — it's node-local durability, not a managed database.
+- Persistent volumes are mounted by the **TypeScript agent** (`node create --agent ts`). Deploy
+  refuses to publish a volume-bearing service to a node running the rust agent (it would silently
+  drop the mount). See [`examples/worker-with-volume`](../examples/worker-with-volume).
+- Upgrade a node's agent (`launch-pad node upgrade-agent`) to a volumes-aware build **before** the
+  first deploy from a volumes-aware CLI — that deploy adds the `volumes` field to every service in
+  the node's `desired.json`, which a pre-volumes agent won't parse.
 
 ## Placement
 
@@ -161,9 +203,9 @@ After the first successful deploy, the CLI freezes a baseline snapshot
 
 Everything else is the project's **identity / shape** and stays locked: placement
 (`node`/`nodes`/`edge`/`schedule`/`topology`), build inputs (`dockerfile`/`context`),
-domains, ports, health checks, and rollout settings. Changing a locked field — or adding or
-renaming a service — aborts the deploy *before* any build or push. There is no bypass flag;
-to change a locked field you re-create the footprint.
+domains, ports, health checks, rollout settings, and persistent `volumes`. Changing a locked
+field — or adding or renaming a service — aborts the deploy *before* any build or push. There
+is no bypass flag; to change a locked field you re-create the footprint.
 
 **Removing a service** is the one locked change with a sanctioned path: rather than delete a
 `[[service]]` block and have the next deploy abort with "service removed", run

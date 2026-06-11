@@ -1,0 +1,22 @@
+# A worker with a persistent named volume. Its data lives on the node's disk and
+# survives a container replacement (a rolling deploy / `deploy --restart`), so SQLite
+# files, uploads, and local caches don't reset on every deploy.
+#
+# Persistent volumes require a single pinned `node` — the data has a home on that
+# node's disk, so cluster auto-placement (which could move the service) isn't allowed.
+project = "worker-with-volume"
+
+[[service]]
+name = "ledger"
+node = "node-1"
+dockerfile = "Dockerfile"
+context = "."
+cpu = 256
+memory = 256
+replicas = 1
+env = { NODE_ENV = "production" }
+
+  # Mount a persistent volume named "data" at /data inside the container.
+  [[service.volumes]]
+  name = "data"
+  path = "/data"

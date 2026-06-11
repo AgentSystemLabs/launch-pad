@@ -21,6 +21,7 @@ function desired(nodeId: string, edge: string | null): DesiredState {
         ingress: { domain: "app.example.com", port: 3000, edge },
         healthCheck: null,
         rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+        volumes: [],
       },
     ],
   };

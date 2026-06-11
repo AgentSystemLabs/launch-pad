@@ -15,6 +15,7 @@ function svcConfig(over: Partial<ServiceConfig>): ServiceConfig {
     ingress: null,
     healthCheck: null,
     rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+    volumes: [],
     ...over,
   };
 }
@@ -83,6 +84,7 @@ describe("loadDeployedFootprints", () => {
                 ingress: { domain: "app.example.com", port: 3000, edge: "edge-1" },
                 healthCheck: { path: "/healthz" },
                 rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+                volumes: [],
               },
             ],
           };
