@@ -121,7 +121,17 @@ Shipped:
 
 - [x] **Ongoing cost visibility** — `launch-pad cost [--cluster] [--budget <usd>]` rolls up the cluster's **running** nodes (registry-driven) into a monthly EC2 + agent-S3 estimate (per-node + total), reusing the provision-time pricing (`cost/estimate.ts`). Paused nodes are counted + flagged separately (no compute charge, but they still incur EBS + Elastic IP). Pure `summarizeClusterCost` + `budgetVerdict` unit-tested; real-AWS regression (`pnpm e2e:cost`). _(A live/hosted dashboard is still future — this is an on-demand CLI estimate.)_
 - [x] **Budget hooks (CLI)** — `launch-pad cost --budget <usd>` exits **non-zero** + warns when the estimate exceeds the threshold, so it's gateable in CI / a scheduled check. _(Native AWS Budgets integration is still future.)_
-- [ ] **Idle recommendations** — “this node has been paused / underutilized for N days”.
+- [x] **Idle recommendations** — `launch-pad cost` now flags idle nodes wasting money: a **paused**
+  (stopped) node still paying for its EBS volume + Elastic IP, or an **empty** running node hosting
+  zero services (or an edge routing zero domains) burning its full EC2 rate — the empty case
+  dollar-estimates the wasted compute. `--idle-days <n>` tunes the age threshold (default 7);
+  recommendations are advisory (only `--budget` changes the exit code) and ride the existing `cost`
+  output (panel + `--json` `idle.recommendations`). Pure `recommendIdleNodes` (`cli/src/cost/idle.ts`
+  — paused dated from the last heartbeat falling back to `createdAt`; empty requires `state="ready"`
+  + idle past threshold; an edge with unknown routing is never flagged; provisioning/terminating
+  skipped) unit-tested (`idle.test.ts` +12) + real-AWS regression (`pnpm e2e:idle`: provision a both
+  node → not flagged while provisioning → `node pause` → flagged `paused` → high threshold gates it
+  out → teardown).
 
 ---
 

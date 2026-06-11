@@ -761,15 +761,27 @@ on-demand EC2 + agent S3 polling — with an optional budget gate.
 ```bash
 launch-pad cost                              # estimate the current cluster
 launch-pad cost --cluster prod --budget 100  # warn + non-zero exit if over $100/mo
+launch-pad cost --idle-days 3                # flag nodes idle longer than 3 days
 launch-pad cost --json --budget 100          # machine-readable, for CI / scheduled checks
 ```
 
 | Flag | Description |
 | ---- | ----------- |
 | `--budget <usd>` | Monthly USD budget — exit non-zero (and flag) when the estimate exceeds it |
+| `--idle-days <n>` | Age (days) before an idle node is flagged in the recommendations (default `7`) |
 
 Running nodes (ready/provisioning) are estimated for EC2 + agent S3; **paused** nodes are noted
 separately (a stopped instance has no compute/agent charge, but its EBS volume + Elastic IP
 still cost — not estimated). It's a baseline, not a bill: it excludes data transfer, ECR /
 CloudWatch storage, and gp3 root volumes. With `--budget`, the non-zero exit makes it gateable
 in CI or a scheduled job to catch a cluster that grew past its threshold.
+
+It also surfaces **idle-node recommendations** — money spent without work being done:
+
+- **paused** — a stopped node still paying for its EBS volume + Elastic IP. `resume` it or
+  `node destroy` it.
+- **empty** — a *running* node hosting no services (or an edge routing no domains), burning its
+  full EC2 rate for nothing — the recommendation dollar-estimates the wasted compute.
+
+Only nodes idle longer than `--idle-days` (default 7) are flagged. These are advisory — only
+`--budget` changes the exit code.
