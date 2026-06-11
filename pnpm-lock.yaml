@@ -69,6 +69,9 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.726.0
         version: 3.1059.0
+      '@aws-sdk/client-ssm':
+        specifier: ^3.726.0
+        version: 3.1059.0
       execa:
         specifier: ^9.5.2
         version: 9.6.1
@@ -96,6 +99,9 @@ importers:
       '@aws-sdk/client-iam':
         specifier: ^3.726.0
         version: 3.1059.0
+      '@aws-sdk/client-route-53':
+        specifier: ^3.726.0
+        version: 3.1061.0
       '@aws-sdk/client-s3':
         specifier: ^3.726.0
         version: 3.1059.0
@@ -1961,8 +1967,8 @@ snapshots:
     dependencies:
       '@aws-crypto/sha256-browser': 5.2.0
       '@aws-crypto/sha256-js': 5.2.0
-      '@aws-sdk/core': 3.974.16
-      '@aws-sdk/credential-provider-node': 3.972.49
+      '@aws-sdk/core': 3.974.17
+      '@aws-sdk/credential-provider-node': 3.972.50
       '@aws-sdk/types': 3.973.10
       '@smithy/core': 3.24.6
       '@smithy/fetch-http-handler': 5.4.6

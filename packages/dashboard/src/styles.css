@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .lp-focus-ring:focus-visible {
+    @apply outline outline-2 outline-offset-2 outline-primary rounded-md;
+  }
+}

@@ -1,9 +1,22 @@
 import { z } from "zod";
 import { LAUNCH_PAD_ENVIRONMENT } from "./constants";
 import { HealthCheckSchema, RolloutSchema } from "./health";
+import { SECRET_KEY_HINT, SECRET_KEY_REGEX } from "./secrets";
 
 /** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1–40 chars. */
 export const LABEL_REGEX = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
+
+/**
+ * Minimum allowed value for each numeric, post-deploy-mutable service field. The
+ * single source of truth for these bounds — `ServiceDeclSchema` below enforces them
+ * at parse time, and the CLI's `toml-edit` validates against them before it writes a
+ * file deploy would only reject. Keep them tied here so the two can't drift.
+ */
+export const SERVICE_NUMERIC_FIELD_MIN = {
+  replicas: 1,
+  cpu: 1,
+  memory: 1,
+} as const satisfies Record<"replicas" | "cpu" | "memory", number>;
 
 /** Node id: letters, digits, hyphens, underscores; 1–63 chars; starts with a letter or digit. */
 export const NODE_ID_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9_-]{0,62})?$/;
@@ -58,6 +71,8 @@ const SUPPORTED_SERVICE_KEYS = new Set([
   "node",
   "nodes",
   "edge",
+  "schedule",
+  "topology",
   "dockerfile",
   "context",
   "replicas",
@@ -69,6 +84,7 @@ const SUPPORTED_SERVICE_KEYS = new Set([
   "port",
   "healthCheck",
   "rollout",
+  "secrets",
 ]);
 
 /**
@@ -102,6 +118,14 @@ export function assertSupportedLaunchPadConfigRaw(input: unknown): void {
   });
 }
 
+/** Node-picking strategy for cluster auto-placement (services without `node`/`nodes`). */
+export const ServiceScheduleSchema = z.enum(["even", "capacity"]);
+export type ServiceSchedule = z.infer<typeof ServiceScheduleSchema>;
+
+/** Ingress shape for cluster auto-placement (services without `node`/`nodes`). */
+export const ServiceTopologySchema = z.enum(["split", "co-located", "auto"]);
+export type ServiceTopology = z.infer<typeof ServiceTopologySchema>;
+
 /** One `[[service]]` block in launch-pad.toml. */
 export const ServiceDeclSchema = z
   .object({
@@ -112,13 +136,34 @@ export const ServiceDeclSchema = z
     nodes: z.array(nodeId("node")).min(1).optional(),
     /** Node id whose Caddy fronts this service's domain (a dedicated edge). */
     edge: nodeId("edge").optional(),
+    /**
+     * Cluster auto-placement strategy: "even" round-robin (default) or "capacity"
+     * bin-packing by free CPU/memory. Optional here (NOT `.default()`) so the
+     * superRefine below can reject an EXPLICIT value alongside `node`/`nodes`;
+     * the trailing `.transform()` fills the default afterwards.
+     */
+    schedule: ServiceScheduleSchema.optional(),
+    /**
+     * Cluster auto-placement ingress shape: "split" (private app nodes fronted by
+     * an edge), "co-located" (one both-role node, local Caddy, no remote edge), or
+     * "auto" (default: edge when resolvable). Optional for the same reason as
+     * `schedule`.
+     */
+    topology: ServiceTopologySchema.optional(),
     dockerfile: z.string().default("./Dockerfile"),
     /** Docker build context, relative to the launch-pad.toml directory. */
     context: z.string().default("."),
-    replicas: z.number().int().min(1, "replicas must be >= 1").default(1),
-    cpu: z.number().int().positive("cpu must be a positive integer (vCPU shares, 1024 = 1 vCPU)"),
-    memory: z.number().int().positive("memory must be a positive integer (MB)"),
+    replicas: z.number().int().min(SERVICE_NUMERIC_FIELD_MIN.replicas, "replicas must be >= 1").default(1),
+    cpu: z
+      .number()
+      .int()
+      .min(SERVICE_NUMERIC_FIELD_MIN.cpu, "cpu must be a positive integer (vCPU shares, 1024 = 1 vCPU)"),
+    memory: z.number().int().min(SERVICE_NUMERIC_FIELD_MIN.memory, "memory must be a positive integer (MB)"),
     env: z.record(z.string(), z.string()).default({}),
+    /** Secret key names — values live in SSM; maintained by `launch-pad secret set`. */
+    secrets: z
+      .array(z.string().regex(SECRET_KEY_REGEX, `secret name must be ${SECRET_KEY_HINT}`))
+      .default([]),
     domain: z.string().min(1).optional(),
     /** Template for the domain under `--env <e>`; `{env}`/`{service}` are interpolated. */
     domainPattern: z.string().min(1).optional(),
@@ -162,6 +207,36 @@ export const ServiceDeclSchema = z
         if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, message: err, path: ["domainPattern"] });
       }
     }
+    const isPinned = s.node !== undefined || s.nodes !== undefined;
+    if (s.schedule !== undefined && isPinned) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "`schedule` only applies to cluster auto-placement — drop it, or remove `node`/`nodes`",
+        path: ["schedule"],
+      });
+    }
+    if (s.topology !== undefined && isPinned) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "`topology` only applies to cluster auto-placement — drop it, or remove `node`/`nodes`",
+        path: ["topology"],
+      });
+    }
+    if (s.topology === "split" && !isWeb) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '`topology = "split"` only applies to a web service — a worker has no ingress to split',
+        path: ["topology"],
+      });
+    }
+    if (s.topology === "co-located" && s.edge !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          '`topology = "co-located"` serves the domain from the service\'s own node — remove `edge`, or use `topology = "split"`',
+        path: ["edge"],
+      });
+    }
     const nodeCount = s.nodes?.length ?? (s.node ? 1 : 0);
     if (isWeb && nodeCount > 1 && s.edge === undefined) {
       ctx.addIssue({
@@ -178,7 +253,12 @@ export const ServiceDeclSchema = z
         path: ["healthCheck"],
       });
     }
-  });
+  })
+  .transform((s) => ({
+    ...s,
+    schedule: s.schedule ?? ("even" as ServiceSchedule),
+    topology: s.topology ?? ("auto" as ServiceTopology),
+  }));
 
 /** The whole launch-pad.toml document. */
 export const LaunchPadConfigSchema = z

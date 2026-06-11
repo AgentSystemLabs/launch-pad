@@ -2,11 +2,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { GetObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { nodePrefix } from "@agentsystemlabs/launch-pad-shared";
+import { nodePrefix, type NodeAgentType } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 
 /** Which agent runtime to install on a node. */
-export type AgentType = "ts" | "rust";
+export type AgentType = NodeAgentType;
+
+export const DEFAULT_AGENT_TYPE: AgentType = "rust";
+
+export function defaultAgentTypeForBootstrap(bootstrapMode: "full" | "golden" | undefined): AgentType {
+  return bootstrapMode === "golden" ? "rust" : "ts";
+}
 
 /** S3 key the agent bundle is uploaded to for a node. */
 export function agentBundleKey(clusterId: string, nodeId: string): string {
@@ -126,11 +132,12 @@ export async function uploadAndPresignAgent(
   clusterId: string,
   nodeId: string,
   agentType: AgentType,
+  expiresInSeconds = 3600,
 ): Promise<string> {
   if (agentType === "rust") {
     await uploadAgentBinary(s3, bucket, clusterId, nodeId);
-    return presignAgentBinary(s3, bucket, clusterId, nodeId);
+    return presignAgentBinary(s3, bucket, clusterId, nodeId, expiresInSeconds);
   }
   await uploadAgentBundle(s3, bucket, clusterId, nodeId);
-  return presignAgentBundle(s3, bucket, clusterId, nodeId);
+  return presignAgentBundle(s3, bucket, clusterId, nodeId, expiresInSeconds);
 }

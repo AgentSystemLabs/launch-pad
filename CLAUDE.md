@@ -9,6 +9,14 @@ user's app into a Docker image, pushes it to **ECR**, provisions **AWS** (EC2 + 
 runs it on the user's own node behind **Caddy** with automatic HTTPS, and auto-updates on the
 next deploy. The north-star spec is `docs/overview.md` — read it before non-trivial work.
 
+**Start with `README.md`** — it is the documentation directory for the project: intent,
+positioning, and a table of per-area deep dives in `docs/*.md`. Before working in an
+unfamiliar part of the repo, read the matching doc: `docs/codebase-layout.md` (repo map +
+"where to change what"), `docs/architecture.md`, `docs/cli.md`, `docs/configuration.md`,
+`docs/agent.md`, `docs/golden-ami.md`, `docs/dashboard.md`, `docs/testing.md`. When a change
+alters user-facing behavior (commands, config fields, provisioning, wire contracts), update
+the matching `docs/*.md` and, if the surface list changes, the README table.
+
 The whole system is **declarative, with no control-plane server**: the CLI writes *desired
 state* to S3; an agent on each node polls S3 and *reconciles* Docker + Caddy to match. S3 is
 the only thing the two sides share.
@@ -74,8 +82,25 @@ not a silent hung deploy. Key modules: `config.ts` (the `launch-pad.toml` schema
 
 ### `packages/cli` — the product surface (`commander`-based)
 
-What the user runs. Commands: `init` · `deploy` · `status` · `node` · `cluster` (registered
-in `src/index.ts`). `cluster use <name>` persists a local `defaultCluster` (cleared by `use
+What the user runs. Commands: `init` · `doctor` · `setup` · `deploy` · `undeploy` · `rollback` ·
+`rebalance` · `status` · `history` · `node` · `cluster` (registered in `src/index.ts`).
+`rebalance` replans the footprint's **cluster-placed** services across the current app pool and
+republishes (reusing published images, no rebuild; gainers before reducers; vacated nodes
+cleaned) — config-lock-safe (only placement changes), eventually-consistent (agents reconcile on
+poll, no cross-node health-gate). `node evacuate <node>` = `rebalance --drain <node>` (refuses to
+move a pinned service or drain the last app node). Pure diff in `deploy/rebalance-plan.ts`
+(`diffPlacement`); deploy's candidate-node + capacity-snapshot construction is the shared
+`deploy/candidate-nodes.ts` (`buildCandidateNodes`/`demandsOf`). `setup iam-policy` /
+`setup github-oidc` are pure generators (`src/setup/*`) — a least-privilege operator IAM policy
+and a GitHub-OIDC trust policy + deploy workflow — for AWS/CI onboarding without
+`AdministratorAccess`. `history` reads a footprint's append-only
+deploy events (`shared/src/events.ts`; written best-effort by `deploy`'s `recordDeployEvent`). `undeploy` is the inverse of `deploy` — it drops a
+project (or one `--service`) from each node's `desired.json` and **trims the config baseline** so
+removing a service isn't config-lock-blocked (pure planning in `shared/src/undeploy.ts`;
+CAS-guarded S3 writes in `commands/undeploy.ts` `applyUndeploy`). `rollback` redeploys a
+service's previous (or `--to <tag>`) immutable ECR build by delegating to the `deploy --image`
+path — it auto-picks the prior tag via `findPreviousImageTag` (shared) over `listRepoImageTags`
+(ECR push order). `cluster use <name>` persists a local `defaultCluster` (cleared by `use
 default`) and `cluster current` shows the effective target; AWS-touching commands print a
 `cluster: <id>` banner line (`banner.ts` + the `preAction` hook). `node upgrade-agent`
 publishes a fresh agent bundle to S3 and restarts the on-box agent via SSM (with manual
@@ -84,7 +109,13 @@ fallback). `deploy` is the heart: load `launch-pad.toml` → docker buildx
 hash, **never `:latest`**) → capacity admission check → ownership-aware **merge** into the
 node's `desired.json` (never clobbers other projects' services) → conditional S3 write → watch
 `status.json` to convergence. It also **auto-provisions** missing/paused nodes referenced by
-the config before publishing (spend-gated: `--yes` / `--no-create` / `--dry-run`).
+the config before publishing (spend-gated: `--yes` / `--no-create` / `--dry-run`). Two no-build
+redeploy paths skip buildx and reuse an existing image, pinned to the published placement:
+`--restart` (republish the current image with a `restartAt` bump to roll containers for an
+env/secret change) and `--image <uri>` (redeploy a specific existing immutable ECR tag of one
+`--service` — rollback / promote; validated to that service's own repo via
+`shared/src/ecr.ts` `parseEcrImageUri`). The shared `reuseExistingImages` flag gates the
+skip-build + pin-to-published-placement behavior for both.
 
 - `src/aws/*` — thin AWS SDK clients (ec2, ecr, iam, ssm, s3-state, sts via `context.ts`).
 - `src/provision/*` — node bootstrap generation: `user-data.ts` (cloud-init), `systemd-unit.ts`,
@@ -124,10 +155,13 @@ that way.
 ```
 launch-pad-state-<acct>-<region>/
   nodes/<id>/{node,desired,status}.json   # the implicit `default` cluster (legacy, un-prefixed)
+  projects/<footprint>/config-baseline.json   # config-lock baseline (default cluster)
+  projects/<footprint>/events/<ts>-<id>.json  # append-only deploy history (`launch-pad history`)
   clusters/<clusterId>/
     cluster.json
     nodes/<id>/{node,desired,status}.json
     nodes/<edge-id>/upstream/<app-node-id>.json   # push-based routing shards
+    projects/<footprint>/{config-baseline.json,events/}   # per-footprint state, cluster-scoped
 ```
 
 The `default` cluster keeps the legacy un-prefixed `nodes/` root so pre-cluster nodes need no
@@ -144,7 +178,10 @@ migration. State lives under `nodes/` (the machine is the durable identity), not
   ever reads another node's `desired.json`/`status.json`. This is enforced by **per-node
   least-privilege IAM** (`cli/src/aws/iam.ts`) — a node can read its own desired, write its own
   status, and (app) write its shard; ECR pull is account-wide. Preserve this when touching IAM
-  or S3 access.
+  or S3 access. Shards are re-published at **every rollout surge/drain step** (not just at tick
+  end), and the drain wait is floored at the edge's poll cadence (`refreshRouting` /
+  `drainFloorMs` in the agent) — otherwise the edge keeps routing to stopped replicas and a
+  rolling deploy 502s. Keep that ordering when touching `rolloutService` or shard publishing.
 - **Web vs. worker:** a service with both `domain` + `port` is a web service (gets Caddy +
   HTTPS); one with neither is a background worker. The schema enforces "both or neither."
   Every web service **must** declare `[service.healthCheck]` (schema-enforced at *any*
@@ -157,6 +194,28 @@ migration. State lives under `nodes/` (the machine is the durable identity), not
   (`min(maxSurge, replicas) × footprint`), maxed per resource because a node rolls one
   service at a time. `checkCapacity` (shared) and the auto-provision sizing
   (`smallestInstanceTypeFor`) both size for this peak, so a deploy can always surge.
+- **Cluster auto-placement** (`schedule`/`topology` on a service without `node`/`nodes`,
+  planned by `cli/src/deploy/placement.ts` `planClusterPlacement`): `schedule = "even"`
+  must stay **byte-identical** to legacy round-robin over the S3-lexicographic app+both
+  pool; the `"capacity"` scheduler must use `checkCapacity`'s exact steady +
+  largest-single-surge math so a planned placement can never fail the admission
+  pre-flight. Topology rides the existing `ingress.edge` tri-state on the wire (no
+  protocol change): `"co-located"` = one both-role node, `edge: null` (cluster default
+  edge deliberately ignored); `"split"` = app+both nodes behind a required edge. Deploy
+  must clean a vacated node's desired.json when placement moves (skipped for
+  `--service` partials), and `deploy --restart` pins to the published footprint so a
+  re-plan can't move services. `schedule`/`topology` are config-locked like
+  `node`/`nodes`/`edge`.
+- **Config lock** (`shared/src/config-lock.ts`): after a footprint's first deploy, only the
+  **operational** fields may change — `cpu`, `memory`, `replicas`, `env`, and `secrets` (key
+  names). Everything else is identity/shape and is frozen (placement, `domain`/`port`,
+  `dockerfile`/`context`, `healthCheck`, `rollout`, `schedule`/`topology`, add/remove/rename a
+  service); a locked-field change aborts deploy before the build, with no bypass flag. The
+  mutable set is the single list `lockedServiceView` strips and `CONFIG_LOCK_MUTABLE_HINT`
+  names — keep the two in lock-step, and mirror new numeric bounds via
+  `SERVICE_NUMERIC_FIELD_MIN` (shared) so the `scale`/`config` CLI edits (`cli/src/config/
+  toml-edit.ts`) can't write a value the next deploy's parse rejects. `scale` and `config set`
+  just edit `launch-pad.toml` for the allowed fields and re-run a single-service deploy.
 - **Config format is `launch-pad.toml`** (TOML via `smol-toml`), multi-`[[service]]`,
   multiple projects per node. ⚠️ The "reference shapes" section of `docs/overview.md` still
   shows a single-service `launchpad.yaml` — that is stale; the real schema is

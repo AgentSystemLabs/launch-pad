@@ -65,9 +65,27 @@ export function ecrRepositoryName(project: string, service: string): string {
   return `${project}/${service}`;
 }
 
+/** Root prefix for a footprint's per-project state (config baseline, deploy events). */
+function projectPrefix(clusterId: string, ownerProject: string): string {
+  const prefix = clusterId === DEFAULT_CLUSTER ? "" : `${CLUSTERS_PREFIX}${clusterId}/`;
+  return `${prefix}projects/${ownerProject}/`;
+}
+
 /** Frozen launch-pad.toml snapshot for post-deploy config locking (per footprint). */
 export function configBaselineKey(clusterId: string, ownerProject: string): string {
-  const prefix =
-    clusterId === DEFAULT_CLUSTER ? "" : `${CLUSTERS_PREFIX}${clusterId}/`;
-  return `${prefix}projects/${ownerProject}/config-baseline.json`;
+  return `${projectPrefix(clusterId, ownerProject)}config-baseline.json`;
+}
+
+/** Prefix holding a footprint's append-only deploy-history events. */
+export function deployEventsPrefix(clusterId: string, ownerProject: string): string {
+  return `${projectPrefix(clusterId, ownerProject)}events/`;
+}
+
+/**
+ * Key for one deploy event. The object name leads with the ISO `at` timestamp so a plain
+ * lexicographic S3 listing is chronological; the random `id` suffix avoids collisions when
+ * two deploys land in the same millisecond.
+ */
+export function deployEventKey(clusterId: string, ownerProject: string, at: string, id: string): string {
+  return `${deployEventsPrefix(clusterId, ownerProject)}${at}-${id}.json`;
 }

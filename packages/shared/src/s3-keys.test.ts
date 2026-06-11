@@ -3,6 +3,8 @@ import {
   clusterConfigKey,
   clusterNodesPrefix,
   configBaselineKey,
+  deployEventKey,
+  deployEventsPrefix,
   desiredKey,
   ecrRepositoryName,
   edgeUpstreamKey,
@@ -45,6 +47,16 @@ describe("s3 key derivation", () => {
     );
     expect(configBaselineKey("lower", "edge-express-web-staging")).toBe(
       "clusters/lower/projects/edge-express-web-staging/config-baseline.json",
+    );
+  });
+
+  it("derives per-footprint deploy-event keys (timestamp-leading for chronological listing)", () => {
+    expect(deployEventsPrefix("default", "shop")).toBe("projects/shop/events/");
+    expect(deployEventsPrefix("lower", "shop-staging")).toBe(
+      "clusters/lower/projects/shop-staging/events/",
+    );
+    expect(deployEventKey("default", "shop", "2026-06-10T12:00:00.000Z", "ab12")).toBe(
+      "projects/shop/events/2026-06-10T12:00:00.000Z-ab12.json",
     );
   });
 

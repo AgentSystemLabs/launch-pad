@@ -31,7 +31,6 @@ export interface NodeDrift {
  *
  * Registry `state` is treated as intent, not liveness: only `stopped` signals an
  * intentional pause; `ready`/`provisioning` (and anything else) mean "should be up".
- * See docs/node-ec2-drift-plan.md.
  */
 export function planNodeDrift(
   entry: Pick<NodeRegistryEntry, "state">,

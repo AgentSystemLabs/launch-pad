@@ -14,6 +14,10 @@ export type NodeState = z.infer<typeof NodeStateSchema>;
 export const NodeRoleSchema = z.enum(["app", "edge", "both"]);
 export type NodeRole = z.infer<typeof NodeRoleSchema>;
 
+/** Which launch-pad agent runtime is installed on the node. */
+export const NodeAgentTypeSchema = z.enum(["ts", "rust"]);
+export type NodeAgentType = z.infer<typeof NodeAgentTypeSchema>;
+
 /** `edge` / `both` need a stable public IP for DNS and HTTPS; `app` nodes are VPC-private only. */
 export function nodeUsesElasticIp(role: NodeRole): boolean {
   return role !== "app";
@@ -51,6 +55,8 @@ export const NodeRegistryEntrySchema = z
     iamInstanceProfile: z.string().nullable(),
     agentId: z.string(),
     agentVersion: z.string().nullable(),
+    /** Defaults old node.json files to the original TypeScript agent runtime. */
+    agentType: NodeAgentTypeSchema.default("ts"),
     createdAt: z.string(),
     createdBy: z.string(),
     state: NodeStateSchema,

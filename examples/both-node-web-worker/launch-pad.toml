@@ -14,6 +14,7 @@ replicas = 2            # Caddy load-balances across both; rolling updates are z
 domain = "other.agentsystem.dev"
 port = 3000
 env = { NODE_ENV = "production" }
+# secrets = ["DATABASE_URL"]   # set values: launch-pad secret set DATABASE_URL --service web
 
   [service.healthCheck]
   path = "/healthz"     # a new replica must pass this before the old one is drained

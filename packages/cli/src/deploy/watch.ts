@@ -14,6 +14,8 @@ export interface WatchTarget {
   service: string;
   image: string;
   expectedReplicas: number;
+  /** For restart-only deploys, convergence requires replacing these old containers. */
+  previousContainerIds?: string[];
 }
 
 export interface WatchResult {
@@ -40,8 +42,25 @@ function evaluate(status: NodeStatus | null, target: WatchTarget): WatchResult {
   }
   // Converged: every expected replica is running the deployed image.
   const onImage = svc.replicas.filter((r) => r.image === target.image && r.state === "running").length;
-  if (svc.runningReplicas >= target.expectedReplicas && onImage >= target.expectedReplicas) {
+  const previous = new Set(target.previousContainerIds ?? []);
+  const runningIds = svc.replicas
+    .filter((r) => r.image === target.image && r.state === "running" && r.containerId)
+    .map((r) => r.containerId as string);
+  const oldStillRunning = runningIds.filter((id) => previous.has(id));
+  if (
+    svc.runningReplicas >= target.expectedReplicas &&
+    onImage >= target.expectedReplicas &&
+    oldStillRunning.length === 0
+  ) {
     return { target, state: "running", ok: true, message: `${onImage}/${target.expectedReplicas} replicas` };
+  }
+  if (oldStillRunning.length > 0) {
+    return {
+      target,
+      state: svc.state,
+      ok: false,
+      message: `${oldStillRunning.length} old container(s) still running (${svc.runningReplicas} running)`,
+    };
   }
   return {
     target,

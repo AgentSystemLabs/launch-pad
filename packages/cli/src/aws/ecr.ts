@@ -5,7 +5,7 @@ import {
   type ECRClient,
   GetAuthorizationTokenCommand,
 } from "@aws-sdk/client-ecr";
-import { ecrRepoTags } from "@agentsystemlabs/launch-pad-shared";
+import { ecrRepoTags, type ImageTagPushedAt } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 import { awsErrorName } from "./errors";
 import { ensureEcrRepoTags } from "./tags";
@@ -48,6 +48,34 @@ export async function ensureRepository(
 }
 
 /** Does an image with this tag already exist in the repo? (idempotent re-deploys) */
+/**
+ * List every tagged image in a repository with its ECR push time — one entry per tag
+ * (a manifest with multiple tags yields multiple entries). Used by `rollback` to order
+ * builds by recency. Returns [] when the repository doesn't exist.
+ */
+export async function listRepoImageTags(ecr: ECRClient, repository: string): Promise<ImageTagPushedAt[]> {
+  const out: ImageTagPushedAt[] = [];
+  let nextToken: string | undefined;
+  try {
+    do {
+      const res = await ecr.send(
+        new DescribeImagesCommand({ repositoryName: repository, nextToken, maxResults: 100 }),
+      );
+      for (const detail of res.imageDetails ?? []) {
+        if (!detail.imagePushedAt) continue;
+        for (const tag of detail.imageTags ?? []) {
+          out.push({ tag, pushedAt: detail.imagePushedAt });
+        }
+      }
+      nextToken = res.nextToken;
+    } while (nextToken);
+  } catch (error) {
+    if (awsErrorName(error) === "RepositoryNotFoundException") return [];
+    throw error;
+  }
+  return out;
+}
+
 export async function imageExists(ecr: ECRClient, repository: string, tag: string): Promise<boolean> {
   try {
     const res = await ecr.send(

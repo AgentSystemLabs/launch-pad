@@ -15,6 +15,7 @@ function replica(over: Partial<ManagedReplica> & Pick<ManagedReplica, "id" | "pr
     cpu: 256,
     memory: 256,
     hostPort: null,
+    configStamp: "",
     ...over,
   };
 }

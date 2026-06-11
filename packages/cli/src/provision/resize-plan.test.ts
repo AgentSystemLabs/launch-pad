@@ -21,6 +21,7 @@ const base: NodeRegistryEntry = {
   iamInstanceProfile: "profile-1",
   agentId: "agent-node-1",
   agentVersion: "0.1.0",
+  agentType: "ts",
   createdAt: "2026-01-01T00:00:00.000Z",
   createdBy: "arn:aws:iam::123:user/me",
   state: "ready",

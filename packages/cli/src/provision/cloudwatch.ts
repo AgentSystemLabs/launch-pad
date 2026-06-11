@@ -24,6 +24,8 @@ export interface CloudWatchInstallParams {
   clusterId: string;
   nodeId: string;
   role: NodeRole;
+  /** Golden AMIs already have the package; first-boot should only configure it. */
+  installPackage?: boolean;
 }
 
 /**
@@ -61,6 +63,7 @@ WantedBy=multi-user.target
  */
 export function renderCloudWatchInstall(params: CloudWatchInstallParams): string {
   const { clusterId, nodeId, role } = params;
+  const installPackage = params.installPackage ?? true;
   const baseConfig = JSON.stringify(systemCwConfig(clusterId, nodeId, role), null, 2);
   const emptyFragment = JSON.stringify(cwAgentConfig([]), null, 2);
   const components = systemComponentsForRole(role);
@@ -74,8 +77,12 @@ systemctl enable --now ${unitName}.service`;
     })
     .join("\n");
 
+  const packageBlock = installPackage
+    ? "dnf install -y amazon-cloudwatch-agent"
+    : `test -x ${CW_AGENT_CTL}`;
+
   return `# --- Amazon CloudWatch Agent (ships app stdout + agent/caddy journald) ---
-dnf install -y amazon-cloudwatch-agent
+${packageBlock}
 mkdir -p ${SYSTEM_LOG_DIR} /opt/aws/amazon-cloudwatch-agent/etc
 
 ${forwarders}

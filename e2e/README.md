@@ -1,14 +1,34 @@
-# launch-pad end-to-end test
+# launch-pad end-to-end tests
 
-A **real-AWS**, on-demand test that provisions infrastructure, deploys the
-example app, exercises every part of the lifecycle, and tears everything down.
-It is **not** part of `pnpm test` — it costs real money (a few cents) and takes
-~10–20 minutes — so it only runs when you explicitly ask for it.
+**Real-AWS**, on-demand tests that provision infrastructure, exercise the product, and
+tear everything down. They are **not** part of `pnpm test` — they cost real money (a few
+cents) and take minutes — so they only run when you explicitly ask for them. Both drive the
+**built** CLI exactly as a user would (`node packages/cli/dist/index.js …`).
 
-It drives the **built** CLI exactly as a user would (`node packages/cli/dist/index.js …`),
-against a 1-edge + 1-app topology.
+| Harness | Command | Covers | ~Time |
+| ------- | ------- | ------ | ----- |
+| Full lifecycle (`src/run.ts`) | `pnpm e2e` | provision → HTTPS → secrets → logs → zero-downtime rollout → scale → pause/resume → destroy | 10–20 min |
+| Scaling (`src/scale.ts`) | `pnpm e2e:scale` | provision a `both` node → deploy a worker → `scale` replicas 1→3 → `config set` env → scale 3→1 → destroy | ~8–12 min |
+| Undeploy (`src/undeploy.ts`) | `pnpm e2e:undeploy` | provision a `both` node → deploy 2 workers → `undeploy --service` one → redeploy the trimmed TOML (lock must permit) → undeploy the whole footprint → fresh redeploy | ~8–12 min |
+| Image redeploy (`src/deploy-image.ts`) | `pnpm e2e:deploy-image` | deploy worker (v1) → change content + deploy (v2) → `deploy --image <v1>` rolls back without building → repeat is an idempotent no-op | ~10–14 min |
+| Rollback (`src/rollback.ts`) | `pnpm e2e:rollback` | deploy worker (v1) → change content + deploy (v2) → `rollback` auto-picks the previous build (v1) → `rollback --to <v2-tag>` rolls forward | ~10–14 min |
+| DNS setup (`src/dns-setup.ts`) | `pnpm e2e:dns` | provision a `both` node → `dns setup` writes a DNS-only Route53 A record at its Elastic IP → `dns verify` resolves to it → re-run is a no-op → record removed on teardown (no deploy) | ~3–5 min |
+| Empty-cluster bootstrap (`src/empty-cluster.ts`) | `pnpm e2e:empty-cluster` | create a cluster with NO nodes → `deploy --no-create` is refused → `deploy` auto-bootstraps a single `both` node (`app-1`) for a cluster-placed worker → second deploy is idempotent (no re-bootstrap) → destroy | ~8–12 min |
+| Capacity auto-add (`src/auto-add-node.ts`) | `pnpm e2e:auto-add` | bootstrap one node for a cluster-placed worker (replicas=1) → `scale replicas 3` overflows it → deploy auto-adds a second node (`app-2`) and spreads 3 replicas across both → destroy | ~12–16 min |
+| Setup wizard (`src/setup.ts`) | `pnpm e2e:setup` | `setup` (default cluster) ensures the state bucket, no local target → `setup --cluster <id>` saves the local target + cluster.json → `cluster show` resolves it → `cluster destroy` removes the cluster but KEEPS the shared bucket (no EC2/Docker) | ~1 min |
+| Backup/restore (`src/backup.ts`) | `pnpm e2e:backup` | set up a cluster + plant a synthetic desired.json → `backup` captures both → delete both from S3 (disaster) → `restore` re-uploads byte-for-byte → cluster resolves again → destroy keeps the shared bucket (no EC2/Docker) | ~1 min |
+| Cost (`src/cost.ts`) | `pnpm e2e:cost` | provision one `both` node → `cost` reports it with a positive EC2 estimate → `cost --budget 0` flags over-budget (non-zero exit) → `cost --budget 10000` is within budget → destroy (no deploy/Docker) | ~3 min |
+| Deploy history (`src/history.ts`) | `pnpm e2e:history` | deploy worker (v1) → deploy (v2) → `history --json` shows 2 events, newest-first, each with image + converged + caller ARN | ~8–12 min |
+| Node IAM cleanup (`src/node-iam.ts`) | `pnpm e2e:node-iam` | create a node → assert its IAM role + instance profile exist → `node destroy` → assert they're gone (no deploy) | ~3–5 min |
 
-## What it verifies
+The scaling, undeploy, image-redeploy, and rollback harnesses are deliberately worker-only (no
+domain/cert/DNS/secrets) so they're fast and agent-agnostic. Scaling guards `scale`/`config`
+and the config-lock relief that lets `replicas`/`env` change after the first deploy; undeploy
+guards `launch-pad undeploy` and the baseline-trim relief that lets a service be removed;
+image-redeploy guards `deploy --image`, and rollback guards `launch-pad rollback`'s auto-pick of
+the previous immutable ECR tag (and `--to`).
+
+## What `pnpm e2e` (full lifecycle) verifies
 
 1. Provisions an isolated cluster: one **edge** node (public, Caddy) + one **app**
    node (private, no public IP).
@@ -16,14 +36,20 @@ against a 1-edge + 1-app topology.
    a stable **Elastic IP**.
 3. Deploys v1 and confirms the service answers over **HTTPS on a real domain** with
    a valid Let's Encrypt certificate.
-4. Reads service **logs** via `launch-pad logs`.
-5. Reads service **CPU/memory stats** via `launch-pad node monitor`.
-6. Deploys v2 (a real source change → new image) and asserts the live response
+4. Sets a real **SSM SecureString** via `launch-pad secret set`, deploys it as an
+   env var, asserts `desired.json` contains only SSM refs (no plaintext), rotates
+   it, and rolls containers with `deploy --restart`.
+5. **Scales** replicas 2→3 and back with `launch-pad scale`, then sets a non-secret env
+   var with `launch-pad config set`, asserting the agent converges to each new state
+   (the same flow `pnpm e2e:scale` covers in isolation).
+6. Reads service **logs** via `launch-pad logs`.
+7. Reads service **CPU/memory stats** via `launch-pad node monitor`.
+8. Deploys v2 (a real source change → new image) and asserts the live response
    flips v1 → v2 **with zero downtime** (continuous polling during the rollout).
-7. Re-deploys the same version and asserts it is **idempotent** (no container churn).
-8. **Pauses** the whole group (`cluster pause`) — both instances stop.
-9. **Resumes** the group and confirms the service recovers on the same Elastic IP.
-10. **Destroys** the whole group (`cluster destroy`) and confirms all S3 state is
+9. Re-deploys the same version and asserts it is **idempotent** (no container churn).
+10. **Pauses** the whole group (`cluster pause`) — both instances stop.
+11. **Resumes** the group and confirms the service recovers on the same Elastic IP.
+12. **Destroys** the whole group (`cluster destroy`) and confirms all S3 state is
     gone and the CLI no longer shows the cluster.
 
 ## Prerequisites
@@ -41,10 +67,17 @@ against a 1-edge + 1-app topology.
 From the repo root:
 
 ```bash
-LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e          # full lifecycle (needs a Route53 zone)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:scale        # scaling only (no domain/DNS needed)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:undeploy     # undeploy / service removal (no domain/DNS needed)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-image # deploy --image rollback (no domain/DNS needed)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rollback     # rollback auto-pick + --to (no domain/DNS needed)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:history      # deploy history events (no domain/DNS needed)
 ```
 
-`pnpm e2e` builds the CLI first, then runs the harness.
+All scripts build the CLI first, then run the harness. `pnpm e2e:scale`, `pnpm e2e:undeploy`,
+`pnpm e2e:deploy-image`, `pnpm e2e:rollback`, and `pnpm e2e:history` are worker-only, so they
+need **no Route53 hosted zone** — only AWS credentials + Docker.
 
 ### Options (environment / flags)
 

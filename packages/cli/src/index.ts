@@ -1,11 +1,23 @@
 import { Command } from "commander";
 import { renderBanner, renderClusterLine } from "./banner";
+import { registerBackup } from "./commands/backup";
 import { registerCluster } from "./commands/cluster";
+import { registerConfig } from "./commands/config";
+import { registerCost } from "./commands/cost";
 import { registerDeploy } from "./commands/deploy";
+import { registerDns } from "./commands/dns";
+import { registerDoctor } from "./commands/doctor";
+import { registerHistory } from "./commands/history";
 import { registerInit } from "./commands/init";
 import { registerLogs } from "./commands/logs";
 import { registerNode } from "./commands/node";
+import { registerRebalance } from "./commands/rebalance";
+import { registerRollback } from "./commands/rollback";
+import { registerScale } from "./commands/scale";
+import { registerSecret } from "./commands/secret";
+import { registerSetup } from "./commands/setup";
 import { registerStatus } from "./commands/status";
+import { registerUndeploy } from "./commands/undeploy";
 import { effectiveCluster } from "./config/local";
 import { CliError } from "./errors";
 import type { GlobalOpts } from "./globals";
@@ -47,7 +59,20 @@ function commandPath(cmd: Command): string {
  * echo it themselves), and `init` is purely local — so neither shows the line.
  */
 function showsClusterBanner(path: string): boolean {
-  return path === "deploy" || path === "status" || path === "logs" || path.startsWith("node ");
+  return (
+    path === "deploy" ||
+    path === "undeploy" ||
+    path === "rollback" ||
+    path === "rebalance" ||
+    path === "status" ||
+    path === "history" ||
+    path === "logs" ||
+    path.startsWith("scale") ||
+    path.startsWith("config ") ||
+    path.startsWith("dns ") ||
+    path.startsWith("secret") ||
+    path.startsWith("node ")
+  );
 }
 
 program.hook("preAction", (_thisCommand, actionCommand) => {
@@ -72,11 +97,23 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
 });
 
 registerInit(program);
+registerDoctor(program);
+registerSetup(program);
 registerDeploy(program);
+registerUndeploy(program);
+registerRollback(program);
+registerRebalance(program);
+registerScale(program);
+registerConfig(program);
 registerStatus(program);
+registerHistory(program);
 registerLogs(program);
+registerSecret(program);
+registerDns(program);
 registerNode(program);
 registerCluster(program);
+registerBackup(program);
+registerCost(program);
 
 async function main(): Promise<void> {
   try {

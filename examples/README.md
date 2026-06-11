@@ -9,31 +9,35 @@ into `both-node-web-worker` for `Dockerfile` / `context`.
 | You want to try… | Directory |
 | ---------------- | --------- |
 | First deploy, web + background worker, co-located Caddy | [`both-node-web-worker`](both-node-web-worker) |
-| Dedicated edge router + one Express web app (minimal split) | [`edge-1-app-express-web`](edge-1-app-express-web) |
+| Dedicated edge router + one Express web app (minimal split) | [`edge-and-app-on-one-node`](edge-and-app-on-one-node) |
 | Zero-downtime rolling updates (`replicas`, `rollout`) | [`both-node-rolling-replicas`](both-node-rolling-replicas) |
 | Dedicated edge, rolling replicas across **two** app nodes | [`edge-2-app-nodes-rolling-replicas`](edge-2-app-nodes-rolling-replicas) |
 | Dedicated edge, multiple envs on **one** app node (`--env`, flat domains) | [`edge-1-app-deploy-env-flat-domains`](edge-1-app-deploy-env-flat-domains) |
 | Same, with `domainPattern` + `shop.example.com` DNS | [`edge-1-app-deploy-env-shop-domains`](edge-1-app-deploy-env-shop-domains) |
 | Same, with nested env hosts (`ui-<name>.multi…`, `*.multi` DNS) | [`edge-1-app-deploy-env-nested-multi-dns`](edge-1-app-deploy-env-nested-multi-dns) |
 | Cluster auto-placement (no explicit node names in TOML) | [`cluster-2-app-nodes-auto-placement`](cluster-2-app-nodes-auto-placement) |
+| Capacity-aware placement + split topology (`schedule`/`topology`) | [`cluster-capacity-split`](cluster-capacity-split) |
+| Single-box auto-placement, no remote edge (`topology = "co-located"`) | [`cluster-co-located-single-node`](cluster-co-located-single-node) |
 
 ## Coverage matrix
 
-| Example | Node role | Edge | Placement | `--env` | `replicas` > 1 | `rollout` | Worker (no domain) | Multi-service |
-| ------- | --------- | ---- | --------- | ------- | -------------- | --------- | ------------------ | ------------- |
+| Example | Node role | Edge | Placement (`schedule` · `topology`) | `--env` | `replicas` > 1 | `rollout` | Worker (no domain) | Multi-service |
+| ------- | --------- | ---- | ----------------------------------- | ------- | -------------- | --------- | ------------------ | ------------- |
 | `both-node-web-worker` | `both` (default) | co-located | explicit `node` | — | yes (web) | yes | yes | yes |
-| `edge-1-app-express-web` | `edge` + `app` | dedicated | one app node | — | — | — | — | — |
+| `edge-and-app-on-one-node` | `edge` + `app` | dedicated | one app node | — | — | — | — | — |
 | `both-node-rolling-replicas` | `both` | co-located | explicit `node` | — | yes | yes | — | — |
 | `edge-2-app-nodes-rolling-replicas` | `edge` + `app` | dedicated | `nodes` (2 app) | — | yes | yes | — | — |
 | `edge-1-app-deploy-env-flat-domains` | `edge` + `app` | dedicated | one app node | yes | — | — | — | api + web |
 | `edge-1-app-deploy-env-shop-domains` | `edge` + `app` | dedicated | one app node | yes | — | — | — | api + ui |
 | `edge-1-app-deploy-env-nested-multi-dns` | `edge` + `app` | dedicated | one app node | yes | — | — | — | api + ui |
-| `cluster-2-app-nodes-auto-placement` | `edge` + `app` | cluster default | `deploy --cluster lower` | — | yes (4) | yes | — | — |
+| `cluster-2-app-nodes-auto-placement` | `edge` + `app` | cluster default | `deploy --cluster lower` (even · auto) | — | yes (4) | yes | — | — |
+| `cluster-capacity-split` | `edge` + `app` | cluster default | auto (capacity · split) | — | yes (4) | yes | yes | yes |
+| `cluster-co-located-single-node` | `both` ×2 | co-located (no remote edge) | auto (capacity · co-located) | — | yes (2) | yes | — | — |
 
 ## Edge cases exercised
 
 - **Co-located vs split edge:** `both-node-*` use role `both`; `edge-*` and `cluster-*` use a
-  public edge plus private app nodes. Start with `edge-1-app-express-web` for the smallest split
+  public edge plus private app nodes. Start with `edge-and-app-on-one-node` for the smallest split
   (one router, one web service).
 - **One app node, many env footprints:** `edge-1-app-deploy-env-*` — `deploy --env`
   namespaces owner + domains; containers from different envs share `node-app`.
@@ -41,6 +45,10 @@ into `both-node-web-worker` for `Dockerfile` / `context`.
   spreads replicas; same edge router.
 - **Cluster abstraction:** `cluster-2-app-nodes-auto-placement` — no `node`/`edge` in TOML; CLI
   places replicas and picks the cluster edge.
+- **Capacity scheduling + topology intent:** `cluster-capacity-split` — `schedule = "capacity"`
+  bin-packs by free CPU/memory; `topology = "split"` fronts the domain with the cluster edge.
+  `cluster-co-located-single-node` — `topology = "co-located"` keeps all replicas + Caddy on one
+  both-role node and deliberately ignores the cluster default edge.
 - **Domain projection:** `domainPattern` at project and service level (`edge-1-app-deploy-env-*`);
   default `-<env>` after first label when pattern omitted.
 - **Nested env under a zone:** `edge-1-app-deploy-env-nested-multi-dns` — `ui-{env}.multi.agentsystem.dev`

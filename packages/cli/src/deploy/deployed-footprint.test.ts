@@ -1,6 +1,59 @@
-import { PROTOCOL_VERSION } from "@agentsystemlabs/launch-pad-shared";
+import { PROTOCOL_VERSION, type ServiceConfig } from "@agentsystemlabs/launch-pad-shared";
 import { describe, expect, it } from "vitest";
-import { loadDeployedFootprints } from "./deployed-footprint";
+import { buildPlacementSnapshot, loadDeployedFootprints } from "./deployed-footprint";
+
+function svcConfig(over: Partial<ServiceConfig>): ServiceConfig {
+  return {
+    project: "shop",
+    service: "web",
+    image: "img:1",
+    cpu: 256,
+    memory: 256,
+    replicas: 1,
+    env: {},
+    secretRefs: [],
+    ingress: null,
+    healthCheck: null,
+    rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+    ...over,
+  };
+}
+
+describe("buildPlacementSnapshot", () => {
+  it("keeps per-node replica counts and sorts occupiedNodeIds", () => {
+    const snapshot = buildPlacementSnapshot(
+      [
+        { nodeId: "node-b", services: [svcConfig({ replicas: 3 })] },
+        { nodeId: "node-a", services: [svcConfig({ replicas: 1 }), svcConfig({ service: "worker" })] },
+      ],
+      "shop",
+    );
+
+    expect(snapshot.occupiedNodeIds).toEqual(["node-a", "node-b"]);
+    expect(snapshot.byNode.get("node-b")).toEqual([
+      { service: "web", replicas: 3, ingress: null },
+    ]);
+    expect(snapshot.byNode.get("node-a")).toEqual([
+      { service: "web", replicas: 1, ingress: null },
+      { service: "worker", replicas: 1, ingress: null },
+    ]);
+    // the aggregate view still sums replicas across nodes
+    expect(snapshot.footprints).toEqual([
+      expect.objectContaining({ service: "web", replicas: 4, nodeIds: ["node-a", "node-b"] }),
+      expect.objectContaining({ service: "worker", replicas: 1, nodeIds: ["node-a"] }),
+    ]);
+  });
+
+  it("ignores other projects' services", () => {
+    const snapshot = buildPlacementSnapshot(
+      [{ nodeId: "node-a", services: [svcConfig({ project: "other" })] }],
+      "shop",
+    );
+    expect(snapshot.occupiedNodeIds).toEqual([]);
+    expect(snapshot.footprints).toEqual([]);
+    expect(snapshot.byNode.size).toBe(0);
+  });
+});
 
 describe("loadDeployedFootprints", () => {
   it("aggregates replicas and node ids per service across nodes", async () => {

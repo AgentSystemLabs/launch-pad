@@ -1,0 +1,137 @@
+# Getting started
+
+Everything you need before and during your first deploy. The agent is installed on nodes
+automatically — you never install anything on a server by hand.
+
+> Want the whole journey end-to-end (first deploy → HTTPS → scale → rollback → grow to a
+> cluster → tear down)? See **[the indie-hacker happy path](happy-path.md)**.
+
+## Prerequisites
+
+### On your machine (where you run the CLI)
+
+| Requirement | Why |
+| ----------- | --- |
+| **Node.js 20+** (24+ recommended) | Runs `npx @agentsystemlabs/launch-pad` |
+| **Docker with Buildx** | `deploy` builds `linux/amd64` images and pushes to ECR. The daemon must be running. |
+| **Git** (recommended) | Clean checkouts get immutable image tags from the commit SHA |
+| **AWS credentials** | Configure via `aws configure`, an AWS profile, or standard env vars (`AWS_ACCESS_KEY_ID`, etc.) |
+
+Verify before deploying:
+
+```bash
+docker buildx version
+aws sts get-caller-identity   # confirms credentials work
+```
+
+### AWS account
+
+Launch Pad creates and manages resources in **your** AWS account. The CLI needs permission
+to:
+
+- **EC2** — launch, stop, start, and terminate instances; Elastic IPs; security groups; VPC
+- **IAM** — create per-node instance roles and profiles (least-privilege S3 + ECR access)
+- **S3** — state bucket (`launch-pad-state-<account>-<region>`) for desired/status JSON
+- **ECR** — repositories and image push/pull
+- **SSM** — Parameter Store for secrets; Run Command (used by `node upgrade-agent` and live monitoring)
+- **STS** — resolve caller identity
+
+Rather than attaching `AdministratorAccess`, generate a **least-privilege operator policy**
+that grants exactly the above, scoped to launch-pad's resources and a single region:
+
+```bash
+launch-pad setup iam-policy --json > operator-policy.json
+aws iam create-policy --policy-name launch-pad-operator \
+  --policy-document file://operator-policy.json
+aws iam attach-user-policy --user-name <you> \
+  --policy-arn arn:aws:iam::<account>:policy/launch-pad-operator
+```
+
+For keyless CI deploys, `launch-pad setup github-oidc --repo <owner/name>` prints the GitHub
+OIDC trust policy + a deploy workflow. See [cli.md](cli.md#setup). All created resources are
+tagged `launch-pad=true` for discovery and cost allocation.
+
+**Region:** pass `--region <region>` or set it in `~/.launch-pad/config.toml` when using
+named clusters. Otherwise the CLI uses your default AWS config region.
+
+### DNS (for web services with HTTPS)
+
+Web services declare a `domain` in `launch-pad.toml`. Before Caddy can obtain a
+certificate:
+
+1. Point the domain's **A record** at the node's (or edge's) **Elastic IP**. Every `deploy`
+   prints a **DNS panel** with the exact IP for each domain. On **Route53**, run
+   `launch-pad dns setup` to write the record automatically (DNS-only).
+2. The record must resolve **directly** to the node — a Cloudflare **proxied**
+   (orange-cloud) record breaks Let's Encrypt HTTP/TLS challenges. Use the **grey cloud**
+   (DNS-only) setting.
+3. Check it before (or after) deploying with `launch-pad dns verify <domain>` — it resolves
+   the record, confirms it matches the node's Elastic IP, and warns on a Cloudflare proxy,
+   the wrong IP, or a missing record. See [cli.md](cli.md#dns).
+
+Workers (services with no `domain` / `port`) do not need DNS.
+
+## Quick start
+
+From your app directory:
+
+```bash
+# 0a. First-run bootstrap: pick a region + create the state bucket (guided).
+#     Skippable if you've already deployed in this account+region.
+npx @agentsystemlabs/launch-pad setup
+
+# 0b. Preflight: verify Docker, AWS creds/region, S3, ECR, VPC, and the golden AMI
+#     before any spend (provisions nothing; exits non-zero on a blocker).
+npx @agentsystemlabs/launch-pad doctor
+
+# 1. Scaffold launch-pad.toml (interactive, or pass flags)
+npx @agentsystemlabs/launch-pad init \
+  --name my-app \
+  --node node-dev-1 \
+  --domain app.example.com \
+  --port 3000
+
+# 2. Point app.example.com → your node's Elastic IP (after step 3 creates it)
+#    deploy prints the exact IP; verify with `launch-pad dns verify app.example.com`
+
+# 3. Deploy (builds, pushes, auto-provisions the node on first run)
+npx @agentsystemlabs/launch-pad deploy --yes
+
+# 4. Watch convergence
+npx @agentsystemlabs/launch-pad status
+
+# 5. Tail your app's logs
+npx @agentsystemlabs/launch-pad logs web --follow
+```
+
+On first deploy, Launch Pad prints a provisioning plan (EC2 instance type, role) and asks
+for confirmation. Pass **`--yes`** to skip the prompt (required in CI / non-TTY).
+
+Try the runnable fixture: [`examples/both-node-web-worker`](../examples/both-node-web-worker)
+— a tiny Express web service plus a background worker on one node. The full example matrix
+is in [`examples/README.md`](../examples/README.md).
+
+## What gets installed on a node (automatic)
+
+When you run `launch-pad node create` (or `deploy` auto-provisions a node), cloud-init uses
+the bundled **golden AMI** when one is available for the target region. That AMI already has
+**Docker**, **Caddy**, the **Amazon CloudWatch Agent**, **Node.js 22**, and the **Rust Launch
+Pad agent** baked in, so first boot only writes node-specific config and starts services. If
+no golden AMI is published for the region, Launch Pad falls back to the latest Amazon Linux
+2023 AMI and runs the full bootstrap script.
+
+The node pulls application images from ECR using its instance role — **no static AWS keys on
+the box**. See [golden-ami.md](golden-ami.md) for how the AMI is built and how AMI/agent
+selection works.
+
+## After the first deploy
+
+- Subsequent `deploy` runs build a new image, push it under an immutable content-addressed
+  tag, and roll containers with **zero downtime** (health-gated surge/drain).
+- The project's **identity** is locked after the first deploy (placement, domains, ports,
+  build inputs, health checks, rollout); the **operational** fields stay open: scale with
+  `launch-pad scale replicas|cpu|memory`, change non-secret config with `launch-pad config
+  set`. See [configuration.md](configuration.md#config-lock).
+- Add secrets with `launch-pad secret set`, then `deploy --restart` to roll them out —
+  see [cli.md](cli.md#secret).
+- Save money on idle environments with `node pause` / `cluster pause`.

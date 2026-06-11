@@ -3,6 +3,7 @@ import {
   assertConfigLockAllowed,
   baselineFromDeployedFootprints,
   findConfigLockViolations,
+  parseConfigBaseline,
   snapshotConfigBaseline,
   type ConfigBaseline,
   type DeployedFootprint,
@@ -17,6 +18,8 @@ const baseConfig: LaunchPadConfig = {
       name: "web",
       node: "node-app",
       edge: "node-edge",
+      schedule: "even",
+      topology: "auto",
       dockerfile: "./Dockerfile",
       context: ".",
       replicas: 1,
@@ -27,6 +30,7 @@ const baseConfig: LaunchPadConfig = {
       port: 3000,
       healthCheck: { path: "/healthz", intervalMs: 2000, timeoutMs: 2000, healthyThreshold: 2 },
       rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+      secrets: [],
     },
   ],
 };
@@ -47,6 +51,7 @@ const webFootprint: DeployedFootprint = {
   cpu: 256,
   memory: 256,
   env: { NODE_ENV: "production" },
+  secrets: [],
   // ingress + healthCheck carry the RESOLVED port, exactly like desired.json.
   ingress: { domain: "app.agentsystem.dev", port: 3000, edge: "node-edge" },
   healthCheck: { path: "/healthz", port: 3000, intervalMs: 2000, timeoutMs: 2000, healthyThreshold: 2 },
@@ -81,6 +86,11 @@ describe("findConfigLockViolations (baseline file)", () => {
     expect(() => assertConfigLockAllowed(baseline(), current)).not.toThrow();
   });
 
+  it("allows adding secret key names after the initial deploy", () => {
+    const current = baseline(withService({ secrets: ["DATABASE_URL", "STRIPE_KEY"] }));
+    expect(findConfigLockViolations(baseline(), current)).toEqual([]);
+  });
+
   it("rejects project rename", () => {
     const current = baseline({ ...baseConfig, project: "other" });
     expect(findConfigLockViolations(baseline(), current)).toEqual([
@@ -98,9 +108,24 @@ describe("findConfigLockViolations (baseline file)", () => {
     expect(findConfigLockViolations(baseline(), current)[0]?.path).toBe("service.web");
   });
 
-  it("rejects replicas change", () => {
+  it("allows replicas changes (scaling is a safe post-deploy mutation)", () => {
     const current = baseline(withService({ replicas: 3 }));
-    expect(findConfigLockViolations(baseline(), current)[0]?.path).toBe("service.web");
+    expect(findConfigLockViolations(baseline(), current)).toEqual([]);
+    expect(() => assertConfigLockAllowed(baseline(), current)).not.toThrow();
+  });
+
+  it("allows cpu, memory, replicas, env, and secrets to all change together", () => {
+    const current = baseline(
+      withService({
+        cpu: 512,
+        memory: 1024,
+        replicas: 4,
+        env: { NODE_ENV: "staging", FEATURE_X: "on" },
+        secrets: ["DATABASE_URL"],
+      }),
+    );
+    expect(findConfigLockViolations(baseline(), current)).toEqual([]);
+    expect(() => assertConfigLockAllowed(baseline(), current)).not.toThrow();
   });
 
   it("rejects dockerfile / context change", () => {
@@ -120,8 +145,14 @@ describe("findConfigLockViolations (baseline file)", () => {
     expect(findConfigLockViolations(baseline(), current)[0]?.path).toBe("service.web");
   });
 
-  it("rejects env and placement changes", () => {
-    expect(findConfigLockViolations(baseline(), baseline(withService({ env: { NODE_ENV: "staging" } })))[0]?.path).toBe("service.web");
+  it("allows env changes (non-secret config is a safe post-deploy mutation)", () => {
+    expect(findConfigLockViolations(baseline(), baseline(withService({ env: { NODE_ENV: "staging" } })))).toEqual([]);
+    expect(
+      findConfigLockViolations(baseline(), baseline(withService({ env: { NODE_ENV: "production", FEATURE_X: "on" } }))),
+    ).toEqual([]);
+  });
+
+  it("rejects placement changes", () => {
     expect(findConfigLockViolations(baseline(), baseline(withService({ node: "node-app-2" })))[0]?.path).toBe("service.web");
     expect(findConfigLockViolations(baseline(), baseline(withService({ node: undefined, nodes: ["a", "b"], edge: "node-edge" })))[0]?.path).toBe("service.web");
   });
@@ -129,6 +160,24 @@ describe("findConfigLockViolations (baseline file)", () => {
   it("rejects edge change", () => {
     const current = baseline(withService({ edge: "node-edge-2" }));
     expect(findConfigLockViolations(baseline(), current)[0]?.path).toBe("service.web");
+  });
+
+  it("rejects schedule and topology changes", () => {
+    expect(findConfigLockViolations(baseline(), baseline(withService({ schedule: "capacity" })))[0]?.path).toBe("service.web");
+    expect(findConfigLockViolations(baseline(), baseline(withService({ topology: "split" })))[0]?.path).toBe("service.web");
+  });
+
+  it("parses a legacy baseline without schedule/topology and compares clean", () => {
+    // A baseline file written before the fields existed: strip them, re-parse, compare.
+    const legacy = JSON.parse(JSON.stringify(baseline())) as ConfigBaseline;
+    for (const s of legacy.services) {
+      delete (s as Partial<(typeof legacy.services)[number]>).schedule;
+      delete (s as Partial<(typeof legacy.services)[number]>).topology;
+    }
+    const reparsed = parseConfigBaseline(legacy);
+    expect(reparsed.services[0]?.schedule).toBe("even");
+    expect(reparsed.services[0]?.topology).toBe("auto");
+    expect(findConfigLockViolations(reparsed, baseline())).toEqual([]);
   });
 
   it("rejects top-level domainPattern change", () => {
@@ -163,7 +212,9 @@ describe("findConfigLockViolations (baseline file)", () => {
         expect.objectContaining({ path: "service.webgg" }),
       ]),
     );
-    expect(() => assertConfigLockAllowed(baseline(), renamed)).toThrow(/only cpu and memory may change/);
+    expect(() => assertConfigLockAllowed(baseline(), renamed)).toThrow(
+      /only cpu, memory, replicas, env, and secrets may change/,
+    );
   });
 });
 
@@ -191,8 +242,30 @@ describe("findConfigLockViolations (baseline reconstructed from desired.json)", 
     expect(findConfigLockViolations(fromDesired, current, opts)[0]?.path).toBe("service.web");
   });
 
-  it("rejects an env change", () => {
+  it("allows an env change", () => {
     const current = baseline(withService({ env: { NODE_ENV: "staging" } }));
+    expect(findConfigLockViolations(fromDesired, current, opts)).toEqual([]);
+  });
+
+  it("allows a replicas change", () => {
+    const current = baseline(withService({ replicas: 5 }));
+    expect(findConfigLockViolations(fromDesired, current, opts)).toEqual([]);
+  });
+
+  it("drops schedule/topology from the compare (desired.json can't carry them)", () => {
+    const current = baseline(withService({ schedule: "capacity", topology: "split" }));
+    expect(findConfigLockViolations(fromDesired, current, opts)).toEqual([]);
+  });
+
+  it("does not false-positive on a cluster-placed decl vs reconstructed node/nodes/edge", () => {
+    // The reconstructed baseline records wherever replicas landed (node-app,
+    // edge node-edge); a decl that never pinned placement must not trip the lock.
+    const current = baseline(withService({ node: undefined, edge: undefined }));
+    expect(findConfigLockViolations(fromDesired, current, opts)).toEqual([]);
+  });
+
+  it("still catches a node change on a PINNED decl in fromDesired mode", () => {
+    const current = baseline(withService({ node: "node-app-2" }));
     expect(findConfigLockViolations(fromDesired, current, opts)[0]?.path).toBe("service.web");
   });
 

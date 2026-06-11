@@ -111,7 +111,11 @@ async function streamFollow(
       for (const e of events) {
         if (e.eventId && seen.has(e.eventId)) continue;
         if (e.eventId) seen.add(e.eventId);
-        if (isJsonMode()) printJson(toJsonEvent(e));
+        // Follow mode streams forever, so JSON output must be newline-delimited
+        // (one compact object per line) — not the pretty multi-line blocks
+        // `printJson` emits — so a line-based consumer can parse each event as it
+        // arrives. (Matches `node monitor --watch --json`.)
+        if (isJsonMode()) process.stdout.write(`${JSON.stringify(toJsonEvent(e))}\n`);
         else printEvent(e);
         if (e.timestamp > from) from = e.timestamp;
       }

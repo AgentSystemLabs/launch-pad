@@ -19,6 +19,8 @@ export interface RunOptions {
   allowFail?: boolean;
   /** Hard timeout in ms (default 25 min — covers provisioning + image pull). */
   timeout?: number;
+  /** Optional stdin for commands that read from a prompt/pipe (e.g. secret set). */
+  input?: string;
 }
 
 export interface Cli {
@@ -33,15 +35,31 @@ const DEFAULT_TIMEOUT = 25 * 60_000;
  * `~/.launch-pad` is never touched) and an AWS region. Spawns the *built*
  * `dist/index.js` so the test exercises the artifact users run.
  */
-export function makeCli(opts: { home: string; region: string; env?: Record<string, string> }): Cli {
+export function makeCli(opts: {
+  home: string;
+  region: string;
+  env?: Record<string, string>;
+  /**
+   * Strip every inherited `AWS_*` var (profile, SSO, web-identity, container creds, a
+   * custom credentials/config file) before applying `env`, so a run that injects scoped
+   * keys can't silently fall back to the parent's admin identity. Used by e2e:operator-iam.
+   */
+  clearAwsEnv?: boolean;
+}): Cli {
   if (!existsSync(CLI)) {
     throw new Error(
       `built CLI not found at ${CLI}\n  run \`pnpm --filter @agentsystemlabs/launch-pad build\` first ` +
         "(the root `pnpm e2e` script does this automatically)",
     );
   }
+  const inherited: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (opts.clearAwsEnv && k.startsWith("AWS_")) continue;
+    inherited[k] = v;
+  }
   const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
+    ...inherited,
     LAUNCHPAD_HOME: opts.home,
     AWS_REGION: opts.region,
     AWS_DEFAULT_REGION: opts.region,
@@ -55,6 +73,7 @@ export function makeCli(opts: { home: string; region: string; env?: Record<strin
       env,
       reject: false,
       timeout: runOpts.timeout ?? DEFAULT_TIMEOUT,
+      input: runOpts.input,
       all: false,
     });
     const out: CliResult = {

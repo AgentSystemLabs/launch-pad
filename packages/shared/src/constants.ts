@@ -20,6 +20,13 @@ export const PROTOCOL_VERSION = 1 as const;
 export const CONFIG_BASELINE_VERSION = 1 as const;
 
 /**
+ * Format version of an append-only `events/<id>.json` deploy-history record (see
+ * events.ts). Separate from PROTOCOL_VERSION / CONFIG_BASELINE_VERSION; bumped on its
+ * own. History is advisory (audit + rollback hint), never load-bearing for reconcile.
+ */
+export const DEPLOY_EVENT_VERSION = 1 as const;
+
+/**
  * The implicit cluster every pre-cluster node belongs to. Its state lives at the
  * legacy un-prefixed `nodes/<id>/` root (no `clusters/` segment) so existing nodes
  * keep working with no migration. Named clusters scope under `clusters/<id>/`.
@@ -42,6 +49,7 @@ export const LABELS = {
   replica: "launchpad.replica",
   cpu: "launchpad.cpu",
   memory: "launchpad.memory",
+  configStamp: "launchpad.configStamp",
 } as const;
 
 /**

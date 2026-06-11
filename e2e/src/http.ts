@@ -36,6 +36,8 @@ export interface Sample {
   status: number | null;
   body: string;
   error?: string;
+  /** Wall-clock completion time — lets a failed sample be correlated with rollout steps. */
+  at: string;
 }
 
 async function once(url: string, timeoutMs: number): Promise<Sample> {
@@ -45,9 +47,17 @@ async function once(url: string, timeoutMs: number): Promise<Sample> {
     // disable verification.
     const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: "follow" });
     const body = await res.text();
-    return { ok: res.ok, status: res.status, body };
+    return { ok: res.ok, status: res.status, body, at: new Date().toISOString() };
   } catch (error) {
-    return { ok: false, status: null, body: "", error: (error as Error).message };
+    const cause = (error as { cause?: Error }).cause;
+    const detail = cause ? ` (cause: ${cause.message})` : "";
+    return {
+      ok: false,
+      status: null,
+      body: "",
+      error: `${(error as Error).message}${detail}`,
+      at: new Date().toISOString(),
+    };
   }
 }
 

@@ -108,6 +108,7 @@ function replica(over: Partial<ManagedReplica>): ManagedReplica {
     cpu: 256,
     memory: 256,
     hostPort: null,
+    configStamp: "",
     ...over,
   };
 }

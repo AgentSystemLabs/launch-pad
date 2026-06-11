@@ -69,6 +69,28 @@ describe("renderUserData", () => {
     expect(appScript).toContain("launch-pad-logforward-agent.service");
     expect(appScript).not.toContain("launch-pad-logforward-caddy.service");
   });
+
+  it("uses the baked Rust agent on a golden AMI without dependency installs or S3 download", () => {
+    const golden = renderUserData({ agent, agentType: "rust", bootstrapMode: "golden" });
+    expect(golden).toContain("systemctl enable --now docker");
+    expect(golden).toContain("test -x /opt/launch-pad/agent");
+    expect(golden).toContain("Rust agent binary is baked into the launch-pad golden AMI");
+    expect(golden).toContain("test -x /usr/local/bin/caddy");
+    expect(golden).toContain("test -x /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl");
+    expect(golden).not.toContain("dnf install -y docker");
+    expect(golden).not.toContain("dnf install -y amazon-cloudwatch-agent");
+    expect(golden).not.toContain("rpm.nodesource.com");
+    expect(golden).not.toContain("caddyserver.com");
+    expect(golden).not.toContain("agent.cjs?sig=abc");
+  });
+
+  it("still downloads a TypeScript agent bundle on a golden AMI", () => {
+    const goldenTs = renderUserData({ agent, bundleUrl, agentType: "ts", bootstrapMode: "golden" });
+    expect(goldenTs).toContain("node --version");
+    expect(goldenTs).toContain("agent.cjs?sig=abc");
+    expect(goldenTs).toContain("/opt/launch-pad/agent.cjs");
+    expect(goldenTs).not.toContain("dnf install -y nodejs");
+  });
 });
 
 describe("renderSystemdUnit", () => {
@@ -77,5 +99,10 @@ describe("renderSystemdUnit", () => {
     expect(unit).toContain("Restart=always");
     expect(unit).toContain("After=docker.service");
     expect(unit).toContain("ExecStart=/usr/bin/env node /opt/launch-pad/agent.cjs");
+  });
+
+  it("runs the Rust binary directly", () => {
+    const unit = renderSystemdUnit("rust");
+    expect(unit).toContain("ExecStart=/opt/launch-pad/agent");
   });
 });

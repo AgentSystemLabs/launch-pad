@@ -77,7 +77,12 @@ export async function prepareFixture(spec: FixtureSpec): Promise<Fixture> {
     'app.get("/", (_req, res) => {\n  console.log(`request ${RELEASE} ${hostname()}`);',
   );
   if (withReqLog === server) throw new Error("could not inject request logging into server.js");
-  writeFileSync(serverPath, withReqLog, "utf8");
+  const withSecretRoute = withReqLog.replace(
+    'app.get("/healthz", (_req, res) => {',
+    'app.get("/secret", (_req, res) => {\n  res.type("text/plain").send(`secret:${process.env.LAUNCHPAD_E2E_SECRET ?? "missing"}\\n`);\n});\n\napp.get("/healthz", (_req, res) => {',
+  );
+  if (withSecretRoute === withReqLog) throw new Error("could not inject secret route into server.js");
+  writeFileSync(serverPath, withSecretRoute, "utf8");
 
   writeFileSync(join(dir, "launch-pad.toml"), renderToml(spec), "utf8");
 

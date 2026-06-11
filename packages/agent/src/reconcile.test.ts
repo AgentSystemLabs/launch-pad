@@ -1,12 +1,27 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type DesiredState,
   PROTOCOL_VERSION,
+  serviceConfigStamp,
   type ServiceConfig,
   serviceKey,
 } from "@agentsystemlabs/launch-pad-shared";
-import type { ManagedReplica } from "./docker";
-import { type Action, planReconcile } from "./reconcile";
+import { type ManagedReplica, stopContainer } from "./docker";
+import { waitHealthy } from "./health";
+import { type Action, type ApplyContext, applyActions, planReconcile } from "./reconcile";
+
+// The rollout tests below exercise applyActions' ORDERING (routing refresh vs.
+// container stop), so Docker and the health probe are stubbed out entirely.
+vi.mock("./docker", () => ({
+  containerName: (project: string, service: string, index: number) =>
+    `launchpad_${project}_${service}_${index}`,
+  pull: vi.fn(async () => {}),
+  removeContainer: vi.fn(async () => {}),
+  runContainer: vi.fn(async () => {}),
+  startContainer: vi.fn(async () => {}),
+  stopContainer: vi.fn(async () => {}),
+}));
+vi.mock("./health", () => ({ waitHealthy: vi.fn(async () => true) }));
 
 function svc(project: string, service: string, image: string, replicas = 1): ServiceConfig {
   return {
@@ -17,6 +32,7 @@ function svc(project: string, service: string, image: string, replicas = 1): Ser
     memory: 256,
     replicas,
     env: {},
+    secretRefs: [],
     ingress: null,
     healthCheck: null,
     rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
@@ -36,6 +52,9 @@ function rep(
   cpu = 256,
   memory = 256,
 ): ManagedReplica {
+  const cfg = svc(project, service, image);
+  cfg.cpu = cpu;
+  cfg.memory = memory;
   return {
     id: `id-${service}-${index}`,
     name: `launchpad_${project}_${service}_${index}`,
@@ -47,6 +66,7 @@ function rep(
     cpu,
     memory,
     hostPort: 20000 + index,
+    configStamp: serviceConfigStamp(cfg),
   };
 }
 
@@ -79,6 +99,15 @@ describe("planReconcile (replica-aware)", () => {
       actualMap([rep("blog", "api", 0, "img:1", "running")]),
     );
     expect(typesFor(actions, "blog", "api")).toEqual(["noop"]);
+  });
+
+  it("rolls out when restartAt changes (deploy --restart)", () => {
+    const config = { ...svc("blog", "api", "img:1"), restartAt: "2026-06-09T00:00:00.000Z" };
+    const actions = planReconcile(
+      desired([config]),
+      actualMap([rep("blog", "api", 0, "img:1", "running")]),
+    );
+    expect(typesFor(actions, "blog", "api")).toEqual(["rollout"]);
   });
 
   it("rolls out when the image differs", () => {
@@ -151,5 +180,89 @@ describe("planReconcile (replica-aware)", () => {
     expect(actions.filter((a) => a.type === "create")).toHaveLength(0);
     expect(actions.filter((a) => a.type === "scaleDown")).toHaveLength(0);
     expect(typesFor(actions, "blog", "api")).toEqual(["noop"]);
+  });
+});
+
+/** A web service fronted by a REMOTE edge node (routing propagates via S3 shards). */
+function webSvc(image: string, replicas = 1): ServiceConfig {
+  return {
+    ...svc("p", "web", image, replicas),
+    ingress: { domain: "app.example.com", port: 3000, edge: "edge-1" },
+    healthCheck: { path: "/healthz", intervalMs: 100, timeoutMs: 100, healthyThreshold: 1 },
+    rollout: { maxSurge: 1, drainTimeout: "0s", stopGrace: "1s" },
+  };
+}
+
+function makeCtx(overrides: Partial<ApplyContext> = {}): { ctx: ApplyContext; events: string[] } {
+  const events: string[] = [];
+  let nextPort = 21000;
+  const ctx: ApplyContext = {
+    bindHost: () => "0.0.0.0",
+    port: () => {
+      nextPort += 1;
+      return nextPort;
+    },
+    releasePort: () => {},
+    refreshRouting: async (excludeIds = new Set()) => {
+      events.push(`refresh[${[...excludeIds].sort().join(",")}]`);
+    },
+    drainFloorMs: () => 0,
+    heartbeat: async () => {},
+    errors: new Map(),
+    ...overrides,
+  };
+  return { ctx, events };
+}
+
+describe("applyActions rollout (remote-edge routing safety)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("removes a draining replica from routing BEFORE stopping it, flooring the wait at the propagation time", async () => {
+    const config = webSvc("img:2");
+    const old = rep("p", "web", 0, "img:1", "running");
+    const { ctx, events } = makeCtx({ drainFloorMs: () => 80 });
+    let excludePublishedAt = 0;
+    let stoppedAt = 0;
+    const recordRefresh = ctx.refreshRouting;
+    ctx.refreshRouting = async (excludeIds = new Set()) => {
+      await recordRefresh(excludeIds);
+      if (excludeIds.has(old.id) && excludePublishedAt === 0) excludePublishedAt = Date.now();
+    };
+    vi.mocked(waitHealthy).mockResolvedValue(true);
+    vi.mocked(stopContainer).mockImplementation(async (id) => {
+      events.push(`stop[${id}]`);
+      if (id === old.id) stoppedAt = Date.now();
+    });
+
+    await applyActions([{ type: "rollout", config, replicas: [old] }], ctx);
+
+    expect(events).toEqual([
+      "refresh[]", // surged replica passed health → joined routing
+      `refresh[${old.id}]`, // old replica removed from routing (drain)…
+      `stop[${old.id}]`, // …and only stopped after the drain wait
+      "refresh[]", // final converged refresh
+    ]);
+    // drainTimeout is "0s" but the remote-edge floor (80ms here) must still apply.
+    expect(stoppedAt - excludePublishedAt).toBeGreaterThanOrEqual(75);
+    expect(ctx.errors.size).toBe(0);
+  });
+
+  it("aborts on a failed health check: stops only the NEW replica, old keeps serving", async () => {
+    const config = webSvc("img:2");
+    const old = rep("p", "web", 0, "img:1", "running");
+    const { ctx, events } = makeCtx();
+    vi.mocked(waitHealthy).mockResolvedValue(false);
+    vi.mocked(stopContainer).mockImplementation(async (id) => {
+      events.push(`stop[${id}]`);
+    });
+
+    await applyActions([{ type: "rollout", config, replicas: [old] }], ctx);
+
+    // The failed surge (index 1) is stopped by name; the old replica is never
+    // stopped and the post-abort refresh keeps it routed.
+    expect(events).toEqual(["stop[launchpad_p_web_1]", "refresh[]"]);
+    expect(ctx.errors.get("p/web")).toMatch(/failed health check/);
   });
 });

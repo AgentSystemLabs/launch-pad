@@ -16,7 +16,11 @@ project = "example-clusters"
 
 [[service]]
 name = "web"
-# no node/nodes — placement comes from `deploy --cluster lower`
+# no node/nodes — placement comes from `deploy --cluster lower`.
+# Implicit defaults: schedule = "even" (round-robin across the cluster's app/both
+# nodes) and topology = "auto" (route through the cluster's default edge). See
+# examples/cluster-capacity-split for schedule = "capacity" / topology = "split"
+# and examples/cluster-co-located-single-node for topology = "co-located".
 dockerfile = "../both-node-web-worker/Dockerfile"
 context = "../both-node-web-worker"
 cpu = 256

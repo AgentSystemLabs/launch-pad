@@ -1,0 +1,7 @@
+node_modules
+dist
+bun.lockb
+test-results
+playwright-report
+.launch-pad-dashboard
+.ux-improve-loop

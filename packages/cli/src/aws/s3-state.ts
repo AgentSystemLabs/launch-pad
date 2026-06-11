@@ -120,6 +120,29 @@ export async function getJson(s3: S3Client, bucket: string, key: string): Promis
   }
 }
 
+/** Read an object's raw body as text, or null if it doesn't exist. Used by `backup` to
+ *  capture each state object byte-for-byte (no re-serialization). */
+export async function getObjectText(s3: S3Client, bucket: string, key: string): Promise<string | null> {
+  try {
+    const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    return (await res.Body?.transformToString()) ?? "";
+  } catch (error) {
+    if (awsErrorName(error) === "NoSuchKey" || awsStatusCode(error) === 404) return null;
+    throw error;
+  }
+}
+
+/** Write a raw text body. Used by `restore` to re-upload a captured object verbatim. */
+export async function putObjectText(
+  s3: S3Client,
+  bucket: string,
+  key: string,
+  body: string,
+  contentType = "application/json",
+): Promise<void> {
+  await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType }));
+}
+
 export interface PutJsonOptions {
   /** Only write if the current object matches this ETag (optimistic update). */
   ifMatch?: string;
@@ -155,8 +178,32 @@ export async function putJson(
   }
 }
 
-export async function deleteObject(s3: S3Client, bucket: string, key: string): Promise<void> {
-  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+export interface DeleteObjectOptions {
+  /** Only delete if the current object still matches this ETag (optimistic delete). */
+  ifMatch?: string;
+}
+
+/** Delete an object. With `ifMatch`, throws PreconditionFailedError on a 412 (concurrent write). */
+export async function deleteObject(
+  s3: S3Client,
+  bucket: string,
+  key: string,
+  options: DeleteObjectOptions = {},
+): Promise<void> {
+  try {
+    await s3.send(
+      new DeleteObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ...(options.ifMatch ? { IfMatch: options.ifMatch } : {}),
+      }),
+    );
+  } catch (error) {
+    if (awsErrorName(error) === "PreconditionFailed" || awsStatusCode(error) === 412) {
+      throw new PreconditionFailedError();
+    }
+    throw error;
+  }
 }
 
 /**
@@ -183,6 +230,26 @@ export async function deletePrefix(s3: S3Client, bucket: string, prefix: string)
     token = listed.IsTruncated ? listed.NextContinuationToken : undefined;
   } while (token);
   return deleted;
+}
+
+/**
+ * List every object key under a prefix (flat — no delimiter), paging through results.
+ * Keys come back in S3's lexicographic order, so a timestamp-leading naming scheme (e.g.
+ * deploy events) lists chronologically. Returns [] when the bucket/prefix is empty.
+ */
+export async function listObjectKeys(s3: S3Client, bucket: string, prefix: string): Promise<string[]> {
+  const keys: string[] = [];
+  let token: string | undefined;
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
+    );
+    for (const o of res.Contents ?? []) {
+      if (o.Key) keys.push(o.Key);
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return keys;
 }
 
 /**

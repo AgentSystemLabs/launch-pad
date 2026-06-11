@@ -29,18 +29,19 @@ import {
   terminateInstance,
 } from "../../aws/ec2";
 import { awsErrorName, isDestroyAlreadyGoneError } from "../../aws/errors";
-import { nodeProfileName, nodeRoleName } from "../../aws/iam";
+import { deleteNodeIam, nodeProfileName, nodeRoleName } from "../../aws/iam";
 import { getClusterConfig, putClusterConfig } from "../../cluster/store";
 import { rememberClusterTarget } from "../../config/local";
 import { deleteObject, ensureBucket, getJson, listNodeIds, putJson } from "../../aws/s3-state";
-import { resolveLatestAl2023Ami } from "../../aws/ssm";
 import { applyNodeDrift } from "../../deploy/drift-apply";
 import { type NodeDrift, planNodeDrift } from "../../deploy/drift-plan";
 import { CliError } from "../../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
-import type { AgentType } from "../../provision/agent-bundle";
+import { defaultAgentTypeForBootstrap, type AgentType } from "../../provision/agent-bundle";
+import { resolveNodeAmi } from "../../provision/golden-ami";
 import { installLoggingOnNode } from "../../provision/install-logging";
 import { registerMonitor } from "./monitor";
+import { type RebalanceOptions, runRebalance } from "../rebalance";
 import {
   provisionNode,
   resizeNode,
@@ -97,6 +98,12 @@ function driftBadge(drift: NodeDrift["drift"]): string | null {
   }
 }
 
+function parseAgentType(value: string | undefined): AgentType | undefined {
+  if (value === undefined) return undefined;
+  if (value === "ts" || value === "rust") return value;
+  throw new CliError(`invalid --agent "${value}" (expected ts | rust)`);
+}
+
 // ── create ─────────────────────────────────────────────────────────────────────
 
 interface CreateOptions extends GlobalOpts {
@@ -116,10 +123,7 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
   if (opts.edge !== undefined) assertValidNodeId(opts.edge);
   const aws = await prepareAws(opts);
   const agentVersion = opts.agentVersion ?? readVersion();
-  if (opts.agent !== undefined && opts.agent !== "ts" && opts.agent !== "rust") {
-    throw new CliError(`invalid --agent "${opts.agent}" (expected ts | rust)`);
-  }
-  const agentType: AgentType = opts.agent === "rust" ? "rust" : "ts";
+  const requestedAgentType = parseAgentType(opts.agent);
 
   const roleResult = NodeRoleSchema.safeParse(opts.role);
   if (!roleResult.success) {
@@ -128,7 +132,14 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
   const role = roleResult.data;
 
   const capacity = await resolveCapacity(aws, opts.instanceType);
-  const amiId = opts.ami ?? (await resolveLatestAl2023Ami(aws.ssm));
+  const ami = await resolveNodeAmi({
+    ec2: aws.ec2,
+    ssm: aws.ssm,
+    region: aws.region,
+    explicitAmiId: opts.ami,
+  });
+  const amiId = ami.imageId;
+  const agentType = requestedAgentType ?? defaultAgentTypeForBootstrap(ami.bootstrapMode);
   const vpcId = await getDefaultVpcId(aws.ec2);
 
   const agentConfig = {
@@ -141,15 +152,18 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
   };
 
   if (opts.dryRun) {
+    const needsDownload = ami.bootstrapMode === "full" || agentType === "ts";
     const userData = renderUserData({
       agent: agentConfig,
-      bundleUrl:
-        agentType === "rust"
-          ? "https://<state-bucket>…/agent?<presigned-at-launch>"
-          : "https://<state-bucket>…/agent.cjs?<presigned-at-launch>",
+      bundleUrl: needsDownload
+        ? agentType === "rust"
+          ? "https://<state-bucket>.../agent?<presigned-at-launch>"
+          : "https://<state-bucket>.../agent.cjs?<presigned-at-launch>"
+        : undefined,
       agentType,
+      bootstrapMode: ami.bootstrapMode,
     });
-    printDryRun(name, opts, aws, capacity, amiId, vpcId, userData);
+    printDryRun(name, opts, aws, capacity, amiId, ami.source, ami.bootstrapMode, vpcId, userData);
     return;
   }
 
@@ -200,6 +214,7 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
       agentVersion,
       capacity,
       amiId,
+      amiBootstrapMode: ami.bootstrapMode,
       vpcId,
       edgeNodeId,
       keyName: opts.keyName,
@@ -254,6 +269,8 @@ function printDryRun(
   aws: AwsEnv,
   capacity: InstanceCapacity,
   amiId: string,
+  amiSource: string,
+  amiBootstrapMode: string,
   vpcId: string,
   userData: string,
 ): void {
@@ -266,6 +283,8 @@ function printDryRun(
       instanceType: opts.instanceType,
       capacity,
       amiId,
+      amiSource,
+      amiBootstrapMode,
       vpcId,
       securityGroup: securityGroupName(name),
       iamRole: nodeRoleName(aws.clusterId, name),
@@ -287,7 +306,7 @@ function printDryRun(
   ];
   if (opts.role === "app") planRows.push(["public ip", color.dim("none (VPC-private)")]);
   planRows.push(["instance type", `${opts.instanceType} ${color.dim(`(${sharesToVcpu(capacity.totalCpu)} vCPU · ${capacity.totalMemory} MB)`)}`]);
-  planRows.push(["ami", amiId]);
+  planRows.push(["ami", `${amiId} ${color.dim(`(${amiSource}, ${amiBootstrapMode} bootstrap)`)}`]);
   planRows.push(["vpc", vpcId]);
   planRows.push(["security group", `${securityGroupName(name)} ${color.dim(`(${sgRule})`)}`]);
   planRows.push(["iam role", nodeRoleName(aws.clusterId, name)]);
@@ -489,6 +508,32 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
 
 interface DestroyOptions extends GlobalOpts {
   yes?: boolean;
+  /** Destroy even when the node still hosts services (they will be orphaned). */
+  force?: boolean;
+}
+
+/** A (project, service) pair scheduled on a node — what `node destroy` would orphan. */
+export interface ScheduledService {
+  project: string;
+  service: string;
+}
+
+export interface OrphanRisk {
+  name: string;
+  services: ScheduledService[];
+}
+
+/**
+ * The nodes that still host services — destroying them orphans those services
+ * (their containers keep running with no desired-state owner). Pure so the
+ * refuse-without-`--force` decision is unit-tested.
+ */
+export function nodesThatWouldOrphan(
+  targets: Array<{ name: string; services: ScheduledService[] }>,
+): OrphanRisk[] {
+  return targets
+    .filter((t) => t.services.length > 0)
+    .map((t) => ({ name: t.name, services: t.services }));
 }
 
 /** Split node id arguments into unique, trimmed names (comma- or space-delimited). */
@@ -506,13 +551,13 @@ export function parseNodeNames(args: string | string[]): string[] {
   return names;
 }
 
-async function countScheduledServices(aws: AwsEnv, name: string): Promise<number> {
+async function listScheduledServices(aws: AwsEnv, name: string): Promise<ScheduledService[]> {
   const desired = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, name));
-  if (!desired) return 0;
+  if (!desired) return [];
   try {
-    return parseDesiredState(desired.raw).services.length;
+    return parseDesiredState(desired.raw).services.map((s) => ({ project: s.project, service: s.service }));
   } catch {
-    return 0;
+    return [];
   }
 }
 
@@ -524,13 +569,13 @@ interface TeardownProgress {
 interface DestroyTarget {
   name: string;
   node: NodeRegistryEntry | null;
-  serviceCount: number;
+  services: ScheduledService[];
 }
 
 async function loadDestroyTarget(aws: AwsEnv, name: string): Promise<DestroyTarget> {
   const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, name));
   if (!obj) {
-    return { name, node: null, serviceCount: 0 };
+    return { name, node: null, services: [] };
   }
   let node: NodeRegistryEntry;
   try {
@@ -540,7 +585,7 @@ async function loadDestroyTarget(aws: AwsEnv, name: string): Promise<DestroyTarg
       hint: "fix or delete the object in S3 manually, then retry",
     });
   }
-  return { name, node, serviceCount: await countScheduledServices(aws, name) };
+  return { name, node, services: await listScheduledServices(aws, name) };
 }
 
 async function tryDestroyStep(
@@ -556,7 +601,7 @@ async function tryDestroyStep(
   }
 }
 
-async function teardownNode(
+export async function teardownNode(
   aws: AwsEnv,
   node: NodeRegistryEntry,
   progress?: TeardownProgress,
@@ -580,6 +625,14 @@ async function teardownNode(
       deleteSecurityGroup(aws.ec2, node.securityGroupId!),
     );
   }
+  // Delete the node's per-node IAM role + instance profile (best-effort + idempotent;
+  // only ever touches `launch-pad-node-<cluster>-<node>`-named resources, so a legacy
+  // shared role is left alone). Matches `cluster destroy` — without this, single-node
+  // destroy left orphan IAM roles/profiles accumulating in the account.
+  progress?.text?.("deleting IAM role");
+  await tryDestroyStep(progress, `delete IAM role ${nodeRoleName(node.clusterId, name)}`, () =>
+    deleteNodeIam(aws.iam, node.clusterId, name),
+  );
   // If this node was its cluster's default edge, clear that pointer first.
   if (node.clusterId !== DEFAULT_CLUSTER) {
     await tryDestroyStep(progress, "clear default edge", async () => {
@@ -627,13 +680,29 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
     log.dim(`  skipping already-destroyed: ${alreadyGone.map((n) => color.cyan(n)).join(", ")}`);
   }
 
+  // Safety gate: destroying a node still hosting services orphans them (their
+  // containers keep running with no desired-state owner, and no node reconciles
+  // them). Refuse unless --force explicitly acknowledges the orphaning.
+  const orphaning = nodesThatWouldOrphan(active);
+  if (orphaning.length > 0 && opts.force !== true) {
+    const lines = orphaning.map(
+      (o) => `  ${color.cyan(o.name)}: ${o.services.map((s) => `${s.project}/${s.service}`).join(", ")}`,
+    );
+    throw new CliError(
+      `refusing to destroy — ${orphaning.length} node(s) still host services that would be orphaned:\n${lines.join("\n")}`,
+      {
+        hint: "move these services to another node (re-deploy / scale) first, or pass --force to destroy and orphan them anyway",
+      },
+    );
+  }
+
   if (opts.yes !== true) {
-    const totalServices = active.reduce((sum, t) => sum + t.serviceCount, 0);
+    const totalServices = active.reduce((sum, t) => sum + t.services.length, 0);
     if (totalServices > 0) {
       const msg =
         active.length === 1
-          ? `node "${active[0]!.name}" still has ${totalServices} scheduled service(s) — they will be orphaned`
-          : `${active.length} node(s) still have ${totalServices} scheduled service(s) combined — they will be orphaned`;
+          ? `node "${active[0]!.name}" still has ${totalServices} scheduled service(s) — they will be orphaned (--force)`
+          : `${active.length} node(s) still have ${totalServices} scheduled service(s) combined — they will be orphaned (--force)`;
       log.warn(msg);
     }
     const what =
@@ -936,9 +1005,10 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
   if (!isJsonMode()) {
     log.plain();
     for (const e of targets) {
+      const artifact = e.agentType === "rust" ? "rust agent binary" : "agent bundle";
       const action = opts.uploadOnly
-        ? "upload bundle to S3"
-        : "upload bundle + restart agent via SSM";
+        ? `upload ${artifact} to S3`
+        : `upload ${artifact} + restart agent via SSM`;
       log.plain(`  ${color.cyan(e.nodeId)}  ${color.dim(action)}  ${color.dim(e.instanceId ?? "")}`);
     }
     log.plain();
@@ -949,7 +1019,7 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
       printJson({
         dryRun: true,
         agentVersion,
-        nodes: targets.map((e) => ({ nodeId: e.nodeId, instanceId: e.instanceId })),
+        nodes: targets.map((e) => ({ nodeId: e.nodeId, instanceId: e.instanceId, agentType: e.agentType })),
       });
     } else {
       log.info(`dry run — would upgrade ${targets.length} node(s) to agent ${agentVersion}`);
@@ -991,7 +1061,7 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
         );
       } else {
         spin.warn(`${color.cyan(entry.nodeId)}  ${color.yellow("bundle uploaded — install manually")}`);
-        if (result.bundleUrl) manualLines.push(manualUpgradeHint(entry.nodeId, result.bundleUrl));
+        if (result.bundleUrl) manualLines.push(manualUpgradeHint(entry.nodeId, result.bundleUrl, result.agentType));
         if (result.error) manualLines.push(`    ${color.dim(result.error)}`);
       }
     } catch (error) {
@@ -1131,6 +1201,9 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
   }
 
   const agentVersion = readVersion();
+  const recreateAmi = repairs.some((i) => i.drift.action.kind === "recreate")
+    ? await resolveNodeAmi({ ec2: aws.ec2, ssm: aws.ssm, region: aws.region })
+    : undefined;
   // Edge/both before app — ingress first.
   const order = [...repairs].sort(
     (x, y) => (x.entry.role === "app" ? 1 : 0) - (y.entry.role === "app" ? 1 : 0),
@@ -1144,6 +1217,8 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
         entry: i.entry,
         action: i.drift.action,
         agentVersion,
+        amiId: recreateAmi?.imageId,
+        amiBootstrapMode: recreateAmi?.bootstrapMode,
         onProgress: (t) => {
           spin.text = t;
         },
@@ -1278,9 +1353,9 @@ export function registerNode(program: Command): void {
     .option("--role <role>", "node role: app | edge | both", "both")
     .option("--edge <nodeId>", "for an app node: the edge node that routes to it")
     .option("--key-name <keypair>", "EC2 key pair for SSH (omit to disable SSH)")
-    .option("--ami <id>", "AMI id (default: latest Amazon Linux 2023)")
+    .option("--ami <id>", "AMI id (default: launch-pad golden AMI, falling back to latest Amazon Linux 2023)")
     .option("--agent-version <semver>", "agent version to install (default: this CLI's version)")
-    .option("--agent <runtime>", "agent runtime: ts (default) or rust", "ts")
+    .option("--agent <runtime>", "agent runtime (default: rust on golden AMI, ts on full bootstrap)")
     .option("--dry-run", "show the provisioning plan + bootstrap without creating anything")
     .option("--yes", "skip the launch confirmation prompt")
     .action(async (name: string, _opts, command: Command) => {
@@ -1310,6 +1385,18 @@ export function registerNode(program: Command): void {
       "Terminate node instance(s), release their IPs, and deregister them (comma- or space-separated)",
     )
     .option("--yes", "skip confirmation prompts")
+    .option("--force", "destroy even if the node still hosts services (they will be orphaned)")
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Refuses by default when a node still hosts scheduled services — destroying it would",
+        "orphan their containers (no node reconciles them anymore). Move the services first",
+        "(re-deploy / scale them onto another node), or pass --force to destroy anyway.",
+        "Fully tears the node down: instance + Elastic IP + security group + its per-node IAM",
+        "role/profile + S3 state. Use `cluster destroy` to tear down a whole cluster at once.",
+      ].join("\n"),
+    )
     .action(async (names: string[], _opts, command: Command) => {
       await runDestroy(names, mergedOpts<DestroyOptions>(command));
     });
@@ -1428,6 +1515,36 @@ export function registerNode(program: Command): void {
       await runReconcile(name, mergedOpts<ReconcileOptions>(command));
     });
   applyGlobalOptions(reconcile);
+
+  const evacuate = node
+    .command("evacuate <name>")
+    .description("Move the current project's cluster-placed services OFF a node before pause/destroy")
+    .option("--env <name>", "target a named environment footprint (same as deploy --env)")
+    .option("--dry-run", "show the moves without writing any state")
+    .option("--yes", "skip the confirmation prompt")
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Run from your project directory. Evacuate replans this footprint's cluster-placed",
+        "services (those that omit node/nodes) across the rest of the app pool — reusing each",
+        "service's published image — so the named node is freed. It's the safe pre-step to",
+        "`node pause/destroy`, which refuse to orphan scheduled services.",
+        "",
+        "Pinned (node/nodes) services can't be evacuated — their placement is config-locked.",
+        "A node hosting other projects needs each of them evacuated too. Equivalent to",
+        "`launch-pad rebalance --drain <name>`.",
+        "",
+        "Examples:",
+        "  $ launch-pad node evacuate node-prod-2 --dry-run",
+        "  $ launch-pad node evacuate node-prod-2 --yes",
+      ].join("\n"),
+    )
+    .action(async (name: string, _opts, command: Command) => {
+      const opts = mergedOpts<RebalanceOptions>(command);
+      await runRebalance({ ...opts, drain: name });
+    });
+  applyGlobalOptions(evacuate);
 
   registerMonitor(node);
 }

@@ -34,6 +34,7 @@ function fakeEntry(nodeId: string, state: NodeState): NodeRegistryEntry {
     iamInstanceProfile: null,
     agentId: `agent-${nodeId}`,
     agentVersion: null,
+    agentType: "ts",
     createdAt: "2026-01-01T00:00:00Z",
     createdBy: "tester",
     state,

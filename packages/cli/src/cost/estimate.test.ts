@@ -1,11 +1,28 @@
 import { describe, expect, it } from "vitest";
+import type { NodeRegistryEntry } from "@agentsystemlabs/launch-pad-shared";
 import {
+  budgetVerdict,
   estimateAgentS3Monthly,
   estimateEc2Monthly,
   estimateProvisionCost,
   formatProvisionCostSummary,
   HOURS_PER_MONTH,
+  summarizeClusterCost,
 } from "./estimate";
+
+/** Minimal registry entry for the cost rollup (only the fields it reads). */
+function entry(over: Partial<NodeRegistryEntry> & Pick<NodeRegistryEntry, "nodeId">): NodeRegistryEntry {
+  return {
+    instanceType: "t3.small",
+    role: "both",
+    state: "ready",
+    totalCpu: 2048,
+    totalMemory: 2048,
+    reservedCpu: 256,
+    reservedMemory: 512,
+    ...over,
+  } as NodeRegistryEntry;
+}
 
 describe("estimateAgentS3Monthly", () => {
   it("counts desired.json GETs for app/both and status PUTs for all roles", () => {
@@ -53,5 +70,55 @@ describe("estimateProvisionCost", () => {
     expect(est.ec2TotalUsd).toBe(0);
     expect(est.s3ByNode).toHaveLength(1);
     expect(est.totalUsd).toBe(est.s3TotalUsd);
+  });
+});
+
+describe("summarizeClusterCost", () => {
+  it("estimates running nodes (EC2 + S3) and counts paused ones separately", () => {
+    const summary = summarizeClusterCost([
+      entry({ nodeId: "app-1", state: "ready", instanceType: "t3.small" }),
+      entry({ nodeId: "app-2", state: "stopped", instanceType: "t3.small" }),
+    ]);
+    expect(summary.runningNodes).toBe(1);
+    expect(summary.pausedNodes).toBe(1);
+    // Only the running node is billed (the paused one's agent is off + compute isn't charged).
+    expect(summary.estimate.ec2Lines.reduce((n, l) => n + l.count, 0)).toBe(1);
+    expect(summary.estimate.s3ByNode).toHaveLength(1);
+  });
+
+  it("excludes terminated / terminating nodes entirely", () => {
+    const summary = summarizeClusterCost([
+      entry({ nodeId: "app-1", state: "ready" }),
+      entry({ nodeId: "dead", state: "terminated" }),
+      entry({ nodeId: "dying", state: "terminating" }),
+    ]);
+    expect(summary.runningNodes).toBe(1);
+    expect(summary.pausedNodes).toBe(0);
+    expect(summary.estimate.s3ByNode).toHaveLength(1);
+  });
+
+  it("counts a provisioning node as running (it bills from launch)", () => {
+    const summary = summarizeClusterCost([entry({ nodeId: "app-1", state: "provisioning" })]);
+    expect(summary.runningNodes).toBe(1);
+  });
+});
+
+describe("budgetVerdict", () => {
+  it("flags a footprint over budget with the overage", () => {
+    const v = budgetVerdict(50, 30);
+    expect(v.over).toBe(true);
+    expect(v.overByUsd).toBeCloseTo(20, 2);
+  });
+
+  it("passes a footprint at or under budget", () => {
+    expect(budgetVerdict(30, 30).over).toBe(false);
+    expect(budgetVerdict(10, 30).over).toBe(false);
+    expect(budgetVerdict(10, 30).overByUsd).toBe(0);
+  });
+
+  it("never flags over when the total is unknown (missing EC2 rate)", () => {
+    const v = budgetVerdict(null, 30);
+    expect(v.over).toBe(false);
+    expect(v.totalUsd).toBeNull();
   });
 });

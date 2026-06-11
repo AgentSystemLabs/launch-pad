@@ -1,5 +1,11 @@
 import { execa } from "execa";
-import { LABELS, type ServiceConfig, serviceKey } from "@agentsystemlabs/launch-pad-shared";
+import {
+  LABELS,
+  serviceConfigStamp,
+  type ServiceConfig,
+  serviceKey,
+} from "@agentsystemlabs/launch-pad-shared";
+import { resolveServiceEnv } from "./secrets";
 
 export interface ManagedReplica {
   id: string;
@@ -17,6 +23,8 @@ export interface ManagedReplica {
   memory: number;
   /** Published host port (null for workers / unpublished). */
   hostPort: number | null;
+  /** Fingerprint of env + secretRefs + restartAt at container create time. */
+  configStamp: string;
 }
 
 export function containerName(project: string, service: string, index: number): string {
@@ -70,6 +78,7 @@ export async function inspectManaged(): Promise<Map<string, ManagedReplica[]>> {
       cpu: Number.parseInt(labels[LABELS.cpu] ?? "0", 10) || 0,
       memory: Number.parseInt(labels[LABELS.memory] ?? "0", 10) || 0,
       hostPort: parseHostPort(c.NetworkSettings),
+      configStamp: labels[LABELS.configStamp] ?? "",
     });
     map.set(key, list);
   }
@@ -107,6 +116,8 @@ export interface RunSpec {
 
 export async function runContainer(spec: RunSpec): Promise<void> {
   const c = spec.config;
+  const mergedEnv = await resolveServiceEnv(c);
+  const stamp = serviceConfigStamp(c);
   const args = [
     "run",
     "-d",
@@ -126,6 +137,8 @@ export async function runContainer(spec: RunSpec): Promise<void> {
     `${LABELS.cpu}=${c.cpu}`,
     "--label",
     `${LABELS.memory}=${c.memory}`,
+    "--label",
+    `${LABELS.configStamp}=${stamp}`,
     "--restart",
     "unless-stopped",
     "--cpus",
@@ -133,7 +146,7 @@ export async function runContainer(spec: RunSpec): Promise<void> {
     "--memory",
     `${c.memory}m`,
   ];
-  for (const [key, value] of Object.entries(c.env)) {
+  for (const [key, value] of Object.entries(mergedEnv)) {
     args.push("-e", `${key}=${value}`);
   }
   if (c.ingress && spec.hostPort !== undefined) {

@@ -2,6 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   type DesiredState,
   parseDurationMs,
+  serviceConfigStamp,
   type ServiceConfig,
   serviceKey,
 } from "@agentsystemlabs/launch-pad-shared";
@@ -43,7 +44,8 @@ export function replicaNeedsReplace(replica: ManagedReplica, config: ServiceConf
   return (
     replica.image !== config.image ||
     replica.cpu !== config.cpu ||
-    replica.memory !== config.memory
+    replica.memory !== config.memory ||
+    replica.configStamp !== serviceConfigStamp(config)
   );
 }
 
@@ -114,8 +116,20 @@ export interface ApplyContext {
   /** Allocate the stable host port for (service key, replica index). */
   port: (key: string, index: number) => number;
   releasePort: (key: string, index: number) => void;
-  /** Rebuild + push Caddy from live replicas, excluding the given container ids. */
-  refreshCaddy: (excludeIds?: Set<string>) => Promise<void>;
+  /**
+   * Rebuild + push ROUTING from live replicas, excluding the given container ids:
+   * the local Caddy config (co-located web) AND/OR the upstream shards published
+   * to remote edge nodes. Both must happen here — mid-rollout, not at tick end —
+   * or a remote edge keeps routing to replicas the rollout already stopped.
+   */
+  refreshRouting: (excludeIds?: Set<string>) => Promise<void>;
+  /**
+   * Floor on the drain wait before stopping an old replica. For a service fronted
+   * by a REMOTE edge the routing update is asynchronous (S3 shard → edge poll →
+   * Caddy reload), so the wait must cover that propagation even when the user's
+   * drainTimeout is shorter. Co-located ingress reloads Caddy synchronously → 0.
+   */
+  drainFloorMs: (config: ServiceConfig) => number;
   /** Re-write status.json (keeps the heartbeat fresh during long rollouts). */
   heartbeat: () => Promise<void>;
   errors: Map<string, string>;
@@ -171,7 +185,10 @@ export async function applyActions(actions: Action[], ctx: ApplyContext): Promis
 /**
  * Health-gated rolling update: surge a new replica → wait healthy → add to the LB →
  * remove one old from the LB → drain → graceful stop. Invariant: Caddy always has
- * ≥1 healthy upstream for the domain, so there is no downtime.
+ * ≥1 healthy upstream for the domain, so there is no downtime. "The LB" may live on
+ * a remote edge node — every refreshRouting call re-publishes this node's upstream
+ * shards too, and the drain wait is floored at the edge's propagation time, so the
+ * invariant holds across the S3 → edge-poll → Caddy-reload hop.
  */
 async function rolloutService(
   config: ServiceConfig,
@@ -223,13 +240,13 @@ async function rolloutService(
             key,
             `rollout aborted: new replica failed health check for ${config.image}`,
           );
-          if (hasIngress) await ctx.refreshCaddy(draining);
+          if (hasIngress) await ctx.refreshRouting(draining);
           return;
         }
       }
       newCount += 1;
       if (hasIngress) {
-        await ctx.refreshCaddy(draining);
+        await ctx.refreshRouting(draining);
         await ctx.heartbeat();
       }
     } else if (oldQueue.length > 0) {
@@ -237,9 +254,12 @@ async function rolloutService(
       const old = oldQueue.shift() as ManagedReplica;
       if (hasIngress) {
         draining.add(old.id);
-        await ctx.refreshCaddy(draining); // stop routing to it BEFORE stopping it
+        await ctx.refreshRouting(draining); // stop routing to it BEFORE stopping it
         await ctx.heartbeat();
-        if (drainMs > 0) await sleep(drainMs);
+        // The wait must outlast routing propagation (see drainFloorMs) or the
+        // stop below kills a replica the edge is still sending requests to.
+        const waitMs = Math.max(drainMs, ctx.drainFloorMs(config));
+        if (waitMs > 0) await sleep(waitMs);
       }
       await stopContainer(old.id, graceSec);
       draining.delete(old.id);
@@ -250,7 +270,7 @@ async function rolloutService(
     }
   }
 
-  if (hasIngress) await ctx.refreshCaddy();
+  if (hasIngress) await ctx.refreshRouting();
 }
 
 export { containerName };

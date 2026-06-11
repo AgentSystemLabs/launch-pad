@@ -210,8 +210,21 @@ export function buildAppPolicy(
       },
       ...cloudWatchLogsStatements(region, accountId, clusterId),
       ...ecrStatements(region, accountId),
+      ...ssmReadStatements(region, accountId, clusterId),
     ],
   });
+}
+
+/** Read launch-pad secrets scoped to this cluster (app/both agents resolve at container start). */
+function ssmReadStatements(region: string, accountId: string, clusterId: string): Array<Record<string, unknown>> {
+  return [
+    {
+      Sid: "ReadSecrets",
+      Effect: "Allow",
+      Action: ["ssm:GetParameter", "ssm:GetParameters"],
+      Resource: [`arn:aws:ssm:${region}:${accountId}:parameter/launch-pad/${clusterId}/*`],
+    },
+  ];
 }
 
 /** Edge agent: read upstream shards in own prefix, write own status + ship system logs. */

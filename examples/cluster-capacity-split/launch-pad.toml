@@ -1,0 +1,55 @@
+# Capacity-aware auto-placement: web split behind the cluster edge, worker packed
+# wherever there's room. No infrastructure names in the TOML.
+#
+#   schedule = "capacity"  — each replica lands on the eligible node with the most
+#                            free CPU/memory (after existing workloads + rollout
+#                            surge headroom), instead of blind round-robin.
+#   topology = "split"     — replicas on the cluster's app/both nodes; the domain
+#                            is fronted by the cluster's default edge (or set
+#                            edge = "<node-id>" on the service to override).
+#
+# Set the cluster up once (the first edge/both node becomes the default edge):
+#   launch-pad cluster create lower --region us-east-1
+#   launch-pad node create edge-lower --cluster lower --role edge
+#   launch-pad node create app-a      --cluster lower --role app
+#   launch-pad node create app-b      --cluster lower --role app
+#
+# Then deploy into it:
+#   launch-pad deploy --cluster lower
+#
+# Every deploy prints the resolved placement map (add --json for machine output).
+# schedule/topology are locked after the first deploy, like node/nodes/edge.
+project = "example-capacity"
+
+[[service]]
+name = "web"
+# no node/nodes — the capacity scheduler picks the nodes
+schedule = "capacity"
+topology = "split"
+dockerfile = "../both-node-web-worker/Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+replicas = 4
+domain = "capacity.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+
+  [service.healthCheck]
+  path = "/healthz"
+
+  [service.rollout]
+  maxSurge = 1
+  drainTimeout = "20s"
+  stopGrace = "30s"
+
+[[service]]
+name = "worker"
+# a worker has no ingress — topology stays "auto"; capacity packs it where it fits
+schedule = "capacity"
+dockerfile = "../both-node-web-worker/worker.Dockerfile"
+context = "../both-node-web-worker"
+cpu = 256
+memory = 256
+replicas = 2
+env = { NODE_ENV = "production" }

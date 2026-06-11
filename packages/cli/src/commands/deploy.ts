@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 import { Command } from "commander";
 import {
@@ -13,13 +14,21 @@ import {
   PROTOCOL_VERSION,
   type ServiceConfig,
   type ServiceDecl,
+  type ServiceSchedule,
+  type ServiceTopology,
   assertConfigLockAllowed,
   baselineFromDeployedFootprints,
+  buildDeployEvent,
+  CONFIG_LOCK_MUTABLE_HINT,
   checkCapacity,
   configBaselineKey,
+  deployEventKey,
+  type DeployKind,
   containerEnvForDeploy,
+  findEnvSecretConflicts,
   desiredKey,
   ecrRepositoryName,
+  parseEcrImageUri,
   parseConfigBaseline,
   snapshotConfigBaseline,
   emptyDesiredState,
@@ -29,35 +38,53 @@ import {
   nodeRegistryKey,
   parseDesiredState,
   parseNodeRegistryEntry,
+  parseNodeStatus,
   resolveServiceDomain,
+  secretRefsForService,
+  secretParameterPath,
   sharesToVcpu,
+  statusKey,
   targetNodes,
   usesClusterPlacement,
 } from "@agentsystemlabs/launch-pad-shared";
+import { getExistingSecretPaths } from "../aws/ssm-secrets";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import { describeInstancesById, getDefaultVpcId } from "../aws/ec2";
 import { ensureRepository, getEcrAuth, imageExists } from "../aws/ecr";
-import { getJson, listNodeIds, PreconditionFailedError, putJson } from "../aws/s3-state";
-import { resolveLatestAl2023Ami } from "../aws/ssm";
+import { getJson, PreconditionFailedError, putJson } from "../aws/s3-state";
 import { getClusterConfig } from "../cluster/store";
 import { loadConfig } from "../config/load";
 import { rememberClusterTarget } from "../config/local";
 import { buildAndPush, checkDocker, computeImageTag, dockerLoginEcr, ensureBuilder } from "../deploy/build";
 import { applyNodeDrift } from "../deploy/drift-apply";
 import { type NodeDrift, planNodeDrift } from "../deploy/drift-plan";
-import { loadDeployedFootprints } from "../deploy/deployed-footprint";
-import { distributeReplicas } from "../deploy/placement";
+import {
+  type DeployedPlacementSnapshot,
+  loadDeployedFootprints,
+  loadDeployedPlacement,
+} from "../deploy/deployed-footprint";
+import {
+  bootstrapCandidateNode,
+  type CandidateNode,
+  type ClusterServiceInput,
+  distributeReplicas,
+  type Placement,
+  planClusterPlacementAutoAdd,
+} from "../deploy/placement";
+import { buildCandidateNodes, demandsOf } from "../deploy/candidate-nodes";
 import {
   estimateProvisionCost,
   formatProvisionCostLines,
   formatProvisionCostSummary,
   type NodeCostInput,
 } from "../cost/estimate";
+import { buildDnsChecklist, type DnsTarget } from "../deploy/dns-panel";
 import { buildProvisionPlan, type NodeAction, type NodeDemand } from "../deploy/provision-plan";
 import { waitForConvergence, type WatchResult, type WatchTarget } from "../deploy/watch";
 import { CliError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
-import type { AgentType } from "../provision/agent-bundle";
+import { DEFAULT_AGENT_TYPE, defaultAgentTypeForBootstrap, type AgentType } from "../provision/agent-bundle";
+import { resolveNodeAmi } from "../provision/golden-ami";
 import { provisionNode } from "../provision/provision-node";
 import { panel, table } from "../ui/box";
 import { isJsonMode, log, printJson, spinner } from "../ui/log";
@@ -77,7 +104,14 @@ const MAX_PUBLISH_RETRIES = 5;
 /** Default time `deploy` waits for nodes to report convergence (overridable via --timeout). */
 const DEFAULT_CONVERGE_TIMEOUT_SECONDS = 180;
 
-interface DeployOptions extends GlobalOpts {
+/**
+ * Name of the single node auto-created when deploying cluster-placed services to an
+ * otherwise-empty cluster (empty-cluster bootstrap). Mirrors the `app-<n>` naming the
+ * capacity auto-add uses, so a bootstrap + later scale-out read as one series.
+ */
+const BOOTSTRAP_NODE_ID = "app-1";
+
+export interface DeployOptions extends GlobalOpts {
   service?: string;
   node?: string;
   env?: string;
@@ -91,8 +125,14 @@ interface DeployOptions extends GlobalOpts {
   repair?: boolean;
   /** commander sets this false for `--no-recreate` (a terminated instance is replaced by default). */
   recreate?: boolean;
-  /** Agent runtime to install on auto-provisioned nodes: "ts" (default) or "rust". */
+  /** Agent runtime to install on auto-provisioned nodes: "rust" (default) or "ts". */
   agent?: string;
+  /** AMI used for auto-provisioned/recreated nodes. */
+  ami?: string;
+  /** Skip build/push; re-publish desired state with restartAt to roll containers. */
+  restart?: boolean;
+  /** Skip build/push; publish an existing immutable ECR tag (rollback / promote). Needs --service. */
+  image?: string;
 }
 
 interface BuiltService {
@@ -117,6 +157,12 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function parseAgentType(value: string | undefined): AgentType | undefined {
+  if (value === undefined) return undefined;
+  if (value === "ts" || value === "rust") return value;
+  throw new CliError(`invalid --agent "${value}" (expected ts | rust)`);
+}
+
 /** A stand-in registry entry for a to-be-created node, so a `--dry-run` can run the
  * capacity/placement preview without provisioning anything. */
 function synthesizeEntry(aws: AwsEnv, a: Extract<NodeAction, { kind: "create" }>): NodeRegistryEntry {
@@ -139,6 +185,7 @@ function synthesizeEntry(aws: AwsEnv, a: Extract<NodeAction, { kind: "create" }>
     iamInstanceProfile: null,
     agentId: agentIdForNode(a.nodeId),
     agentVersion: null,
+    agentType: DEFAULT_AGENT_TYPE,
     createdAt: nowIso(),
     createdBy: aws.callerArn,
     state: "provisioning",
@@ -200,14 +247,18 @@ function repairLine(entry: NodeRegistryEntry, d: NodeDrift): string {
   }
 }
 
-function toServiceConfig(
+export function toServiceConfig(
+  aws: AwsEnv,
   project: string,
-  b: BuiltService,
+  // Only the resolved decl + image + domain are needed — `rebalance` reuses this with a
+  // published image instead of a freshly-built one (no repo/tag/context fields).
+  b: { decl: ServiceDecl; image: string; domain?: string | undefined },
   replicas: number,
   resolvedEdge: string | null,
   env: string | undefined,
+  restart: boolean,
 ): ServiceConfig {
-  return {
+  const cfg: ServiceConfig = {
     project,
     service: b.decl.name,
     image: b.image,
@@ -215,6 +266,11 @@ function toServiceConfig(
     memory: b.decl.memory,
     replicas,
     env: containerEnvForDeploy(b.decl.env, env),
+    secretRefs: secretRefsForService(b.decl.secrets, {
+      clusterId: aws.clusterId,
+      ownerProject: project,
+      service: b.decl.name,
+    }),
     ingress:
       b.domain !== undefined && b.decl.port !== undefined
         ? { domain: b.domain, port: b.decl.port, edge: resolvedEdge }
@@ -224,6 +280,122 @@ function toServiceConfig(
       : null,
     rollout: b.decl.rollout,
   };
+  if (restart) cfg.restartAt = nowIso();
+  return cfg;
+}
+
+/** Fail fast when a service declares secrets missing from SSM. */
+export async function assertSecretsPresent(aws: AwsEnv, services: ServiceDecl[], ownerProject: string): Promise<void> {
+  const missing: string[] = [];
+  for (const decl of services) {
+    if (decl.secrets.length === 0) continue;
+    const paths = decl.secrets.map((key) =>
+      secretParameterPath({
+        clusterId: aws.clusterId,
+        ownerProject,
+        service: decl.name,
+        key,
+      }),
+    );
+    const found = await getExistingSecretPaths(aws.ssm, paths);
+    for (const key of decl.secrets) {
+      const path = secretParameterPath({
+        clusterId: aws.clusterId,
+        ownerProject,
+        service: decl.name,
+        key,
+      });
+      if (!found.has(path)) missing.push(`${decl.name}/${key}`);
+    }
+  }
+  if (missing.length === 0) return;
+  throw new CliError(`missing SSM secrets: ${missing.join(", ")}`, {
+    hint: "set them with `launch-pad secret set <KEY> --service <name>`",
+  });
+}
+
+/** Load the image currently published for each service (for deploy --restart). */
+async function loadRestartImages(
+  aws: AwsEnv,
+  services: ServiceDecl[],
+  ownerProject: string,
+  nodeIds: string[],
+): Promise<Map<string, string>> {
+  const images = new Map<string, string>();
+  for (const id of nodeIds) {
+    const obj = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, id));
+    if (!obj) continue;
+    const state = parseDesiredState(obj.raw);
+    for (const s of state.services) {
+      if (s.project !== ownerProject) continue;
+      if (!images.has(s.service)) images.set(s.service, s.image);
+    }
+  }
+  const missing = services.filter((s) => !images.has(s.name)).map((s) => s.name);
+  if (missing.length > 0) {
+    throw new CliError(`no published image for: ${missing.join(", ")}`, {
+      hint: "run a full deploy first, or check that the service is scheduled on a node",
+    });
+  }
+  return images;
+}
+
+/**
+ * Validate a `--image <uri>` override for a single service and return it as the same
+ * {service → image} map the restart path produces. The URI must be a tagged image in the
+ * service's OWN ECR repo (`<project>/<service>`) and the tag must already exist — so a
+ * rollback/promote can only ever re-point a service at one of its own immutable builds,
+ * never an arbitrary or unbuilt image.
+ */
+export async function loadOverrideImage(
+  aws: AwsEnv,
+  project: string,
+  service: ServiceDecl,
+  uri: string,
+): Promise<Map<string, string>> {
+  const parsed = parseEcrImageUri(uri);
+  if (!parsed) {
+    throw new CliError(`invalid --image "${uri}"`, {
+      hint: "pass a tagged ECR image URI, e.g. <acct>.dkr.ecr.<region>.amazonaws.com/<project>/<service>:<tag>",
+    });
+  }
+  // The registry must be THIS account + region's ECR — otherwise the URI could pass the
+  // existence check (which queries our own account by repo name) yet publish an image the
+  // node can't pull (cross-account/region), silently stalling convergence.
+  const expectedRegistry = `${aws.accountId}.dkr.ecr.${aws.region}.amazonaws.com`;
+  if (parsed.registry !== expectedRegistry) {
+    throw new CliError(`--image must be in your account's ECR registry`, {
+      hint: `expected "${expectedRegistry}", got "${parsed.registry}"`,
+    });
+  }
+  const expectedRepo = ecrRepositoryName(project, service.name);
+  if (parsed.repository !== expectedRepo) {
+    throw new CliError(`--image is not in service "${service.name}"'s repository`, {
+      hint: `expected repo "${expectedRepo}", got "${parsed.repository}" — you can only redeploy one of this service's own builds`,
+    });
+  }
+  if (!(await imageExists(aws.ecr, parsed.repository, parsed.tag))) {
+    throw new CliError(`image tag "${parsed.tag}" not found in ECR repo "${parsed.repository}"`, {
+      hint: "list available tags in the AWS console, or run a normal `deploy` to build a fresh one",
+    });
+  }
+  return new Map([[service.name, uri]]);
+}
+
+async function loadRunningContainerIds(
+  aws: AwsEnv,
+  nodeId: string,
+  project: string,
+  service: string,
+): Promise<string[]> {
+  const obj = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, nodeId));
+  if (!obj) return [];
+  const status = parseNodeStatus(obj.raw);
+  const svc = status.services.find((s) => s.project === project && s.service === service);
+  return (svc?.replicas ?? [])
+    .filter((r) => r.state === "running" && r.containerId)
+    .map((r) => r.containerId as string)
+    .sort();
 }
 
 /**
@@ -232,20 +404,6 @@ function toServiceConfig(
  * extra replicas run simultaneously during the roll (the agent caps total at
  * `replicas + maxSurge` but never exceeds `replicas` *new* ones at once).
  */
-function demandsOf(services: ServiceConfig[]): CapacityServiceDemand[] {
-  return services.map((s) => {
-    const surge = Math.min(s.rollout.maxSurge, s.replicas);
-    return {
-      project: s.project,
-      service: s.service,
-      cpu: s.cpu * s.replicas,
-      memory: s.memory * s.replicas,
-      surgeCpu: s.cpu * surge,
-      surgeMemory: s.memory * surge,
-    };
-  });
-}
-
 /** Full demands a node carries after this deploy (other projects + this project's placements). */
 function capacityDemands(
   project: string,
@@ -300,6 +458,60 @@ function assertCapacity(nodeId: string, node: NodeRegistryEntry, merged: Capacit
   );
 }
 
+/** A service's resolved placement: where its replicas land and the edge fronting it. */
+interface Resolved {
+  placements: Placement[];
+  /** Every node considered (pinned targets, or the full eligible cluster pool) —
+   * all of them are drift-checked/repaired even when a node receives zero replicas. */
+  pool: string[];
+  edge: string | null;
+  domain?: string | undefined;
+  schedule: ServiceSchedule;
+  topology: ServiceTopology;
+  /** True when placement came from explicit `node`/`nodes` (or --node). */
+  pinned: boolean;
+}
+
+interface PlacementPlanEntry {
+  service: string;
+  placements: Placement[];
+  edge: string | null;
+  topology: ServiceTopology;
+  schedule: ServiceSchedule;
+  pinned: boolean;
+}
+
+/** The service-major placement map shown on every deploy (human + --json). */
+function buildPlacementPlan(
+  services: ServiceDecl[],
+  resolved: Map<string, Resolved>,
+): PlacementPlanEntry[] {
+  return services.map((s) => {
+    const r = resolved.get(s.name) as Resolved;
+    return {
+      service: s.name,
+      placements: r.placements,
+      edge: r.edge,
+      topology: r.topology,
+      schedule: r.schedule,
+      pinned: r.pinned,
+    };
+  });
+}
+
+function printPlacementPlan(plan: PlacementPlanEntry[]): void {
+  if (isJsonMode()) return;
+  panel(
+    "Placement",
+    plan.map((e) => {
+      const where = e.placements.map((p) => `${p.nodeId}${color.dim(`×${p.replicas}`)}`).join(", ");
+      const via = e.edge ? ` via ${color.cyan(e.edge)}` : "";
+      const mode = e.pinned ? "pinned" : `${e.schedule} · ${e.topology}`;
+      return `${color.cyan(e.service)} → ${where}${via} ${color.dim(`(${mode})`)}`;
+    }),
+  );
+}
+
 function printCapacitySummary(nodeId: string, node: NodeRegistryEntry, placed: NodeService[]): void {
   if (isJsonMode()) return;
   const usedCpu = placed.reduce((s, p) => s + p.built.decl.cpu * p.replicas, 0);
@@ -318,7 +530,7 @@ function printCapacitySummary(nodeId: string, node: NodeRegistryEntry, placed: N
 }
 
 /** Read → merge → capacity-check → conditional write, retrying on concurrent writes. */
-async function publishDesired(
+export async function publishDesired(
   aws: AwsEnv,
   nodeId: string,
   node: NodeRegistryEntry,
@@ -348,7 +560,7 @@ async function publishDesired(
 }
 
 /** Advisory edge.json: union this project's fronted domains into the edge's list. */
-async function publishEdgeConfig(aws: AwsEnv, edgeId: string, domains: string[]): Promise<void> {
+export async function publishEdgeConfig(aws: AwsEnv, edgeId: string, domains: string[]): Promise<void> {
   for (let attempt = 0; attempt < MAX_PUBLISH_RETRIES; attempt += 1) {
     const existing = await getJson(aws.s3, aws.bucket, edgeConfigKey(aws.clusterId, edgeId));
     const current = (existing?.raw as { domains?: string[] } | undefined)?.domains ?? [];
@@ -371,7 +583,7 @@ async function publishEdgeConfig(aws: AwsEnv, edgeId: string, domains: string[])
 
 function configLockError(error: unknown): never {
   throw new CliError((error as Error).message, {
-    hint: "only cpu and memory may change after the initial deploy — revert the other edits",
+    hint: `${CONFIG_LOCK_MUTABLE_HINT} — revert the other edits (or use \`launch-pad scale\` / \`launch-pad config set\` for the allowed ones)`,
   });
 }
 
@@ -442,15 +654,17 @@ async function loadLockBaseline(
 }
 
 /**
- * Reject any launch-pad.toml change except cpu/memory after the first deploy.
- * Runs BEFORE any build / ECR push / S3 write, so a locked-field change aborts
- * deploy immediately. There is no bypass flag.
+ * Reject any launch-pad.toml change after the first deploy except the mutable
+ * post-deploy fields (cpu, memory, replicas, env, secrets — see
+ * CONFIG_LOCK_MUTABLE_HINT). Runs BEFORE any build / ECR push / S3 write, so a
+ * locked-field change aborts deploy immediately. There is no bypass flag; the
+ * allowed edits have ergonomic commands (`scale`, `config set`, `secret`).
  */
 export async function enforceConfigLock(
   aws: AwsEnv,
   config: LaunchPadConfig,
   ownerProject: string,
-  opts: DeployOptions,
+  opts: { node?: string },
 ): Promise<void> {
   const deployed = await loadLockBaseline(aws, ownerProject);
   if (!deployed) {
@@ -461,7 +675,7 @@ export async function enforceConfigLock(
 
   if (opts.node) {
     throw new CliError(`--node cannot be used after the initial deploy of "${ownerProject}"`, {
-      hint: "placement is locked — only cpu and memory may change; drop --node",
+      hint: `placement is locked — ${CONFIG_LOCK_MUTABLE_HINT}; drop --node`,
     });
   }
 
@@ -486,13 +700,48 @@ async function writeConfigBaseline(
   );
 }
 
-async function runDeploy(opts: DeployOptions): Promise<void> {
+interface DeployEventInput {
+  ownerProject: string;
+  env: string | undefined;
+  kind: DeployKind;
+  services: Array<{ service: string; image: string; replicas: number }>;
+  /** Convergence result, or null for a --no-wait deploy. */
+  converged: boolean | null;
+}
+
+/**
+ * Append an append-only deploy-history event (who / when / images / converged). Best-effort:
+ * history is advisory (audit + `rollback` hint, never read by reconcile), so a failed write
+ * never fails an otherwise-successful deploy.
+ */
+async function recordDeployEvent(aws: AwsEnv, input: DeployEventInput): Promise<void> {
+  const at = nowIso();
+  const event = buildDeployEvent({
+    at,
+    by: aws.callerArn,
+    cluster: aws.clusterId,
+    project: input.ownerProject,
+    env: input.env,
+    kind: input.kind,
+    services: input.services,
+    converged: input.converged,
+  });
+  try {
+    await putJson(
+      aws.s3,
+      aws.bucket,
+      deployEventKey(aws.clusterId, input.ownerProject, at, randomBytes(4).toString("hex")),
+      event,
+    );
+  } catch (error) {
+    log.dim(`  could not record deploy history: ${(error as Error).message}`);
+  }
+}
+
+export async function runDeploy(opts: DeployOptions): Promise<void> {
   const { config, dir } = loadConfig();
 
-  if (opts.agent !== undefined && opts.agent !== "ts" && opts.agent !== "rust") {
-    throw new CliError(`invalid --agent "${opts.agent}" (expected ts | rust)`);
-  }
-  const agentType: AgentType = opts.agent === "rust" ? "rust" : "ts";
+  const requestedAgentType = parseAgentType(opts.agent);
 
   const env = opts.env;
   if (env !== undefined && !LABEL_REGEX.test(env)) {
@@ -514,8 +763,50 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
   }
   if (opts.node) {
     assertValidNodeId(opts.node);
+    for (const s of services) {
+      if (s.schedule !== "even" || s.topology !== "auto") {
+        log.warn(`service "${s.name}": schedule/topology are ignored with --node (placement pinned to ${opts.node})`);
+      }
+    }
     services = services.map((s) => ({ ...s, node: opts.node as string, nodes: undefined }));
   }
+
+  for (const s of services) {
+    const conflicts = findEnvSecretConflicts(s.env, s.secrets);
+    if (conflicts.length > 0) {
+      throw new CliError(`service "${s.name}" declares the same key in env and secrets: ${conflicts.join(", ")}`, {
+        hint: "move sensitive values to secrets — keep only non-secret config in env",
+      });
+    }
+  }
+
+  // `--image <uri>` and `--restart` both skip the build and re-publish an existing image;
+  // `--image` re-points one service at a specific immutable tag (rollback / promote).
+  if (opts.image !== undefined) {
+    if (opts.restart === true) {
+      throw new CliError("--image cannot be combined with --restart", {
+        hint: "--restart reuses the published image; --image picks a specific one — use one or the other",
+      });
+    }
+    if (services.length !== 1) {
+      throw new CliError("--image requires exactly one service", {
+        hint:
+          config.service.length > 1
+            ? `pass --service <name> (available: ${config.service.map((s) => s.name).join(", ")})`
+            : "the project must have a single service to target with --image",
+      });
+    }
+    // Fast-fail on a malformed URI before any AWS call (loadOverrideImage re-validates the
+    // repo + tag existence authoritatively once we have an ECR client).
+    if (!parseEcrImageUri(opts.image)) {
+      throw new CliError(`invalid --image "${opts.image}"`, {
+        hint: "pass a tagged ECR image URI, e.g. <acct>.dkr.ecr.<region>.amazonaws.com/<project>/<service>:<tag>",
+      });
+    }
+  }
+  // True when this deploy reuses an existing image instead of building: skip the build,
+  // skip cluster re-planning, and pin each service to where it is already published.
+  const reuseExistingImages = opts.restart === true || opts.image !== undefined;
 
   const aws = await prepareAws(opts, { ensureBucket: true });
   log.step(`cluster ${color.cyan(aws.clusterId)} · account ${color.cyan(aws.accountId)} · region ${color.cyan(aws.region)}`);
@@ -528,61 +819,208 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
   if (env !== undefined) {
     log.step(`environment ${color.cyan(env)} · footprint ${color.cyan(ownerProject)}`);
   }
+  if (opts.restart === true) {
+    log.step(`restart mode ${color.dim("(no build — rolling containers to pick up config/secrets)")}`);
+  }
+  if (opts.image !== undefined) {
+    log.step(`image override ${color.cyan(opts.image)} ${color.dim("(no build — redeploying an existing tag)")}`);
+  }
 
   await enforceConfigLock(aws, config, ownerProject, opts);
 
   // Resolve the cluster's default edge + (when any service targets the cluster) its app nodes.
   const clusterCfg = aws.clusterId === DEFAULT_CLUSTER ? null : await getClusterConfig(aws, aws.clusterId);
   const clusterDefaultEdge = clusterCfg?.defaultEdge ?? null;
-  const nodes = new Map<string, NodeRegistryEntry>();
-  const clusterAppNodeIds: string[] = [];
-  if (services.some((s) => usesClusterPlacement(s))) {
-    for (const id of await listNodeIds(aws.s3, aws.bucket, aws.clusterId)) {
-      const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
-      if (!obj) continue;
-      const entry = parseNodeRegistryEntry(obj.raw);
-      nodes.set(id, entry);
-      if (entry.role === "app" || entry.role === "both") clusterAppNodeIds.push(id);
+  let nodes = new Map<string, NodeRegistryEntry>();
+  let clusterAppNodeIds: string[] = [];
+  // The capacity scheduler's view of each eligible node (S3-lexicographic order —
+  // load-bearing for `schedule = "even"`, which must match legacy round-robin).
+  let candidateNodes: CandidateNode[] = [];
+  // Where this footprint is published today — drives --restart pinning and the
+  // post-publish cleanup of nodes the new placement vacated.
+  let priorPlacement: DeployedPlacementSnapshot | null = null;
+  const anyClusterPlaced = services.some((s) => usesClusterPlacement(s));
+  // Auto-add app nodes on capacity pressure is on by default for cluster-placed deploys
+  // (off for --restart/--image, which re-roll a published placement, and --no-create).
+  const autoAddEnabled = anyClusterPlaced && !reuseExistingImages && opts.create !== false;
+  // `schedule = "capacity"` needs each node's committed demand to pack; so does auto-add's
+  // even-overflow check (so it doesn't add a node a sibling project already fills). `even`
+  // deploys without auto-add skip the per-node desired.json reads; --restart/--image too.
+  const needsCapacitySnapshot =
+    !reuseExistingImages &&
+    (autoAddEnabled || services.some((s) => usesClusterPlacement(s) && s.schedule === "capacity"));
+  if (anyClusterPlaced) {
+    ({ nodes, clusterAppNodeIds, candidateNodes } = await buildCandidateNodes(aws, ownerProject, {
+      needsCapacitySnapshot,
+    }));
+    // Empty-cluster bootstrap: a fresh cluster has no app/both pool to place onto. Unless
+    // --no-create / --restart / --image, synthesize a single placement target so the planner
+    // can place onto it — `deploy` then auto-provisions the real node (sized to fit, role
+    // inferred, plus any edge a split service needs), mirroring the default cluster's
+    // single-node auto-provision. --restart/--image have nothing published to re-roll, and
+    // --no-create opts out of provisioning, so both fall through to the error below.
+    if (clusterAppNodeIds.length === 0 && !reuseExistingImages && opts.create !== false) {
+      const seed = bootstrapCandidateNode(BOOTSTRAP_NODE_ID);
+      candidateNodes.push(seed);
+      clusterAppNodeIds.push(seed.nodeId);
+      if (!isJsonMode()) {
+        log.info(
+          `cluster "${aws.clusterId}" has no nodes yet — bootstrapping its first node ` +
+            `"${BOOTSTRAP_NODE_ID}" to place ${color.cyan("cluster-scheduled")} services on.`,
+        );
+      }
     }
     if (clusterAppNodeIds.length === 0) {
       throw new CliError(`cluster "${aws.clusterId}" has no app nodes to place services on`, {
-        hint: `create one: launch-pad node create <name> --cluster ${aws.clusterId} --role app`,
+        hint: reuseExistingImages
+          ? "run a full deploy first to place the service, then --restart/--image can re-roll it"
+          : `create one: launch-pad node create ${BOOTSTRAP_NODE_ID} --cluster ${aws.clusterId} --role both (or drop --no-create to auto-provision it)`,
+      });
+    }
+    priorPlacement = await loadDeployedPlacement(aws.s3, aws.bucket, aws.clusterId, ownerProject);
+  }
+
+  // Per service, resolve where its replicas land + the edge that fronts it.
+  // Pinned services resolve directly; cluster-placed services go through the
+  // planner in one batch (so later services see earlier ones' capacity use).
+  const resolved = new Map<string, Resolved>();
+  const clusterInputs: ClusterServiceInput[] = [];
+  const domains = new Map<string, string | undefined>();
+  for (const s of services) {
+    const isWeb = s.domain !== undefined && s.port !== undefined;
+    domains.set(
+      s.name,
+      resolveServiceDomain(
+        { domain: s.domain, domainPattern: s.domainPattern ?? config.domainPattern, service: s.name },
+        env,
+      ),
+    );
+
+    if (!usesClusterPlacement(s)) {
+      const nodeIds = targetNodes(s);
+      const edge = isWeb ? (s.edge ?? clusterDefaultEdge) : null;
+      if (isWeb && nodeIds.length > 1 && !edge) {
+        throw new CliError(`service "${s.name}" spans ${nodeIds.length} nodes but has no edge to load-balance them`, {
+          hint: `add edge = "<edge-node-id>" to the service`,
+        });
+      }
+      resolved.set(s.name, {
+        placements: distributeReplicas(nodeIds, s.replicas),
+        pool: nodeIds,
+        edge,
+        domain: domains.get(s.name),
+        schedule: s.schedule,
+        topology: s.topology,
+        pinned: true,
+      });
+      if (s.edge && nodeIds.length === 1 && nodeIds[0] === s.edge) {
+        log.warn(
+          `service "${s.name}": edge and node are both "${s.edge}" — co-located mode; omit edge for the same result`,
+        );
+      }
+      continue;
+    }
+
+    if (reuseExistingImages) {
+      // A restart / image-override rolls containers in place — pin to wherever the
+      // service is published today so a capacity re-plan can't silently move it.
+      const placements: Placement[] = [];
+      let publishedEdge: string | null = null;
+      for (const [nodeId, occupancies] of (priorPlacement as DeployedPlacementSnapshot).byNode) {
+        const occ = occupancies.find((o) => o.service === s.name);
+        if (!occ) continue;
+        placements.push({ nodeId, replicas: occ.replicas });
+        publishedEdge = occ.ingress?.edge ?? null;
+      }
+      if (placements.length === 0) {
+        throw new CliError(`no published placement for service "${s.name}" — run a full deploy first`, {
+          hint: "--restart / --image re-roll the service where it already runs; they can't place a new one",
+        });
+      }
+      placements.sort((a, b) => a.nodeId.localeCompare(b.nodeId));
+      resolved.set(s.name, {
+        placements,
+        pool: placements.map((p) => p.nodeId),
+        edge: publishedEdge,
+        domain: domains.get(s.name),
+        schedule: s.schedule,
+        topology: s.topology,
+        pinned: false,
+      });
+      continue;
+    }
+
+    clusterInputs.push({
+      name: s.name,
+      replicas: s.replicas,
+      cpu: s.cpu,
+      memory: s.memory,
+      maxSurge: s.rollout.maxSurge,
+      isWeb,
+      explicitEdge: s.edge ?? null,
+      schedule: s.schedule,
+      topology: s.topology,
+    });
+  }
+
+  if (clusterInputs.length > 0) {
+    // Seed the candidates with this deploy's pinned placements so the capacity
+    // scheduler sees nodes that pinned services are about to occupy.
+    for (const s of services) {
+      const r = resolved.get(s.name);
+      if (!r?.pinned) continue;
+      for (const p of r.placements) {
+        const cn = candidateNodes.find((c) => c.nodeId === p.nodeId);
+        if (!cn) continue;
+        cn.steadyCpu += s.cpu * p.replicas;
+        cn.steadyMemory += s.memory * p.replicas;
+        cn.maxSurgeCpu = Math.max(cn.maxSurgeCpu, s.cpu * Math.min(s.rollout.maxSurge, p.replicas));
+        cn.maxSurgeMemory = Math.max(cn.maxSurgeMemory, s.memory * Math.min(s.rollout.maxSurge, p.replicas));
+      }
+    }
+    // Auto-add app nodes when the current pool can't fit the services (instead of erroring
+    // "reduce cpu/memory/replicas"). Bounded by the total cluster-placed replica count (you
+    // never need more app nodes than replicas); disabled by --no-create / --restart / --image.
+    // Added nodes are provisioned for real below (sized to their placement), spend-gated by
+    // the same confirmation panel as any provision.
+    const maxAdd = autoAddEnabled ? clusterInputs.reduce((n, s) => n + s.replicas, 0) : 0;
+    const { plans, added } = planClusterPlacementAutoAdd(
+      {
+        clusterId: aws.clusterId,
+        clusterDefaultEdge,
+        nodes: candidateNodes,
+        services: clusterInputs,
+      },
+      { maxAdd, existingNodeIds: [...new Set([...nodes.keys(), ...clusterAppNodeIds])] },
+    );
+    for (const node of added) {
+      candidateNodes.push(node);
+      clusterAppNodeIds.push(node.nodeId);
+    }
+    if (added.length > 0 && !isJsonMode()) {
+      log.info(
+        `cluster "${aws.clusterId}" is at capacity — auto-adding ${added.length} app node(s) ` +
+          `(${added.map((n) => color.cyan(n.nodeId)).join(", ")}) to fit the deploy.`,
+      );
+    }
+    for (const plan of plans) {
+      resolved.set(plan.service, {
+        placements: plan.placements,
+        pool: plan.pool,
+        edge: plan.edge,
+        domain: domains.get(plan.service),
+        schedule: plan.schedule,
+        topology: plan.topology,
+        pinned: false,
       });
     }
   }
 
-  // Per service, resolve its target node ids + the edge that fronts it.
-  interface Resolved {
-    nodeIds: string[];
-    edge: string | null;
-    domain?: string;
-  }
-  const resolved = new Map<string, Resolved>();
   const appNodeIds = new Set<string>();
   const edgeIds = new Set<string>();
-  for (const s of services) {
-    const nodeIds = usesClusterPlacement(s) ? [...clusterAppNodeIds] : targetNodes(s);
-    const isWeb = s.domain !== undefined && s.port !== undefined;
-    const edge = isWeb ? (s.edge ?? clusterDefaultEdge) : null;
-    if (isWeb && nodeIds.length > 1 && !edge) {
-      throw new CliError(`service "${s.name}" spans ${nodeIds.length} nodes but has no edge to load-balance them`, {
-        hint: usesClusterPlacement(s)
-          ? `set the cluster's edge: launch-pad cluster set-edge ${aws.clusterId} <edge-node-id>`
-          : `add edge = "<edge-node-id>" to the service`,
-      });
-    }
-    const domain = resolveServiceDomain(
-      { domain: s.domain, domainPattern: s.domainPattern ?? config.domainPattern, service: s.name },
-      env,
-    );
-    resolved.set(s.name, { nodeIds, edge, domain });
-    for (const n of nodeIds) appNodeIds.add(n);
-    if (edge) edgeIds.add(edge);
-    if (s.edge && nodeIds.length === 1 && nodeIds[0] === s.edge) {
-      log.warn(
-        `service "${s.name}": edge and node are both "${s.edge}" — co-located mode; omit edge for the same result`,
-      );
-    }
+  for (const r of resolved.values()) {
+    for (const n of r.pool) appNodeIds.add(n);
+    if (r.edge) edgeIds.add(r.edge);
   }
 
   // No two services in one deploy may project to the same host — the edge would
@@ -608,7 +1046,7 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
   for (const s of services) {
     const r = resolved.get(s.name) as Resolved;
     const isWeb = s.domain !== undefined && s.port !== undefined;
-    for (const p of distributeReplicas(r.nodeIds, s.replicas)) {
+    for (const p of r.placements) {
       const d = demandByNode.get(p.nodeId) ?? { cpu: 0, memory: 0, surgeCpu: 0, surgeMemory: 0 };
       d.cpu += s.cpu * p.replicas;
       d.memory += s.memory * p.replicas;
@@ -744,9 +1182,19 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
       }
 
       // Resolve the AMI + VPC once for the whole batch.
-      const amiId = toCreate.length > 0 ? await resolveLatestAl2023Ami(aws.ssm) : undefined;
+      const needsAmi = toCreate.length > 0 || repairs.some((r) => r.drift.action.kind === "recreate");
+      const ami = needsAmi
+        ? await resolveNodeAmi({
+            ec2: aws.ec2,
+            ssm: aws.ssm,
+            region: aws.region,
+            explicitAmiId: opts.ami,
+          })
+        : undefined;
+      const amiId = toCreate.length > 0 ? ami?.imageId : undefined;
       const vpcId = toCreate.length > 0 ? await getDefaultVpcId(aws.ec2) : undefined;
       const agentVersion = readVersion();
+      const agentType = requestedAgentType ?? defaultAgentTypeForBootstrap(ami?.bootstrapMode);
 
       // Edges/both first — an app node's security group references its edge's SG,
       // and ingress must exist before app replicas health-check.
@@ -764,6 +1212,7 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
             agentVersion,
             capacity: a.capacity,
             amiId,
+            amiBootstrapMode: ami?.bootstrapMode,
             vpcId,
             edgeNodeId: a.edgeNodeId,
             agentType,
@@ -792,6 +1241,9 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
             entry: r.entry,
             action: r.drift.action,
             agentVersion,
+            agentType: requestedAgentType,
+            amiId: ami?.imageId,
+            amiBootstrapMode: ami?.bootstrapMode,
             onProgress: (t) => {
               spin.text = t;
             },
@@ -816,16 +1268,41 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
     }
   }
 
-  // Ensure ECR repos + immutable tags (one image per service, regardless of replicas).
+  await assertSecretsPresent(aws, services, ownerProject);
+
+  const allNodeIds = [...new Set([...appNodeIds, ...edgeIds])];
+  // The {service → image} to reuse without building: published images for --restart, or the
+  // validated override tag for --image. null for a normal (build-and-push) deploy.
+  const reuseImages =
+    opts.restart === true
+      ? await loadRestartImages(aws, services, ownerProject, allNodeIds)
+      : opts.image !== undefined
+        ? await loadOverrideImage(aws, config.project, services[0] as ServiceDecl, opts.image)
+        : null;
+
+  // Ensure ECR repos + immutable tags (one image per service, unless we reuse an existing one).
   const built: BuiltService[] = [];
   for (const decl of services) {
-    // ECR repo + image tag stay keyed on the BASE project so an env reuses prod's image.
     const repoName = ecrRepositoryName(config.project, decl.name);
+    const contextDir = resolve(dir, decl.context);
+    const domain = resolved.get(decl.name)?.domain;
+    if (reuseImages) {
+      built.push({
+        decl,
+        repoName,
+        repoUri: "",
+        tag: "",
+        image: reuseImages.get(decl.name) as string,
+        contextDir,
+        dockerfilePath: resolve(dir, decl.dockerfile),
+        domain,
+      });
+      continue;
+    }
     const repoUri = await ensureRepository(aws.ecr, repoName, {
       project: config.project,
       service: decl.name,
     });
-    const contextDir = resolve(dir, decl.context);
     const tag = await computeImageTag(contextDir);
     built.push({
       decl,
@@ -835,7 +1312,7 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
       image: `${repoUri}:${tag}`,
       contextDir,
       dockerfilePath: resolve(dir, decl.dockerfile),
-      domain: resolved.get(decl.name)?.domain,
+      domain,
     });
   }
 
@@ -843,12 +1320,20 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
   const nodePlacements = new Map<string, NodeService[]>();
   for (const b of built) {
     const r = resolved.get(b.decl.name) as Resolved;
-    for (const p of distributeReplicas(r.nodeIds, b.decl.replicas)) {
+    for (const p of r.placements) {
       const list = nodePlacements.get(p.nodeId) ?? [];
       list.push({ built: b, replicas: p.replicas });
       nodePlacements.set(p.nodeId, list);
     }
   }
+
+  // Nodes this footprint occupies today but the new placement no longer targets.
+  // Skipped for --service deploys: a partial deploy can't see the project's full
+  // intended placement, so "vacated" would wrongly include the other services' nodes.
+  const vacatedNodeIds =
+    priorPlacement && !opts.service
+      ? priorPlacement.occupiedNodeIds.filter((id) => !nodePlacements.has(id))
+      : [];
 
   // Capacity pre-flight per node BEFORE building.
   for (const [id, placed] of nodePlacements) {
@@ -858,6 +1343,12 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
     assertCapacity(id, node, capacityDemands(ownerProject, state, placed));
     printCapacitySummary(id, node, placed);
   }
+
+  const placementPlan = buildPlacementPlan(
+    built.map((b) => b.decl),
+    resolved,
+  );
+  printPlacementPlan(placementPlan);
 
   if (opts.dryRun) {
     log.warn("dry run — no images pushed, no state written");
@@ -881,33 +1372,48 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
           nodeId,
           services: placed.map((p) => ({ service: p.built.decl.name, replicas: p.replicas, image: p.built.image })),
         })),
+        placementPlan,
+        removals: vacatedNodeIds,
       });
     }
     return;
   }
 
-  // Build + push each image once.
-  await checkDocker();
-  await ensureBuilder();
-  const auth = await getEcrAuth(aws.ecr);
-  await dockerLoginEcr(auth);
-  for (const b of built) {
-    if (await imageExists(aws.ecr, b.repoName, b.tag)) {
-      log.step(`${color.cyan(b.decl.name)}: image ${color.dim(b.tag)} already in ECR — skipping build`);
-      continue;
+  if (!reuseExistingImages) {
+    await checkDocker();
+    await ensureBuilder();
+    const auth = await getEcrAuth(aws.ecr);
+    await dockerLoginEcr(auth);
+    for (const b of built) {
+      if (await imageExists(aws.ecr, b.repoName, b.tag)) {
+        log.step(`${color.cyan(b.decl.name)}: image ${color.dim(b.tag)} already in ECR — skipping build`);
+        continue;
+      }
+      const spin = spinner(`building ${b.decl.name} → ${b.tag} (linux/amd64)`).start();
+      try {
+        await buildAndPush({
+          contextDir: b.contextDir,
+          dockerfile: b.dockerfilePath,
+          imageUri: b.image,
+          verbose: opts.verbose,
+        });
+        spin.succeed(`built + pushed ${color.cyan(b.decl.name)} → ${color.dim(b.tag)}`);
+      } catch (error) {
+        spin.fail(`build failed for ${b.decl.name}`);
+        throw error;
+      }
     }
-    const spin = spinner(`building ${b.decl.name} → ${b.tag} (linux/amd64)`).start();
-    try {
-      await buildAndPush({
-        contextDir: b.contextDir,
-        dockerfile: b.dockerfilePath,
-        imageUri: b.image,
-        verbose: opts.verbose,
-      });
-      spin.succeed(`built + pushed ${color.cyan(b.decl.name)} → ${color.dim(b.tag)}`);
-    } catch (error) {
-      spin.fail(`build failed for ${b.decl.name}`);
-      throw error;
+  }
+
+  const previousContainers = new Map<string, string[]>();
+  if (opts.restart === true) {
+    for (const [id, placed] of nodePlacements) {
+      for (const p of placed) {
+        previousContainers.set(
+          `${id}/${p.built.decl.name}`,
+          await loadRunningContainerIds(aws, id, ownerProject, p.built.decl.name),
+        );
+      }
     }
   }
 
@@ -915,10 +1421,35 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
   for (const [id, placed] of nodePlacements) {
     const node = nodes.get(id) as NodeRegistryEntry;
     const incoming = placed.map((p) =>
-      toServiceConfig(ownerProject, p.built, p.replicas, (resolved.get(p.built.decl.name) as Resolved).edge, env),
+      toServiceConfig(
+        aws,
+        ownerProject,
+        p.built,
+        p.replicas,
+        (resolved.get(p.built.decl.name) as Resolved).edge,
+        env,
+        opts.restart === true,
+      ),
     );
     await publishDesired(aws, id, node, ownerProject, incoming);
     log.success(`published desired state → ${color.cyan(id)}`);
+  }
+
+  // Cleanup AFTER the additions: transient over-provisioning beats a window where
+  // a moved service has zero replicas anywhere. The vacated node's agent stops the
+  // containers on its next poll (removal isn't convergence-watched).
+  for (const id of vacatedNodeIds) {
+    let entry = nodes.get(id) ?? null;
+    if (!entry) {
+      const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
+      entry = obj ? parseNodeRegistryEntry(obj.raw) : null;
+    }
+    if (!entry) {
+      log.warn(`node "${id}" previously hosted ${ownerProject} but is gone — skipping cleanup`);
+      continue;
+    }
+    await publishDesired(aws, id, entry, ownerProject, []);
+    log.success(`removed ${color.cyan(ownerProject)} from ${color.cyan(id)} (no longer placed there)`);
   }
 
   if (!opts.dryRun) {
@@ -943,15 +1474,45 @@ async function runDeploy(opts: DeployOptions): Promise<void> {
         service: p.built.decl.name,
         image: p.built.image,
         expectedReplicas: p.replicas,
+        previousContainerIds: previousContainers.get(`${id}/${p.built.decl.name}`),
       });
     }
   }
 
+  // A-record targets for the post-deploy DNS checklist: each web domain → the
+  // Elastic IP of the node that fronts it (its edge, or its co-located node).
+  const dnsTargets: DnsTarget[] = [];
+  const seenDnsDomains = new Set<string>();
+  for (const b of built) {
+    if (!b.domain || seenDnsDomains.has(b.domain)) continue;
+    seenDnsDomains.add(b.domain);
+    const r = resolved.get(b.decl.name) as Resolved;
+    const frontingNode = r.edge ?? r.placements[0]?.nodeId ?? null;
+    if (!frontingNode) continue;
+    dnsTargets.push({
+      domain: b.domain,
+      frontingNode,
+      viaEdge: r.edge !== null,
+      eip: nodes.get(frontingNode)?.publicIp ?? null,
+    });
+  }
+
+  // One deploy-history event per successful publish: what ran, where it landed, and
+  // (when waited) whether it converged. `kind` records the path the deploy took.
+  const deployKind: DeployKind = opts.image !== undefined ? "image" : opts.restart === true ? "restart" : "build";
+  const eventServices = built.map((b) => ({
+    service: b.decl.name,
+    image: b.image,
+    replicas: (resolved.get(b.decl.name) as Resolved).placements.reduce((n, p) => n + p.replicas, 0),
+  }));
+
   if (opts.wait === false) {
-    reportPublished(built, ownerProject);
+    reportPublished(built, ownerProject, placementPlan, dnsTargets);
+    await recordDeployEvent(aws, { ownerProject, env, kind: deployKind, services: eventServices, converged: null });
     return;
   }
-  await watchAndReport(aws, targets, resolveTimeoutMs(opts.timeout), built);
+  const converged = await watchAndReport(aws, targets, resolveTimeoutMs(opts.timeout), built, placementPlan, dnsTargets);
+  await recordDeployEvent(aws, { ownerProject, env, kind: deployKind, services: eventServices, converged });
 }
 
 /**
@@ -969,12 +1530,19 @@ function resolveTimeoutMs(raw: string | undefined): number {
   return seconds * 1000;
 }
 
-function reportPublished(built: BuiltService[], project: string): void {
+function reportPublished(
+  built: BuiltService[],
+  project: string,
+  placementPlan: PlacementPlanEntry[],
+  dnsTargets: DnsTarget[],
+): void {
   if (isJsonMode()) {
     printJson({
       published: true,
       project,
       services: built.map((b) => ({ service: b.decl.name, image: b.image })),
+      placementPlan,
+      dns: dnsTargets,
     });
     return;
   }
@@ -982,6 +1550,8 @@ function reportPublished(built: BuiltService[], project: string): void {
     ...built.map((b) => `${color.cyan(`${project}/${b.decl.name}`)} ${color.dim(`×${b.decl.replicas}`)}`),
     color.dim("the agent on each node will reconcile to this state"),
   ]);
+  const dnsLines = buildDnsChecklist(dnsTargets);
+  if (dnsLines.length > 0) panel("DNS — point your domains here", dnsLines);
 }
 
 async function watchAndReport(
@@ -989,7 +1559,9 @@ async function watchAndReport(
   targets: WatchTarget[],
   timeoutMs: number,
   built: BuiltService[],
-): Promise<void> {
+  placementPlan: PlacementPlanEntry[],
+  dnsTargets: DnsTarget[],
+): Promise<boolean> {
   const spin = spinner("waiting for nodes to converge…").start();
   let final: WatchResult[] = [];
   await waitForConvergence(aws.s3, aws.bucket, aws.clusterId, targets, timeoutMs, (results) => {
@@ -998,7 +1570,8 @@ async function watchAndReport(
     spin.text = `converging ${running}/${results.length} services…`;
   });
 
-  if (final.every((r) => r.ok)) {
+  const allConverged = final.every((r) => r.ok);
+  if (allConverged) {
     spin.succeed("all services running");
   } else {
     spin.stop();
@@ -1006,11 +1579,13 @@ async function watchAndReport(
 
   if (isJsonMode()) {
     printJson({
-      converged: final.every((r) => r.ok),
+      converged: allConverged,
       services: final.map((r) => ({ ...r.target, state: r.state, ok: r.ok, message: r.message })),
+      placementPlan,
+      dns: dnsTargets,
     });
-    if (!final.every((r) => r.ok)) process.exitCode = 1;
-    return;
+    if (!allConverged) process.exitCode = 1;
+    return allConverged;
   }
 
   for (const r of final) {
@@ -1025,12 +1600,15 @@ async function watchAndReport(
       "URLs",
       webTargets.map((b) => `https://${b.domain}`),
     );
+    const dnsLines = buildDnsChecklist(dnsTargets);
+    if (dnsLines.length > 0) panel("DNS — point your domains here", dnsLines);
   }
 
-  if (!final.every((r) => r.ok)) {
+  if (!allConverged) {
     process.exitCode = 1;
     log.dim("not all services converged — check `launch-pad status` or the node's agent logs");
   }
+  return allConverged;
 }
 
 export function registerDeploy(program: Command): void {
@@ -1051,7 +1629,13 @@ export function registerDeploy(program: Command): void {
     )
     .option("--yes", "skip confirmation prompts (required to auto-provision in CI)")
     .option("--dry-run", "do everything except push images, write state, or create nodes")
-    .option("--agent <runtime>", "agent runtime for auto-provisioned nodes: ts (default) or rust", "ts")
+    .option("--ami <id>", "AMI id for auto-provisioned/recreated nodes")
+    .option("--agent <runtime>", "agent runtime for auto-provisioned nodes (default: rust on golden AMI, ts on full bootstrap)")
+    .option("--restart", "skip build/push and roll containers (picks up secret/env changes)")
+    .option(
+      "--image <uri>",
+      "skip build/push and redeploy an existing ECR tag of one --service (rollback / promote)",
+    )
     .addHelpText(
       "after",
       [
@@ -1064,11 +1648,18 @@ export function registerDeploy(program: Command): void {
         "terminated instances are recreated under the same node id (edge/both keep their Elastic IP). Use --no-repair",
         "to fail on drift, or --no-recreate to allow only resume/sync.",
         "",
-        "Config lock: after a project's first deploy, only cpu and memory may change in",
-        "launch-pad.toml. Any other edit (rename, domain, env, node, replicas, …) aborts",
-        "deploy before the build — there is no bypass flag. (When iterating on this lock",
-        "locally, run the workspace CLI — `pnpm --filter @agentsystemlabs/launch-pad dev",
-        "-- deploy` — the published npm package may predate it.)",
+        "Cluster auto-placement: omit node/nodes on a [[service]] and deploy picks its",
+        "nodes from the cluster. `schedule = \"even\" | \"capacity\"` chooses round-robin",
+        "vs bin-packing by free CPU/memory; `topology = \"split\" | \"co-located\" | \"auto\"`",
+        "chooses a dedicated edge vs one both-role node with local Caddy. Both fields are",
+        "locked after the first deploy. The resolved placement map prints on every deploy.",
+        "",
+        "Config lock: after a project's first deploy, only cpu, memory, replicas, env, and",
+        "secrets may change in launch-pad.toml. Identity/placement edits (rename, domain,",
+        "port, node, edge, healthCheck, rollout, …) abort deploy before the build — there is",
+        "no bypass flag. Use `launch-pad scale <field>` and `launch-pad config set` to make the",
+        "allowed edits from the CLI. (When iterating on this lock locally, run the workspace",
+        "CLI — `pnpm --filter @agentsystemlabs/launch-pad dev -- deploy`.)",
         "",
         "Examples:",
         "  $ launch-pad deploy",
@@ -1078,6 +1669,13 @@ export function registerDeploy(program: Command): void {
         "  $ launch-pad deploy --yes        # auto-provision without prompting",
         "  $ launch-pad deploy --no-create  # error if a node is missing",
         "  $ launch-pad deploy --no-repair  # error on console-side EC2 drift",
+        "  $ launch-pad deploy --service web --image <uri>  # redeploy an existing tag (rollback)",
+        "",
+        "--image redeploys an existing immutable ECR tag of ONE --service without building —",
+        "for rollback or promoting a known-good build. The URI must be in that service's own",
+        "ECR repo and the tag must already exist; the service must already be deployed (it",
+        "re-rolls in place). Container config (cpu/memory/replicas/env/secrets) comes from the",
+        "current launch-pad.toml, so the config lock still applies.",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {

@@ -11,6 +11,7 @@ function svc(project: string, service: string, cpu = 256, memory = 256): Service
     memory,
     replicas: 1,
     env: {},
+    secretRefs: [],
     ingress: null,
     healthCheck: null,
     rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },

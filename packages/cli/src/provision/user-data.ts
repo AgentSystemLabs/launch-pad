@@ -15,13 +15,15 @@ export interface AgentConfig {
 export interface UserDataParams {
   agent: AgentConfig;
   /** Presigned S3 URL the node curls to fetch the agent artifact. */
-  bundleUrl: string;
+  bundleUrl?: string;
   /** Agent runtime: "ts" (Node CJS bundle, default) or "rust" (static binary). */
   agentType?: AgentType;
+  /** Golden AMIs already include host dependencies and the Rust agent binary. */
+  bootstrapMode?: "full" | "golden";
 }
 
 /** Caddy install + permissive-admin systemd service (only for edge/both nodes). */
-function caddyBlock(): string {
+function caddyBlock(installBinary: boolean): string {
   const unit = `[Unit]
 Description=Caddy
 After=network-online.target
@@ -39,9 +41,13 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 `;
+  const binaryBlock = installBinary
+    ? `curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/local/bin/caddy
+chmod +x /usr/local/bin/caddy`
+    : "test -x /usr/local/bin/caddy";
+
   return `# --- Caddy (static binary; the agent pushes routes via the admin API on :2019) ---
-curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/local/bin/caddy
-chmod +x /usr/local/bin/caddy
+${binaryBlock}
 mkdir -p /var/lib/caddy
 
 cat > /etc/launch-pad/caddy-init.json <<'CADDYINIT'
@@ -60,6 +66,10 @@ systemctl enable --now caddy
 `;
 }
 
+function needsAgentDownload(agentType: AgentType, bootstrapMode: "full" | "golden"): boolean {
+  return bootstrapMode === "full" || agentType === "ts";
+}
+
 /**
  * The cloud-init script a node runs on first boot: install Docker + Node (+ Caddy on
  * edge/both nodes), write the agent config + systemd unit, download the agent bundle
@@ -67,28 +77,47 @@ systemctl enable --now caddy
  */
 export function renderUserData(params: UserDataParams): string {
   const agentType = params.agentType ?? "ts";
+  const bootstrapMode = params.bootstrapMode ?? "full";
   const agentJson = JSON.stringify(params.agent, null, 2);
   const unit = renderSystemdUnit(agentType);
-  const caddy = params.agent.role === "app" ? "" : `\n${caddyBlock()}`;
+  const caddy = params.agent.role === "app" ? "" : `\n${caddyBlock(bootstrapMode === "full")}`;
   const cloudwatch = renderCloudWatchInstall({
     clusterId: params.agent.clusterId,
     nodeId: params.agent.nodeId,
     role: params.agent.role,
+    installPackage: bootstrapMode === "full",
   });
 
   // The Rust agent is a self-contained binary — no Node runtime needed on-box.
   const runtimeBlock =
-    agentType === "rust"
+    bootstrapMode === "golden"
+      ? `# --- runtime already installed by launch-pad golden AMI ---
+${agentType === "rust" ? "test -x /opt/launch-pad/agent" : "node --version"}`
+      : agentType === "rust"
       ? `# --- agent runtime: Rust (static binary, no Node needed) ---`
       : `# --- Node.js 22 ---
 curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
 dnf install -y nodejs`;
 
+  if (needsAgentDownload(agentType, bootstrapMode) && !params.bundleUrl) {
+    throw new Error(`bundleUrl is required for ${agentType} agent on ${bootstrapMode} bootstrap`);
+  }
+
   const fetchAgent =
-    agentType === "rust"
-      ? `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent
+    bootstrapMode === "golden" && agentType === "rust"
+      ? "# Rust agent binary is baked into the launch-pad golden AMI."
+      : agentType === "rust"
+        ? `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent
 chmod +x /opt/launch-pad/agent`
-      : `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent.cjs`;
+        : `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent.cjs`;
+
+  const dockerBlock =
+    bootstrapMode === "full"
+      ? `# --- Docker ---
+dnf install -y docker
+systemctl enable --now docker`
+      : `# --- Docker (preinstalled by launch-pad golden AMI) ---
+systemctl enable --now docker`;
 
   return `#!/bin/bash
 set -euxo pipefail
@@ -96,9 +125,7 @@ set -euxo pipefail
 # --- launch-pad dirs ---
 mkdir -p /etc/launch-pad /var/lib/launch-pad /opt/launch-pad
 
-# --- Docker ---
-dnf install -y docker
-systemctl enable --now docker
+${dockerBlock}
 
 ${runtimeBlock}
 ${caddy}

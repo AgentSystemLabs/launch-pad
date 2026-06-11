@@ -10,10 +10,10 @@
  * See e2e/README.md for prerequisites.
  */
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import { type Cli, makeCli } from "./cli";
 import { makeDns } from "./dns";
 import { type Fixture, prepareFixture } from "./fixture";
@@ -25,6 +25,7 @@ const CERT_TIMEOUT_MS = 10 * 60_000; // DNS propagation + Let's Encrypt issuance
 const ZERO_DOWNTIME_MAX_FAILURE_RATE = 0.01; // ≤1% of in-flight requests may blip
 const ZERO_DOWNTIME_MAX_CONSECUTIVE = 3; // a run of ≥3 failures = a real outage
 const DEPLOY_TIMEOUT_S = "600";
+const SECRET_KEY = "LAUNCHPAD_E2E_SECRET";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -92,6 +93,15 @@ async function countS3Objects(region: string, bucket: string, prefix: string): P
   return count;
 }
 
+async function readDesiredJson(region: string, bucket: string, cluster: string, node: string): Promise<unknown> {
+  const s3 = new S3Client({ region });
+  const key = `clusters/${cluster}/nodes/${node}/desired.json`;
+  const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const body = await res.Body?.transformToString();
+  if (!body) throw new Error(`empty desired.json at s3://${bucket}/${key}`);
+  return JSON.parse(body) as unknown;
+}
+
 async function main(): Promise<boolean> {
   if (process.env.LAUNCHPAD_E2E !== "1") {
     process.stderr.write(
@@ -113,7 +123,10 @@ async function main(): Promise<boolean> {
   const port = 3000;
   const v1 = `e2e-v1-${runId}`;
   const v2 = `e2e-v2-${runId}`;
+  const secretV1 = `e2e-secret-v1-${runId}`;
+  const secretV2 = `e2e-secret-v2-${runId}`;
   const url = `https://${domain}/`;
+  const secretUrl = `https://${domain}/secret`;
 
   const home = mkdtempSync(join(tmpdir(), "launch-pad-home-"));
   const cli = makeCli({ home, region });
@@ -136,6 +149,14 @@ async function main(): Promise<boolean> {
         } catch (error) {
           log(`DNS cleanup warning: ${(error as Error).message}`);
         }
+      }
+      if (fixture) {
+        const rm = await cli.run(
+          ["secret", "rm", SECRET_KEY, "--service", service, "--cluster", cluster],
+          { cwd: fixture.dir, allowFail: true },
+        );
+        if (rm.exitCode === 0) log("SSM secret removed");
+        else log(`SSM secret cleanup warning: ${rm.stderr || rm.stdout}`);
       }
       const out = await cli.json<DestroyJson>(["cluster", "destroy", cluster, "--yes"]);
       note(`destroyed nodes: ${out.destroyed.join(", ") || "(none)"}`);
@@ -212,12 +233,27 @@ async function main(): Promise<boolean> {
       project, service, appNode, edgeNode, domain, port, replicas: 2, cpu: 256, memory: 256,
     });
 
+    await step("set an SSM secret via the CLI and register it in launch-pad.toml", async () => {
+      await cli.run(["secret", "set", SECRET_KEY, "--service", service, "--cluster", cluster], {
+        cwd: fixture!.dir,
+        input: `${secretV1}\n`,
+      });
+    });
+
     await step("deploy v1", async () => {
       const sha = await fixture!.setRelease(v1);
       note(`v1 source sha: ${sha}`);
       await cli.run(["deploy", "--cluster", cluster, "--yes", "--timeout", DEPLOY_TIMEOUT_S], {
         cwd: fixture!.dir,
       });
+    });
+
+    await step("desired state contains only secret refs (not plaintext)", async () => {
+      const desired = await readDesiredJson(region, bucket, cluster, appNode);
+      const encoded = JSON.stringify(desired);
+      assert(encoded.includes(`"/launch-pad/${cluster}/${project}/${service}/${SECRET_KEY}"`), "desired.json includes the SSM secret ref path");
+      assert(encoded.includes(`"name":"${SECRET_KEY}"`), "desired.json includes the env key name");
+      assert(!encoded.includes(secretV1), "desired.json does NOT contain the plaintext secret value");
     });
 
     await step("point DNS at the edge and verify HTTPS (v1)", async () => {
@@ -230,6 +266,84 @@ async function main(): Promise<boolean> {
         res.ok,
         `HTTPS served v1 over a valid certificate (attempts: ${res.attempts}${res.lastError ? `, last: ${res.lastError}` : ""})`,
       );
+      const secret = await pollHttps(secretUrl, { timeoutMs: 120_000, bodyIncludes: `secret:${secretV1}` });
+      assert(secret.ok, `container received the SSM secret via env (attempts: ${secret.attempts})`);
+    });
+
+    await step("rotate the SSM secret and roll containers with deploy --restart", async () => {
+      const before = await containerIds(cli, appNode, cluster);
+      assert(before.length > 0, `captured ${before.length} container id(s) before secret rotation`);
+      await cli.run(["secret", "set", SECRET_KEY, "--service", service, "--cluster", cluster], {
+        cwd: fixture!.dir,
+        input: `${secretV2}\n`,
+      });
+      await cli.run(["deploy", "--restart", "--service", service, "--cluster", cluster, "--yes", "--timeout", DEPLOY_TIMEOUT_S], {
+        cwd: fixture!.dir,
+      });
+      const after = await containerIds(cli, appNode, cluster);
+      assert(before.join(",") !== after.join(","), "deploy --restart rolled containers after secret rotation");
+      const secret = await pollHttps(secretUrl, { timeoutMs: 120_000, bodyIncludes: `secret:${secretV2}` });
+      assert(secret.ok, `container received the rotated SSM secret via env (attempts: ${secret.attempts})`);
+    });
+
+    await softStep("scale replicas up (2 → 3) and back down (3 → 2) via the CLI", async () => {
+      // The fixture deployed with replicas: 2. `scale` edits launch-pad.toml and runs
+      // a --service deploy — so this also proves the config lock now PERMITS a replicas
+      // change (an allowlisted post-deploy mutation) instead of aborting the build.
+      const before = await containerIds(cli, appNode, cluster);
+      assertEquals(before.length, 2, "service is running 2 replicas before scaling");
+
+      await cli.run(
+        ["scale", "replicas", service, "3", "--cluster", cluster, "--yes", "--timeout", DEPLOY_TIMEOUT_S],
+        { cwd: fixture!.dir },
+      );
+      const up = await retry(() => containerIds(cli, appNode, cluster), {
+        tries: 12,
+        delayMs: 10_000,
+        until: (ids) => ids.length === 3,
+      });
+      assertEquals(up.length, 3, "agent converged to 3 running replicas after scale-up");
+      const serving = await pollHttps(url, { timeoutMs: 120_000, bodyIncludes: v1 });
+      assert(serving.ok, `still serving over HTTPS with 3 replicas (attempts: ${serving.attempts})`);
+
+      await cli.run(
+        ["scale", "replicas", service, "2", "--cluster", cluster, "--yes", "--timeout", DEPLOY_TIMEOUT_S],
+        { cwd: fixture!.dir },
+      );
+      const down = await retry(() => containerIds(cli, appNode, cluster), {
+        tries: 12,
+        delayMs: 10_000,
+        until: (ids) => ids.length === 2,
+      });
+      assertEquals(down.length, 2, "agent converged back to 2 running replicas after scale-down");
+
+      // The CLI wrote the count back into launch-pad.toml — leave it at 2 so the
+      // subsequent v2 rollout uses the same replica count it started with.
+      const toml = readFileSync(join(fixture!.dir, "launch-pad.toml"), "utf8");
+      assert(/replicas\s*=\s*2\b/.test(toml), "launch-pad.toml replicas is back to 2 after the scale-down");
+    });
+
+    await softStep("set a non-secret env var with `config set` and roll it out", async () => {
+      // `config set` edits the service's env table + redeploys; the agent must roll
+      // the containers (env is part of the config stamp) and the new value must reach
+      // the container. The fixture echoes any LAUNCHPAD_E2E_* env at /secret-style
+      // routes — here we assert a fresh rollout happened (new container ids).
+      const before = await containerIds(cli, appNode, cluster);
+      await cli.run(
+        ["config", "set", service, "LAUNCHPAD_E2E_FLAG=on", "--cluster", cluster, "--yes", "--timeout", DEPLOY_TIMEOUT_S],
+        { cwd: fixture!.dir },
+      );
+      const after = await retry(() => containerIds(cli, appNode, cluster), {
+        tries: 12,
+        delayMs: 10_000,
+        until: (ids) => ids.length === before.length && ids.join(",") !== before.join(","),
+      });
+      assert(
+        after.length === before.length && after.join(",") !== before.join(","),
+        "config set rolled the containers (new ids) to apply the env change",
+      );
+      const toml = readFileSync(join(fixture!.dir, "launch-pad.toml"), "utf8");
+      assert(/LAUNCHPAD_E2E_FLAG\s*=\s*"on"/.test(toml), "launch-pad.toml carries the new env var");
     });
 
     await softStep("inspect service logs via the CLI", async () => {
@@ -283,6 +397,21 @@ async function main(): Promise<boolean> {
         `rollout samples: ${stats.total} · failures: ${stats.failures} (${(stats.failureRate * 100).toFixed(2)}%) · ` +
           `max consecutive: ${stats.maxConsecutiveFailures} · v1 seen: ${v1seen} · v2 seen: ${v2seen}`,
       );
+      // Surface WHAT each failed sample was: a 5xx (edge routed to a dead replica —
+      // a real rollout bug) reads very differently from a transport-level error
+      // (keep-alive reuse race on a Caddy reload, or plain internet noise).
+      const failed = poller.samples
+        .map((sample, index) => ({ sample, index }))
+        .filter((f) => !f.sample.ok);
+      for (const f of failed.slice(0, 10)) {
+        const s = f.sample;
+        note(
+          `failed sample #${f.index} at ${s.at}: ` +
+            (s.status != null
+              ? `status ${s.status}, body: ${s.body.slice(0, 120)}`
+              : `error: ${s.error}`),
+        );
+      }
       assert(v1seen > 0, "poller observed the OLD (v1) version before the cutover");
       assert(v2seen > 0, "poller observed the NEW (v2) version after the cutover");
       assert(

@@ -192,6 +192,85 @@ describe("replicas / placement / edge validation", () => {
   });
 });
 
+describe("schedule / topology validation", () => {
+  const health = { healthCheck: { path: "/healthz" } };
+  /** A cluster-placed web service (no node/nodes). */
+  const clusterWeb = { ...web, node: undefined, ...health };
+  const clusterWorker = { ...worker, node: undefined };
+
+  it("defaults to schedule = even and topology = auto when omitted", () => {
+    const cfg = parseLaunchPadConfig({ project: "p", service: [clusterWeb, clusterWorker] });
+    expect(cfg.service[0]?.schedule).toBe("even");
+    expect(cfg.service[0]?.topology).toBe("auto");
+    expect(cfg.service[1]?.schedule).toBe("even");
+    expect(cfg.service[1]?.topology).toBe("auto");
+  });
+
+  it("accepts capacity + each topology on a cluster-placed web service", () => {
+    for (const topology of ["split", "co-located", "auto"]) {
+      const cfg = parseLaunchPadConfig({
+        project: "p",
+        service: [{ ...clusterWeb, schedule: "capacity", topology }],
+      });
+      expect(cfg.service[0]?.schedule).toBe("capacity");
+      expect(cfg.service[0]?.topology).toBe(topology);
+    }
+  });
+
+  it("accepts co-located (and capacity) on a worker", () => {
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [{ ...clusterWorker, schedule: "capacity", topology: "co-located" }],
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects an EXPLICIT schedule alongside node — even the default value", () => {
+    // The key matrix case: "even" matches the default, but writing it next to a
+    // pinned node is still a contradiction the user should hear about.
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...worker, schedule: "even" }] }),
+    ).toThrow(/`schedule` only applies to cluster auto-placement/);
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [{ ...web, node: undefined, nodes: ["a"], schedule: "capacity", ...health }],
+      }),
+    ).toThrow(/`schedule` only applies to cluster auto-placement/);
+  });
+
+  it("rejects topology alongside node/nodes", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...worker, topology: "auto" }] }),
+    ).toThrow(/`topology` only applies to cluster auto-placement/);
+  });
+
+  it("rejects split on a worker", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...clusterWorker, topology: "split" }] }),
+    ).toThrow(/a worker has no ingress to split/);
+  });
+
+  it("rejects co-located together with an explicit edge", () => {
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [{ ...clusterWeb, topology: "co-located", edge: "edge-1" }],
+      }),
+    ).toThrow(/serves the domain from the service's own node — remove `edge`/);
+  });
+
+  it("rejects unknown enum values", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...clusterWeb, schedule: "spread" }] }),
+    ).toThrow();
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...clusterWeb, topology: "pinned" }] }),
+    ).toThrow();
+  });
+});
+
 describe("envProject", () => {
   it("returns the base project with no env", () => {
     expect(envProject("my-app", undefined)).toBe("my-app");

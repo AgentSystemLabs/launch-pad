@@ -90,6 +90,10 @@ export function renderToml(project: string, svc: ServiceValues): string {
   }
 
   lines.push('env = { NODE_ENV = "production" }');
+  lines.push(
+    "# Sensitive values (API keys, DB URLs) belong in SSM — not here:",
+    "#   launch-pad secret set DATABASE_URL --service <name>",
+  );
 
   // Web services require a health check: a surged replica must pass it before
   // it joins the load balancer, so rolling updates stay zero-downtime.

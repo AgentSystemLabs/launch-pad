@@ -2,12 +2,17 @@ import type { DesiredState, UpstreamBackend, UpstreamShard } from "@agentsysteml
 import { serviceKey } from "@agentsystemlabs/launch-pad-shared";
 import type { ManagedReplica } from "./docker";
 
-/** Build upstream shards grouped by edge id from desired state + live replicas. */
+/**
+ * Build upstream shards grouped by edge id from desired state + live replicas.
+ * `excludeIds` drops replicas that are DRAINING during a rollout — they are still
+ * running, but the edge must stop routing to them before they are stopped.
+ */
 export function buildUpstreamShards(
   nodeId: string,
   privateIp: string,
   desired: DesiredState,
   live: Map<string, ManagedReplica[]>,
+  excludeIds: Set<string> = new Set(),
 ): Map<string, UpstreamShard> {
   const edges = new Set<string>();
   for (const c of desired.services) {
@@ -29,7 +34,7 @@ export function buildUpstreamShards(
     if (!shard) continue;
 
     const reps = (live.get(serviceKey(c.project, c.service)) ?? []).filter(
-      (r) => r.state === "running" && r.hostPort != null,
+      (r) => r.state === "running" && r.hostPort != null && !excludeIds.has(r.id),
     );
 
     for (const r of reps) {

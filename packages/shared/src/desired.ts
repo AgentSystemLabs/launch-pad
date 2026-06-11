@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PROTOCOL_VERSION } from "./constants";
 import { HealthCheckSchema, RolloutSchema } from "./health";
+import { SecretRefSchema } from "./secrets";
 
 /**
  * Web ingress. There are THREE distinct states a service can be in, encoded by
@@ -37,6 +38,10 @@ export const ServiceConfigSchema = z
     /** How many replicas of this service run on THIS node. */
     replicas: z.number().int().min(1).default(1),
     env: z.record(z.string(), z.string()).default({}),
+    /** SSM parameter refs resolved by the agent at container start (values never stored here). */
+    secretRefs: z.array(SecretRefSchema).default([]),
+    /** Bumped by `deploy --restart` to roll containers without a new image. */
+    restartAt: z.string().optional(),
     ingress: IngressSchema.nullable(),
     healthCheck: HealthCheckSchema.nullable().default(null),
     rollout: RolloutSchema.default({}),

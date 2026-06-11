@@ -57,6 +57,8 @@ describe("backward compatibility with pre-feature S3 documents", () => {
     expect(n.privateIp).toBeNull();
     // pre-cluster node.json has no clusterId → it belongs to the implicit default cluster.
     expect(n.clusterId).toBe("default");
+    // pre-golden-AMI nodes ran the TypeScript bundle.
+    expect(n.agentType).toBe("ts");
   });
 
   it("parses an old status.json (no replicas / edgeRoutes)", () => {

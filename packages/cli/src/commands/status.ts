@@ -14,6 +14,7 @@ import {
 } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import { getJson, listNodeIds } from "../aws/s3-state";
+import { loadDeployedPlacement } from "../deploy/deployed-footprint";
 import { findConfigPath, loadConfig } from "../config/load";
 import { CliError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
@@ -102,10 +103,20 @@ function render(views: NodeView[], filterProject?: string): void {
 
 async function resolveNodeIds(opts: StatusOptions, aws: AwsEnv): Promise<string[]> {
   if (opts.node) return [opts.node];
-  const services = loadConfig().config.service;
+  const { config } = loadConfig();
+  const services = config.service;
   const ids = new Set<string>(services.flatMap((s) => targetNodes(s)));
   if (services.some((s) => usesClusterPlacement(s))) {
-    for (const id of await listNodeIds(aws.s3, aws.bucket, aws.clusterId)) ids.add(id);
+    // Scope cluster-placed services to the nodes this footprint actually occupies
+    // (per published desired.json); fall back to every cluster node only when
+    // nothing is published yet (e.g. status before the first deploy).
+    const owner = envProject(config.project, opts.env);
+    const placement = await loadDeployedPlacement(aws.s3, aws.bucket, aws.clusterId, owner);
+    if (placement.occupiedNodeIds.length > 0) {
+      for (const id of placement.occupiedNodeIds) ids.add(id);
+    } else {
+      for (const id of await listNodeIds(aws.s3, aws.bucket, aws.clusterId)) ids.add(id);
+    }
   }
   return [...ids];
 }

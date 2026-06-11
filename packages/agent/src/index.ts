@@ -22,6 +22,7 @@ import {
   isCoLocatedIngress,
   mergeRoutesByDomain,
 } from "./routes";
+import { configureSecretsRegion } from "./secrets";
 import {
   getDesired,
   listUpstreamShards,
@@ -38,8 +39,20 @@ import { buildUpstreamShards } from "./upstream";
 const AGENT_VERSION = process.env.LAUNCHPAD_AGENT_VERSION ?? "0.0.0";
 const NO_CADDY: CaddyOutcome = { managed: false, lastReloadAt: null, error: null };
 
+/**
+ * Floor on a rollout's drain wait for services fronted by a REMOTE edge node.
+ * Removing a draining replica from routing is asynchronous there: this agent PUTs
+ * the upstream shard, the edge sees it on its next poll (DEFAULT_POLL_INTERVAL_MS),
+ * then reloads Caddy. Stopping the old container before that lands would 502 every
+ * request still routed to it — so the drain must outlast one full edge poll plus
+ * S3/reload latency. 1.5× the default poll covers it; an edge configured with a
+ * coarser LAUNCHPAD_POLL_MS needs `rollout.drainTimeout` raised to match.
+ */
+const REMOTE_EDGE_DRAIN_FLOOR_MS = Math.round(DEFAULT_POLL_INTERVAL_MS * 1.5);
+
 async function main(): Promise<void> {
   const config = loadAgentConfig();
+  configureSecretsRegion(config.region);
   const { s3, ecr } = makeClients(config.region);
   const state = loadState();
 
@@ -127,6 +140,11 @@ async function main(): Promise<void> {
       const hasCoLocatedWeb = desired.services.some(
         (s) => s.ingress && isCoLocatedIngress(config.nodeId, s.ingress.edge),
       );
+      // Web services fronted by a REMOTE edge: their routing lives in an S3 upstream
+      // shard this node publishes, not in any Caddy this node manages.
+      const hasRemoteEdgeWeb = desired.services.some(
+        (s) => s.ingress?.edge != null && s.ingress.edge !== config.nodeId,
+      );
       const frontsRemoteApps = config.role === "both";
       let caddyOutcome: CaddyOutcome = NO_CADDY;
       const errors = new Map<string, string>();
@@ -147,37 +165,13 @@ async function main(): Promise<void> {
         return mergeRoutesByDomain(routes);
       };
 
-      // Rebuild Caddy from co-located replicas + (for both) remote upstream shards.
-      const refreshCaddy = async (excludeIds: Set<string> = new Set()): Promise<void> => {
-        if (!hasCoLocatedWeb && !frontsRemoteApps) {
-          // This node never programs Caddy — nothing to route.
-          caddyOutcome = NO_CADDY;
-          return;
-        }
-        // If we reach here the node DOES manage Caddy, so empty routes means "clear
-        // any stale config": fall through to applyCaddy([]), which pushes an empty
-        // server set. (An earlier guard re-testing !hasCoLocatedWeb && !frontsRemoteApps
-        // here was dead — it can never be true past the return above.)
-        const routes = await buildCaddyRoutes(excludeIds);
-        caddyOutcome = await applyCaddy(routes);
-      };
-
-      const currentStatus = async (): Promise<NodeStatus> => {
-        const live = await inspectManaged();
-        return buildStatus(config, AGENT_VERSION, desired, live, errors, caddyOutcome);
-      };
-
-      // Mid-rollout heartbeat: always writes (keeps status fresh during long drains),
-      // same as before the write-on-change change.
-      const heartbeat = async (): Promise<void> => {
-        await writer.forceWrite(await currentStatus(), Date.now(), putFn);
-        if (debugS3) console.error("[agent] s3: status PUT (rollout heartbeat)");
-      };
-
-      const publishUpstream = async (): Promise<void> => {
+      // Publish this node's upstream shards (routing for remote edges). `excludeIds`
+      // drops replicas that are draining mid-rollout, so the edge stops routing to
+      // them BEFORE they are stopped.
+      const publishUpstream = async (excludeIds: Set<string> = new Set()): Promise<void> => {
         const live = await inspectManaged();
         const privateIp = await getPrivateIp();
-        const shards = buildUpstreamShards(config.nodeId, privateIp, desired, live);
+        const shards = buildUpstreamShards(config.nodeId, privateIp, desired, live, excludeIds);
         for (const [edgeId, shard] of shards) {
           // Co-located edge (self) is programmed via local Caddy, not S3 shards.
           if (edgeId === config.nodeId) continue;
@@ -193,23 +187,54 @@ async function main(): Promise<void> {
         }
       };
 
+      // Rebuild ALL routing this node feeds: the local Caddy (co-located web + remote
+      // upstream shards on a `both` node) and the S3 shards consumed by remote edges.
+      // Rollouts call this at every surge/drain step — the shard publish must happen
+      // HERE, not at tick end, or a remote edge keeps routing to stopped replicas
+      // for the rest of the rollout.
+      const refreshRouting = async (excludeIds: Set<string> = new Set()): Promise<void> => {
+        if (!hasCoLocatedWeb && !frontsRemoteApps) {
+          // This node never programs Caddy — nothing to route locally.
+          caddyOutcome = NO_CADDY;
+        } else {
+          // The node DOES manage Caddy, so empty routes means "clear any stale
+          // config": fall through to applyCaddy([]), which pushes an empty server set.
+          const routes = await buildCaddyRoutes(excludeIds);
+          caddyOutcome = await applyCaddy(routes);
+        }
+        if (hasRemoteEdgeWeb) await publishUpstream(excludeIds);
+      };
+
+      const currentStatus = async (): Promise<NodeStatus> => {
+        const live = await inspectManaged();
+        return buildStatus(config, AGENT_VERSION, desired, live, errors, caddyOutcome);
+      };
+
+      // Mid-rollout heartbeat: always writes (keeps status fresh during long drains),
+      // same as before the write-on-change change.
+      const heartbeat = async (): Promise<void> => {
+        await writer.forceWrite(await currentStatus(), Date.now(), putFn);
+        if (debugS3) console.error("[agent] s3: status PUT (rollout heartbeat)");
+      };
+
       const liveReplicas = await inspectManaged();
       const actions = planReconcile(desired, liveReplicas);
       await applyActions(actions, {
         bindHost,
         port: allocateAndSavePort,
         releasePort: releaseAndSavePort,
-        refreshCaddy,
+        refreshRouting,
+        drainFloorMs: (c) =>
+          c.ingress?.edge != null && c.ingress.edge !== config.nodeId
+            ? REMOTE_EDGE_DRAIN_FLOOR_MS
+            : 0,
         heartbeat,
         errors,
       });
 
-      await refreshCaddy();
+      await refreshRouting();
       const reason = await writer.maybeWrite(await currentStatus(), Date.now(), putFn);
       if (debugS3) console.error(`[agent] s3: status ${reason}`);
-      if (desired.services.some((s) => s.ingress?.edge && s.ingress.edge !== config.nodeId)) {
-        await publishUpstream();
-      }
       // Reconcile CloudWatch log shipping to the containers now running on this node.
       await syncCloudWatch(null);
       // Sample host + per-container usage (CPU normalized to each service's cpu limit).

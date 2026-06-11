@@ -1,5 +1,8 @@
 packages:
   - "packages/*"
+  # The dashboard is a Bun app (orbital-js requires Bun) and is managed by its
+  # own `bun install`, not pnpm. Exclude it so `pnpm install`/`pnpm -r` ignore it.
+  - "!packages/dashboard"
   - "examples/*"
   - "e2e"
 

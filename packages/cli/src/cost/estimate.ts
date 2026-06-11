@@ -1,6 +1,7 @@
 import {
   DEFAULT_POLL_INTERVAL_MS,
   LIVENESS_HEARTBEAT_MS,
+  type NodeRegistryEntry,
   type NodeRole,
 } from "@agentsystemlabs/launch-pad-shared";
 import { color } from "../ui/theme";
@@ -263,6 +264,48 @@ export function formatProvisionCostLines(
   );
 
   return lines;
+}
+
+export interface ClusterCostSummary {
+  /** EC2 + S3 estimate for the running nodes. */
+  estimate: ProvisionCostEstimate;
+  /** Nodes billing right now (ready / provisioning). */
+  runningNodes: number;
+  /** Stopped nodes — no compute/agent charge, but they still incur EBS + EIP (not estimated). */
+  pausedNodes: number;
+}
+
+/**
+ * Roll up a cluster's *ongoing* monthly cost from its registry. Running nodes
+ * (ready/provisioning) bill EC2 + agent S3; stopped nodes are counted separately (their
+ * agent is off and compute isn't charged, but their EBS volume + Elastic IP still cost — not
+ * estimated here, same as the provision-time estimate); terminated/terminating are excluded.
+ */
+export function summarizeClusterCost(entries: NodeRegistryEntry[]): ClusterCostSummary {
+  const running = entries.filter((e) => e.state === "ready" || e.state === "provisioning");
+  const paused = entries.filter((e) => e.state === "stopped");
+  const inputs: NodeCostInput[] = running.map((e) => ({
+    nodeId: e.nodeId,
+    role: e.role,
+    instanceType: e.instanceType,
+  }));
+  return { estimate: estimateProvisionCost(inputs), runningNodes: running.length, pausedNodes: paused.length };
+}
+
+export interface BudgetVerdict {
+  budgetUsd: number;
+  /** The estimated monthly total, or null when an EC2 rate is unknown. */
+  totalUsd: number | null;
+  over: boolean;
+  /** USD over budget (0 when within budget or unknown). */
+  overByUsd: number;
+}
+
+/** Compare an estimated monthly total to a budget. An unknown total never reads as over. */
+export function budgetVerdict(totalUsd: number | null, budgetUsd: number): BudgetVerdict {
+  if (totalUsd === null) return { budgetUsd, totalUsd, over: false, overByUsd: 0 };
+  const over = totalUsd > budgetUsd;
+  return { budgetUsd, totalUsd, over, overByUsd: over ? roundUsd(totalUsd - budgetUsd) : 0 };
 }
 
 /** Short summary for a yes/no confirmation prompt. */

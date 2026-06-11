@@ -115,11 +115,16 @@ s3://launchpad-state/
     <node-id>/
       desired.json      # written by the CLI, read by the agent
       status.json       # written by the agent, read by the CLI
-      events/           # optional append-only deploy history (later)
+  projects/
+    <footprint>/
+      config-baseline.json   # frozen config for the post-deploy config lock
+      events/                # append-only deploy history (`launch-pad history`)
 ```
 
 State lives under `nodes/`, not `agents/`, because the machine is the durable
-identity.
+identity. Per-footprint state (the config-lock baseline and the deploy-history
+events) lives under `projects/<footprint>/`. (A named cluster scopes both trees
+under `clusters/<id>/`.)
 
 ### 5. Provisioning / installer — making nodes exist & be agent-ready (`packages/installer`)
 
@@ -273,10 +278,15 @@ Shared is the contract · Installer makes nodes (and infra) exist.**
 provisions/uses one node, runs one service, serves it on a real domain over HTTPS, and
 auto-updates on new pushes.
 
-**Deliberately out of scope for now:** dashboard · API / control-plane · web app ·
-billing · multi-node scheduler · orchestrator · health-check-gated zero-downtime
-rollouts · secrets manager. These can be proposed as features later, against this
-document.
+**Shipped since this MVP framing** (originally listed out of scope, now built): the
+multi-node **cluster scheduler** (auto-placement by `schedule`/`topology`),
+**health-check-gated zero-downtime rollouts** (described below), the **secrets manager**
+(SSM SecureString + `launch-pad secret`), and an experimental local **dashboard**
+(`packages/dashboard`).
+
+**Still out of scope:** a hosted **API / control-plane** and managed **web app**, **billing**,
+and a central **orchestrator** (the agent is a per-node reconciler, not a central scheduler).
+These can be proposed as features later, against this document.
 
 When the monorepo eventually hurts, the natural split is `launch-pad-cli` /
 `launch-pad-agent` / `launch-pad-control-plane` — but not before the single-command
@@ -474,10 +484,40 @@ port = 3000
 launch-pad deploy --cluster lower
 ```
 
+Two optional fields steer auto-placement (both only valid when `node`/`nodes` are
+omitted, and both locked after the first deploy like every other placement field):
+
+```toml
+[[service]]
+name = "web"
+schedule = "capacity"   # even (default): round-robin · capacity: bin-pack by free CPU/memory
+topology = "split"      # auto (default) · split: app nodes behind an edge · co-located: one both-node, local Caddy
+replicas = 4
+domain = "app.example.com"
+port = 3000
+  [service.healthCheck]
+  path = "/healthz"
+```
+
+- `schedule = "even"` is the legacy behavior: round-robin across the cluster's
+  app/both nodes. `"capacity"` places each replica on the node with the most free
+  CPU/memory (using deploy's own admission math, including rollout-surge headroom)
+  and fails with a per-node capacity breakdown when nothing fits.
+- `topology = "split"` requires a resolvable edge (`edge = …` or the cluster
+  default) even for one node; `"co-located"` puts ALL replicas on a single
+  both-role node served by its local Caddy and deliberately ignores the cluster's
+  default edge (`edge = …` alongside it is a config error). Workers have no
+  ingress: they may use `"co-located"` (one node) but not `"split"`.
+- Every deploy prints the resolved placement map (and `placementPlan` under
+  `--json`). When a re-plan moves a service off a node, deploy cleans that node's
+  desired state; `deploy --restart` always re-rolls in place.
+
 `deploy`, `status`, and the `node` subcommands all take `--cluster` (defaulting to
 your local `defaultCluster`, else `default`). Cross-account clusters — a `roleArn`
 target assumed per cluster — are the next step (Phase 2); the `default` cluster and
-all existing nodes are unaffected. See `examples/cluster-2-app-nodes-auto-placement` for a runnable config.
+all existing nodes are unaffected. See `examples/cluster-2-app-nodes-auto-placement`,
+`examples/cluster-capacity-split`, and `examples/cluster-co-located-single-node` for
+runnable configs.
 
 ## Logging: application logs in CloudWatch
 
@@ -614,12 +654,5 @@ launch-pad node monitor node-prod-1 --since 1h --json # { samples: [...] } for s
 | Deploy health / replicas | `launch-pad status` | S3 `status.json` |
 | Allocated vs capacity | `launch-pad node list` | S3 `desired.json` + registry |
 
-## Feature plans
-
-| Plan | Topic |
-|------|--------|
-| [`docs/clusters-plan.md`](clusters-plan.md) | Clusters, shared edge, cross-account scoping |
-| [`docs/node-ec2-drift-plan.md`](node-ec2-drift-plan.md) | Reconcile EC2 reality (console stop/terminate) with the S3 node registry |
-
-The agent reconciles **containers on a live node**; EC2 drift repair is a **CLI**
-concern (see the node EC2 drift plan).
+The agent reconciles **containers on a live node**; EC2 drift repair (`node reconcile`,
+deploy preflight) is a **CLI** concern.
