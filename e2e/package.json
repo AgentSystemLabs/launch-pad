@@ -18,6 +18,7 @@
     "e2e:cost": "tsx src/cost.ts",
     "e2e:idle": "tsx src/idle.ts",
     "e2e:volumes": "tsx src/volumes.ts",
+    "e2e:alerts": "tsx src/alerts.ts",
     "e2e:history": "tsx src/history.ts",
     "e2e:node-iam": "tsx src/node-iam.ts",
     "e2e:operator-iam": "tsx src/operator-iam.ts",

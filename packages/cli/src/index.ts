@@ -3,6 +3,7 @@ import { renderBanner, renderClusterLine } from "./banner";
 import { registerBackup } from "./commands/backup";
 import { registerCluster } from "./commands/cluster";
 import { registerConfig } from "./commands/config";
+import { registerAlerts } from "./commands/alerts";
 import { registerCost } from "./commands/cost";
 import { registerDeploy } from "./commands/deploy";
 import { registerDns } from "./commands/dns";
@@ -114,6 +115,7 @@ registerNode(program);
 registerCluster(program);
 registerBackup(program);
 registerCost(program);
+registerAlerts(program);
 
 async function main(): Promise<void> {
   try {

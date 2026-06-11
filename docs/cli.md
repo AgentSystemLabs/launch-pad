@@ -785,3 +785,34 @@ It also surfaces **idle-node recommendations** — money spent without work bein
 
 Only nodes idle longer than `--idle-days` (default 7) are flagged. These are advisory — only
 `--budget` changes the exit code.
+
+## `alerts`
+
+Check the cluster's health and notify on problems — a probe you run on a schedule (cron / a
+GitHub Action) rather than a continuous control plane.
+
+```bash
+launch-pad alerts check                                            # print any alerts; exit non-zero if any
+launch-pad alerts check --cluster prod --webhook "$SLACK_WEBHOOK"  # also POST to Slack/Discord
+launch-pad alerts check --json                                     # machine-readable
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `--webhook <url>` | POST alerts to this http(s) URL (Slack/Discord/generic JSON). Env: `LAUNCHPAD_ALERT_WEBHOOK`. |
+| `--stale <ms>` | Heartbeat staleness threshold (default 60000). |
+
+`alerts check` reads each node's registry entry + `status.json` and flags **real faults on nodes
+that are supposed to be running**:
+
+- **heartbeat-stale** — a live node whose agent stopped reporting (or, past a ~10-minute boot
+  grace, never reported). The node may be down, the agent crashed, or it lost network.
+- **service-unhealthy** — a service in the `error` state, or one wanting replicas but running
+  zero (fully down).
+
+It is deliberately quiet on non-faults: a **paused** node's agent is off on purpose, a
+still-booting node is given its grace window, and a partially-degraded service (e.g. 2/3 replicas
+mid-rollout) doesn't alert. It **exits non-zero** when there's any alert, so a scheduled run can
+gate on it; with `--webhook` it also POSTs a Slack/Discord-compatible payload (`text` summary +
+structured `alerts`). The webhook URL is operator-supplied (keep it out of source — use the env
+var or a CI secret).

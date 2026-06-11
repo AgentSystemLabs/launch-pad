@@ -74,7 +74,13 @@ LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:operator-iam  # the generated 
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rebalance     # rebalance + node evacuate move cluster-placed replicas
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:volumes       # persistent volume data survives a container replace (--agent ts)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:idle          # cost flags an idle (paused) node (no deploy)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:alerts        # alerts check fires on a dead node (heartbeat-stale) + webhook
 ```
+
+`e2e:alerts` deploys a worker (node healthy), asserts `alerts check` is clean, then **terminates
+the EC2 instance out-of-band** so the registry still says the node is up while the agent stops
+heartbeating — then asserts `alerts check` fires `heartbeat-stale`, POSTs a local webhook
+receiver, and exits non-zero.
 
 `e2e:volumes` provisions one `both` node on the **TypeScript agent** (`--agent ts`), deploys a
 worker pinned to it with a `/data` volume that appends a boot line on every container start, then

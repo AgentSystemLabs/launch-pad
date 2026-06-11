@@ -26,6 +26,7 @@
     "e2e:cost": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:cost",
     "e2e:idle": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:idle",
     "e2e:volumes": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:volumes",
+    "e2e:alerts": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:alerts",
     "e2e:history": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:history",
     "e2e:node-iam": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:node-iam",
     "e2e:operator-iam": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:operator-iam",

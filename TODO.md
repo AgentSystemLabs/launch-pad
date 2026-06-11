@@ -101,7 +101,18 @@ Shipped:
 
 ### Observability & alerting
 
-- [ ] **Alerting** — webhook/email/Slack when: deploy fails convergence, agent heartbeat stale, service unhealthy, cert renewal fails, node drift/gone.
+- [x] **Alerting** — `launch-pad alerts check` is a scheduled-probe health check (cron / GitHub Action)
+  that scans the cluster and flags **real faults on nodes that should be running**: a live node whose
+  agent stopped heartbeating (or, past a ~10-min boot grace, never reported) and a service in `error`
+  / fully down (0 running replicas). Deliberately quiet on non-faults (a paused node's agent is off on
+  purpose; a still-booting node gets its grace; a partial mid-rollout replica dip doesn't alert).
+  Exits **non-zero** on any alert (CI-gateable) and POSTs a Slack/Discord-compatible payload to
+  `--webhook` (or `LAUNCHPAD_ALERT_WEBHOOK`). Pure `evaluateAlerts` + `buildAlertPayload`
+  (`cli/src/alerts/`) unit-tested (15) + real-AWS regression (`pnpm e2e:alerts`: deploy a worker →
+  clean check → **terminate the instance out-of-band** so the registry still reads "up" while the
+  agent goes silent → alert fires + webhook delivered + non-zero exit). _Follow-up: continuous
+  (not on-demand) monitoring, cert-renewal-fail + node-drift signals, and a deploy-convergence-fail
+  hook (deploy already exits non-zero on non-convergence, which is CI-gateable today)._
 - [ ] **External uptime check** — synthetic HTTPS probe independent of the node (or integrated Route53 health check).
 - [ ] **Dashboard production story** — local Bun dashboard exists but is localhost-only, no auth; not a hosted control plane. Document gap or ship hosted/managed option.
 
