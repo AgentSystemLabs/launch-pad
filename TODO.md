@@ -177,7 +177,13 @@ Shipped:
 
 ### Developer experience
 
-- [ ] **`launch-pad init` improvements** — detect existing Dockerfile/ports; scaffold health check path from framework; multi-service monorepo template.
+- [x] **`launch-pad init` improvements** — interactive `init` now **detects the project** to seed smarter
+  defaults: reads the Dockerfile's `EXPOSE` port and `package.json` for a known web framework (Express,
+  Next.js, Fastify, NestJS, Astro, Nuxt, SvelteKit, Remix, hapi, Hono, Koa), then defaults the
+  "web service?" + port prompts accordingly (a Dockerfile `EXPOSE` wins over a framework default) and
+  prints a `detected …` note. Pure `projectHints`/`detectExposePort`/`detectFramework`
+  (`cli/src/init/detect.ts`) unit-tested (11); non-interactive/flag-driven behavior unchanged.
+  _Follow-up: framework-specific health-check path scaffolding + a multi-service monorepo template._
 - [ ] **Monorepo / multi-service deploy** — first-class “deploy changed services only” (git diff → `--service` list).
 - [ ] **Preview environments** — `deploy --env pr-123` with automatic DNS pattern + TTL teardown (env flag exists; full PR lifecycle automation does not).
 - [x] **Shell completions** — `launch-pad completions <bash|zsh|fish>` prints a completion script

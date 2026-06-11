@@ -1,11 +1,12 @@
-import { existsSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Command, InvalidArgumentError } from "commander";
 import { parse as parseToml } from "smol-toml";
 import { ZodError } from "zod";
 import { LABEL_REGEX, parseLaunchPadConfig } from "@agentsystemlabs/launch-pad-shared";
 import { CONFIG_FILENAME, formatZodError } from "../config/load";
+import { projectHints } from "../init/detect";
 import { CliError } from "../errors";
 import { assertValidNodeId } from "../validate-node-id";
 import { applyGlobalOptions, type GlobalOpts } from "../globals";
@@ -45,6 +46,15 @@ function positiveInt(value: string): number {
     throw new InvalidArgumentError("must be a positive integer");
   }
   return n;
+}
+
+/** Read a file's text, or undefined if it's missing/unreadable (best-effort detection). */
+function readFileSafe(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 /** Coerce arbitrary text into a valid launch-pad label. */
@@ -154,10 +164,20 @@ async function gatherValues(opts: InitOptions, cwd: string): Promise<{ project: 
   let domain = opts.domain;
   let port = opts.port;
   if (domain === undefined && port === undefined && interactive) {
-    const isWeb = await askYesNo("Does this service serve web traffic (needs a domain)?", true);
+    // Seed the web/port prompts from the project: a Dockerfile EXPOSE or a detected
+    // web framework (Express, Next.js, …) makes a smarter default than guessing.
+    const hints = projectHints({
+      dockerfile: readFileSafe(resolve(cwd, dockerfile)),
+      packageJson: readFileSafe(join(cwd, "package.json")),
+    });
+    if (hints.framework || hints.port) {
+      const parts = [hints.framework, hints.port ? `port ${hints.port}` : undefined].filter(Boolean);
+      log.dim(`  detected ${parts.join(", ")}`);
+    }
+    const isWeb = await askYesNo("Does this service serve web traffic (needs a domain)?", hints.likelyWeb);
     if (isWeb) {
       domain = await ask("Public domain", `${name}.example.com`);
-      port = positiveInt(await ask("Port your app listens on", String(DEFAULT_PORT)));
+      port = positiveInt(await ask("Port your app listens on", String(hints.port ?? DEFAULT_PORT)));
     }
   }
 

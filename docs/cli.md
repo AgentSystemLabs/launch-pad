@@ -50,6 +50,12 @@ launch-pad init [options]
 | `--memory <mb>` | Memory in MB |
 | `-f, --force` | Overwrite an existing config |
 
+Run interactively, `init` **detects your project** to seed smarter defaults: it reads the
+Dockerfile's `EXPOSE` port and your `package.json` for a known web framework (Express, Next.js,
+Fastify, NestJS, Astro, …), then defaults the "is this a web service?" and port prompts
+accordingly (the Dockerfile `EXPOSE` wins over a framework default). Pass the flags above to skip
+prompts entirely (CI / scripted use).
+
 ---
 
 ## `doctor`
