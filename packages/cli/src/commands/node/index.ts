@@ -5,9 +5,11 @@ import {
   checkCapacity,
   DEFAULT_CLUSTER,
   desiredKey,
+  envProject,
   HEARTBEAT_STALE_MS,
   type InstanceCapacity,
   isHeartbeatStale,
+  LABEL_REGEX,
   type NodeRegistryEntry,
   NodeRoleSchema,
   nodeRegistryKey,
@@ -17,6 +19,7 @@ import {
   parseNodeStatus,
   sharesToVcpu,
   statusKey,
+  usesClusterPlacement,
 } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../../aws/context";
 import {
@@ -35,7 +38,8 @@ import { rememberClusterTarget } from "../../config/local";
 import { deleteObject, ensureBucket, getJson, listNodeIds, putJson } from "../../aws/s3-state";
 import { applyNodeDrift } from "../../deploy/drift-apply";
 import { type NodeDrift, planNodeDrift } from "../../deploy/drift-plan";
-import { CliError } from "../../errors";
+import { findConfigPath, loadConfig } from "../../config/load";
+import { CliError, EvacuationBlockedError } from "../../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
 import { resolveNodeAmi } from "../../provision/golden-ami";
 import { installLoggingOnNode } from "../../provision/install-logging";
@@ -496,6 +500,15 @@ interface DestroyOptions extends GlobalOpts {
   yes?: boolean;
   /** Destroy even when the node still hosts services (they will be orphaned). */
   force?: boolean;
+  /**
+   * Before destroying, auto-evacuate the current project's cluster-placed services off the
+   * node(s) (= `node evacuate` / `rebalance --drain`) and wait for them to come up elsewhere.
+   */
+  evacuate?: boolean;
+  /** Target a named environment footprint for --evacuate (same as deploy --env). */
+  env?: string;
+  /** Seconds to wait for the evacuation to converge before tearing the node down. */
+  timeout?: string;
 }
 
 /** A (project, service) pair scheduled on a node — what `node destroy` would orphan. */
@@ -520,6 +533,40 @@ export function nodesThatWouldOrphan(
   return targets
     .filter((t) => t.services.length > 0)
     .map((t) => ({ name: t.name, services: t.services }));
+}
+
+export interface EvacuationAssessment {
+  /** Target nodes that host at least one movable service — pass these as the drain set. */
+  drainNodes: string[];
+  /**
+   * Per target node, the services auto-evacuate can NOT move: a service pinned to the node
+   * (config-locked) or any other project's service (`node destroy --evacuate` only moves the
+   * current project's cluster-placed services). If any remain, destroy still needs `--force`.
+   */
+  unmovable: OrphanRisk[];
+}
+
+/**
+ * Split a destroy target's hosted services into movable vs. unmovable for `--evacuate`.
+ * A service is movable iff it belongs to `ownerProject` AND is cluster-placed (its name is
+ * in `clusterPlacedNames` — it omits node/nodes). Pure so the evacuate-vs-refuse decision
+ * is unit-tested without S3/AWS.
+ */
+export function assessEvacuation(
+  targets: Array<{ name: string; services: ScheduledService[] }>,
+  ownerProject: string,
+  clusterPlacedNames: Set<string>,
+): EvacuationAssessment {
+  const drainNodes: string[] = [];
+  const unmovable: OrphanRisk[] = [];
+  for (const t of targets) {
+    const isMovable = (s: ScheduledService): boolean =>
+      s.project === ownerProject && clusterPlacedNames.has(s.service);
+    if (t.services.some(isMovable)) drainNodes.push(t.name);
+    const stuck = t.services.filter((s) => !isMovable(s));
+    if (stuck.length > 0) unmovable.push({ name: t.name, services: stuck });
+  }
+  return { drainNodes, unmovable };
 }
 
 /** Split node id arguments into unique, trimmed names (comma- or space-delimited). */
@@ -666,19 +713,30 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
     log.dim(`  skipping already-destroyed: ${alreadyGone.map((n) => color.cyan(n)).join(", ")}`);
   }
 
+  // --evacuate: before the orphan gate, auto-move the current project's cluster-placed
+  // services off the doomed node(s) and wait for them to come up elsewhere. After this the
+  // re-read services drive the gate below — so a node cleanly evacuated proceeds, while one
+  // still hosting pinned/other-project services is caught by the gate.
+  let orphaning = nodesThatWouldOrphan(active);
+  let evacuation: EvacuateRun | null = null;
+  if (orphaning.length > 0 && opts.evacuate === true) {
+    evacuation = await autoEvacuate(aws, active, opts);
+    orphaning = nodesThatWouldOrphan(active);
+  }
+
   // Safety gate: destroying a node still hosting services orphans them (their
   // containers keep running with no desired-state owner, and no node reconciles
   // them). Refuse unless --force explicitly acknowledges the orphaning.
-  const orphaning = nodesThatWouldOrphan(active);
   if (orphaning.length > 0 && opts.force !== true) {
     const lines = orphaning.map(
       (o) => `  ${color.cyan(o.name)}: ${o.services.map((s) => `${s.project}/${s.service}`).join(", ")}`,
     );
+    const hint = opts.evacuate === true
+      ? "auto-evacuate only moves THIS project's cluster-placed services — pinned or other-project services remain; evacuate those projects too, or pass --force to orphan them"
+      : "evacuate them first (`node evacuate` / `node destroy --evacuate`), or pass --force to destroy and orphan them anyway";
     throw new CliError(
       `refusing to destroy — ${orphaning.length} node(s) still host services that would be orphaned:\n${lines.join("\n")}`,
-      {
-        hint: "move these services to another node (re-deploy / scale) first, or pass --force to destroy and orphan them anyway",
-      },
+      { hint },
     );
   }
 
@@ -732,14 +790,117 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
   }
 
   if (isJsonMode()) {
-    const payload: { destroyed: string | string[]; alreadyDestroyed?: string | string[] } = {
+    const payload: {
+      destroyed: string | string[];
+      alreadyDestroyed?: string | string[];
+      evacuated?: { project: string; nodes: string[] };
+    } = {
       destroyed: destroyed.length === 1 ? destroyed[0]! : destroyed,
     };
     if (alreadyGone.length > 0) {
       payload.alreadyDestroyed = alreadyGone.length === 1 ? alreadyGone[0]! : alreadyGone;
     }
+    if (evacuation && evacuation.drainNodes.length > 0) {
+      payload.evacuated = { project: evacuation.project, nodes: evacuation.drainNodes };
+    }
     printJson(payload);
   }
+}
+
+interface EvacuateRun {
+  project: string;
+  /** Nodes drained (those that hosted the project's cluster-placed services). */
+  drainNodes: string[];
+  /** True if the evacuation couldn't move everything (pinned / last app node). */
+  blocked: boolean;
+}
+
+/**
+ * Move the current project's cluster-placed services off the doomed node(s) before the
+ * destroy tears them down. Reads launch-pad.toml from CWD, reuses `rebalance --drain` over the
+ * whole drain set at once (so a replica never lands on a sibling that's also going away), waits
+ * for the surviving pool to converge, then re-reads each target's scheduled services so the
+ * caller's orphan gate sees the post-evacuation state. Returns null when this project has
+ * nothing movable on any target (the gate then refuses with the unmovable services).
+ */
+async function autoEvacuate(
+  aws: AwsEnv,
+  active: Array<DestroyTarget & { node: NodeRegistryEntry }>,
+  opts: DestroyOptions,
+): Promise<EvacuateRun | null> {
+  if (!findConfigPath(process.cwd())) {
+    throw new CliError("--evacuate needs your project's launch-pad.toml to know what to move", {
+      hint: "run from your project directory, or omit --evacuate and pass --force to orphan the services",
+    });
+  }
+  if (opts.env !== undefined && !LABEL_REGEX.test(opts.env)) {
+    throw new CliError(`invalid --env "${opts.env}"`, {
+      hint: "use lowercase letters, numbers and hyphens (a valid DNS label)",
+    });
+  }
+  const { config } = loadConfig();
+  const ownerProject = envProject(config.project, opts.env);
+  const clusterPlacedNames = new Set(
+    config.service.filter((s) => usesClusterPlacement(s)).map((s) => s.name),
+  );
+
+  const assessment = assessEvacuation(active, ownerProject, clusterPlacedNames);
+  if (assessment.drainNodes.length === 0) return null; // nothing this project can move
+
+  if (!isJsonMode()) {
+    log.step(
+      `evacuating ${color.cyan(ownerProject)} off ${assessment.drainNodes
+        .map((n) => color.cyan(n))
+        .join(", ")} before destroy…`,
+    );
+  }
+
+  let blocked = false;
+  try {
+    await runRebalance({
+      ...pickGlobalOpts(opts),
+      env: opts.env,
+      drainNodes: assessment.drainNodes,
+      yes: true,
+      wait: true,
+      quiet: true,
+      timeout: parseEvacuateTimeout(opts.timeout),
+    });
+  } catch (error) {
+    if (error instanceof EvacuationBlockedError) {
+      // Pinned service on a target, or draining everything would leave no app nodes —
+      // nothing moved. Fall through to the orphan gate (which refuses unless --force).
+      blocked = true;
+      if (!isJsonMode()) log.dim(`  could not fully auto-evacuate: ${error.message}`);
+    } else {
+      throw error; // config-lock drift, convergence timeout, AWS error — abort before any teardown
+    }
+  }
+
+  // Re-read each target's scheduled services so the orphan gate sees the published result.
+  for (const t of active) t.services = await listScheduledServices(aws, t.name);
+  return { project: ownerProject, drainNodes: assessment.drainNodes, blocked };
+}
+
+/** The subset of options `runRebalance` reads to resolve its AWS target. */
+function pickGlobalOpts(opts: GlobalOpts): GlobalOpts {
+  return {
+    profile: opts.profile,
+    region: opts.region,
+    cluster: opts.cluster,
+    json: opts.json,
+    verbose: opts.verbose,
+  };
+}
+
+/** Parse `--timeout <seconds>` to a positive integer (seconds), or undefined for the default. */
+function parseEvacuateTimeout(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const seconds = Number.parseInt(raw, 10);
+  if (!Number.isInteger(seconds) || seconds < 1) {
+    throw new CliError(`invalid --timeout "${raw}"`, { hint: "pass whole seconds ≥ 1, e.g. --timeout 300" });
+  }
+  return seconds;
 }
 
 // ── pause / resume (save money) ──────────────────────────────────────────────────
@@ -1370,15 +1531,31 @@ export function registerNode(program: Command): void {
     )
     .option("--yes", "skip confirmation prompts")
     .option("--force", "destroy even if the node still hosts services (they will be orphaned)")
+    .option(
+      "--evacuate",
+      "first move the current project's cluster-placed services off the node(s), then destroy",
+    )
+    .option("--env <name>", "target a named environment footprint for --evacuate (same as deploy --env)")
+    .option("--timeout <seconds>", "how long --evacuate waits for the moved replicas to come up (default 300)")
     .addHelpText(
       "after",
       [
         "",
         "Refuses by default when a node still hosts scheduled services — destroying it would",
-        "orphan their containers (no node reconciles them anymore). Move the services first",
-        "(re-deploy / scale them onto another node), or pass --force to destroy anyway.",
+        "orphan their containers (no node reconciles them anymore). Three ways forward:",
+        "  --evacuate   move this project's cluster-placed services onto the rest of the pool",
+        "               (= `node evacuate`), wait for them to come up, THEN destroy. Run from",
+        "               your project directory. Pinned (node/nodes) services and OTHER projects'",
+        "               services can't be auto-moved — destroy still refuses unless --force.",
+        "  --force      destroy now and orphan whatever is still scheduled there.",
+        "  (manual)     `node evacuate <node>` first, then re-run destroy.",
+        "",
         "Fully tears the node down: instance + Elastic IP + security group + its per-node IAM",
         "role/profile + S3 state. Use `cluster destroy` to tear down a whole cluster at once.",
+        "",
+        "Examples:",
+        "  $ launch-pad node destroy app-2 --evacuate --yes",
+        "  $ launch-pad node destroy app-2 --force --yes",
       ].join("\n"),
     )
     .action(async (names: string[], _opts, command: Command) => {

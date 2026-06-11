@@ -612,11 +612,30 @@ and remove its S3 state. Deleting IAM is best-effort + idempotent and only ever 
 | ---- | ----------- |
 | `--yes` | Skip the confirmation prompt |
 | `--force` | Destroy even if the node still hosts services (they will be **orphaned**) |
+| `--evacuate` | First move the current project's cluster-placed services off the node(s), wait for them to come up elsewhere, **then** destroy |
+| `--env <name>` | Target a named environment footprint for `--evacuate` (same as `deploy --env`) |
+| `--timeout <seconds>` | How long `--evacuate` waits for the moved replicas to converge (default 300) |
 
 **Safety:** `node destroy` **refuses** by default when a node still hosts scheduled services —
 destroying it would orphan their containers (no node reconciles them anymore). The error lists
-which `project/service`s are at risk. **Evacuate them first** (`node evacuate <name>`, below),
-re-deploy/`scale` them onto another node, or pass `--force` to destroy and orphan them anyway.
+which `project/service`s are at risk. Three ways forward:
+
+- **`--evacuate`** (one-shot, recommended) — run it from your project directory and it auto-moves
+  this project's **cluster-placed** services onto the rest of the app pool (= `node evacuate`),
+  **waits** for them to be running there, then tears the node down. Pinned (`node`/`nodes`)
+  services and **other projects'** services can't be auto-moved; if any remain the destroy still
+  refuses (evacuate those projects too, or add `--force`). Draining every node — or a node whose
+  drain would leave the cluster with no app nodes — can't relocate the replicas, so it refuses.
+  It never terminates the node until the footprint is confirmed up elsewhere (a stuck convergence
+  aborts with nothing torn down).
+- **manual** — `node evacuate <name>` first, watch `launch-pad status`, then re-run destroy.
+- **`--force`** — destroy now and orphan whatever is still scheduled there.
+
+```bash
+launch-pad node destroy app-2 --evacuate --yes   # evacuate this project's services, then destroy
+launch-pad node destroy app-2 --force --yes       # destroy now, orphan its services
+```
+
 To tear down a whole cluster at once, use [`cluster destroy`](#cluster-destroy-name).
 
 ### `node evacuate <name>`
@@ -635,7 +654,8 @@ Pinned (`node`/`nodes`) services **can't** be evacuated — their placement is c
 evacuate refuses if the project pins a service to the node (undeploy it or recreate the
 footprint to move it). A node hosting **other projects** needs each of them evacuated too (run
 it from each project dir). Once `launch-pad status` shows the node drained, `node destroy`/`pause`
-will accept it.
+will accept it. To evacuate **and** destroy in one step (with the drain wait built in), use
+[`node destroy --evacuate`](#node-destroy-names).
 
 ### `node pause <name>` / `node resume <name>`
 

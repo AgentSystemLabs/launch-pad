@@ -88,9 +88,14 @@ What the user runs. Commands: `init` · `doctor` · `setup` · `deploy` · `unde
 republishes (reusing published images, no rebuild; gainers before reducers; vacated nodes
 cleaned) — config-lock-safe (only placement changes), eventually-consistent (agents reconcile on
 poll, no cross-node health-gate). `node evacuate <node>` = `rebalance --drain <node>` (refuses to
-move a pinned service or drain the last app node). Pure diff in `deploy/rebalance-plan.ts`
-(`diffPlacement`); deploy's candidate-node + capacity-snapshot construction is the shared
-`deploy/candidate-nodes.ts` (`buildCandidateNodes`/`demandsOf`). `setup iam-policy` /
+move a pinned service or drain the last app node). `node destroy --evacuate` chains the two:
+`assessEvacuation` (pure, in `commands/node/index.ts`) splits each doomed node's hosted services
+into movable (this-project + cluster-placed) vs. unmovable (pinned / other-project), then
+`runRebalance` drains the whole target set at once (`drainNodes`) and `wait`s for convergence
+(`waitForConvergence`) before teardown — a typed `EvacuationBlockedError` (pinned-on-drain /
+last-app-node) is caught so the orphan gate decides rather than crashing. Pure diff in
+`deploy/rebalance-plan.ts` (`diffPlacement`); deploy's candidate-node + capacity-snapshot
+construction is the shared `deploy/candidate-nodes.ts` (`buildCandidateNodes`/`demandsOf`). `setup iam-policy` /
 `setup github-oidc` are pure generators (`src/setup/*`) — a least-privilege operator IAM policy
 and a GitHub-OIDC trust policy + deploy workflow — for AWS/CI onboarding without
 `AdministratorAccess`. `history` reads a footprint's append-only

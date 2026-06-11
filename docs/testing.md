@@ -62,6 +62,7 @@ LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:history       # deploy history
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:node-iam      # node destroy deletes the per-node IAM role/profile (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:operator-iam  # the generated operator IAM policy is sufficient (and scoped)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rebalance     # rebalance + node evacuate move cluster-placed replicas
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:destroy-evacuate # node destroy --evacuate auto-drains then tears down
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:volumes       # persistent volume data survives a container replace
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:idle          # cost flags an idle (paused) node (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:alerts        # alerts check fires on a dead node (heartbeat-stale) + webhook
@@ -83,6 +84,14 @@ the config lock refuses a post-deploy volume-path change.
 spread again), proves a second rebalance is a no-op, then evacuates + `node destroy`s a node
 (which succeeds because nothing is scheduled there) and checks a **pinned** service can't be
 evacuated.
+
+`e2e:destroy-evacuate` provisions the same two-`both`-node / 3-replica-worker layout, then proves
+the one-shot `node destroy --evacuate`: it first asserts a plain `node destroy` **refuses** to
+orphan the replica, then `node destroy <b> --evacuate` moves that replica onto the surviving node,
+**waits** for it to be running there (so the node already shows all 3 when the command returns),
+and tears `<b>` down — confirming its registry entry is gone. Finally it asserts `node destroy <a>
+--evacuate` **refuses** when `<a>` is the last app node (nowhere to move the replicas), leaving it
+intact.
 
 `e2e:undeploy` deploys two workers, removes one with `undeploy --service`, proves a redeploy of
 the trimmed `launch-pad.toml` passes the config lock, then removes the whole footprint and

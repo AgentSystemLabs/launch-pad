@@ -31,6 +31,7 @@
     "e2e:node-iam": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:node-iam",
     "e2e:operator-iam": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:operator-iam",
     "e2e:rebalance": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:rebalance",
+    "e2e:destroy-evacuate": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:destroy-evacuate",
     "clean": "pnpm -r exec rm -rf dist .turbo *.tsbuildinfo"
   },
   "devDependencies": {

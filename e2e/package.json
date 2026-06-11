@@ -23,6 +23,7 @@
     "e2e:node-iam": "tsx src/node-iam.ts",
     "e2e:operator-iam": "tsx src/operator-iam.ts",
     "e2e:rebalance": "tsx src/rebalance.ts",
+    "e2e:destroy-evacuate": "tsx src/destroy-evacuate.ts",
     "typecheck": "tsc --noEmit",
     "test": "echo \"e2e is a live AWS harness — run \\`pnpm e2e\\` (see README)\" && exit 0"
   },

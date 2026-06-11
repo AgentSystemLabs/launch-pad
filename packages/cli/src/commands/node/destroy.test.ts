@@ -2,7 +2,7 @@ import { DEFAULT_CLUSTER, type NodeRegistryEntry } from "@agentsystemlabs/launch
 import { describe, expect, it } from "vitest";
 import type { AwsEnv } from "../../aws/context";
 import { nodeProfileName, nodeRoleName } from "../../aws/iam";
-import { nodesThatWouldOrphan, parseNodeNames, teardownNode } from "./index";
+import { assessEvacuation, nodesThatWouldOrphan, parseNodeNames, teardownNode } from "./index";
 
 describe("parseNodeNames", () => {
   it("parses a single name", () => {
@@ -57,6 +57,82 @@ describe("nodesThatWouldOrphan", () => {
       { name: "b", services: [{ project: "p", service: "worker" }] },
     ]);
     expect(result.map((r) => r.name)).toEqual(["a", "b"]);
+  });
+});
+
+describe("assessEvacuation", () => {
+  // A service is "movable" by auto-evacuate iff it belongs to the current project AND
+  // is cluster-placed (omits node/nodes). Everything else — a pinned service, or any
+  // other project's service — can't be moved by `node destroy --evacuate`.
+  const owner = "shop";
+  const clusterPlaced = new Set(["web", "worker"]);
+
+  it("drains a node hosting the current project's cluster-placed service", () => {
+    const a = assessEvacuation(
+      [{ name: "a", services: [{ project: owner, service: "web" }] }],
+      owner,
+      clusterPlaced,
+    );
+    expect(a.drainNodes).toEqual(["a"]);
+    expect(a.unmovable).toEqual([]);
+  });
+
+  it("flags a pinned service of the current project as unmovable (not drainable)", () => {
+    const a = assessEvacuation(
+      [{ name: "a", services: [{ project: owner, service: "db" }] }],
+      owner,
+      clusterPlaced,
+    );
+    expect(a.drainNodes).toEqual([]);
+    expect(a.unmovable).toEqual([{ name: "a", services: [{ project: owner, service: "db" }] }]);
+  });
+
+  it("flags another project's service as unmovable", () => {
+    const a = assessEvacuation(
+      [{ name: "a", services: [{ project: "blog", service: "web" }] }],
+      owner,
+      clusterPlaced,
+    );
+    expect(a.drainNodes).toEqual([]);
+    expect(a.unmovable).toEqual([{ name: "a", services: [{ project: "blog", service: "web" }] }]);
+  });
+
+  it("drains a mixed node but still reports the unmovable leftovers", () => {
+    const a = assessEvacuation(
+      [
+        {
+          name: "a",
+          services: [
+            { project: owner, service: "web" }, // movable
+            { project: "blog", service: "api" }, // unmovable (other project)
+          ],
+        },
+      ],
+      owner,
+      clusterPlaced,
+    );
+    expect(a.drainNodes).toEqual(["a"]);
+    expect(a.unmovable).toEqual([{ name: "a", services: [{ project: "blog", service: "api" }] }]);
+  });
+
+  it("drains every target node that hosts a movable service", () => {
+    const a = assessEvacuation(
+      [
+        { name: "a", services: [{ project: owner, service: "web" }] },
+        { name: "b", services: [{ project: owner, service: "worker" }, { project: "blog", service: "x" }] },
+        { name: "c", services: [] },
+      ],
+      owner,
+      clusterPlaced,
+    );
+    expect(a.drainNodes).toEqual(["a", "b"]);
+    expect(a.unmovable).toEqual([{ name: "b", services: [{ project: "blog", service: "x" }] }]);
+  });
+
+  it("returns nothing for an empty node (already safe to destroy)", () => {
+    const a = assessEvacuation([{ name: "a", services: [] }], owner, clusterPlaced);
+    expect(a.drainNodes).toEqual([]);
+    expect(a.unmovable).toEqual([]);
   });
 });
 

@@ -32,8 +32,9 @@ import {
   planClusterPlacement,
 } from "../deploy/placement";
 import { type RebalanceDiff, type ServicePlacement, diffPlacement } from "../deploy/rebalance-plan";
+import { type WatchTarget, waitForConvergence } from "../deploy/watch";
 import { enforceConfigLock, publishDesired, publishEdgeConfig, toServiceConfig } from "./deploy";
-import { CliError } from "../errors";
+import { CliError, EvacuationBlockedError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
 import { panel } from "../ui/box";
 import { isJsonMode, log, printJson, spinner } from "../ui/log";
@@ -46,6 +47,36 @@ export interface RebalanceOptions extends GlobalOpts {
   dryRun?: boolean;
   /** Exclude this node from the schedulable pool — evacuate the footprint off it. */
   drain?: string;
+  /**
+   * Exclude several nodes at once (used by `node destroy --evacuate` when tearing down
+   * more than one node so a replica never migrates onto a sibling that's also going away).
+   * Unioned with `drain`.
+   */
+  drainNodes?: string[];
+  /**
+   * Block until the republished placement converges (every gainer/stayer reports its new
+   * running replica count). Used by `node destroy --evacuate` so we never terminate the
+   * drained node before its replicas are confirmed up elsewhere.
+   */
+  wait?: boolean;
+  /** Seconds to wait for convergence when `wait` is set (default 300). */
+  timeout?: number;
+  /** Suppress the terminal success/JSON output so a calling command owns the conclusion. */
+  quiet?: boolean;
+}
+
+/** Default seconds `rebalance --wait` (and `node destroy --evacuate`) waits for convergence. */
+const DEFAULT_REBALANCE_TIMEOUT_SECONDS = 300;
+
+/** The set of nodes to exclude from the schedulable pool — union of `drain` + `drainNodes`. */
+export function resolveDrainSet(
+  drain: string | undefined,
+  drainNodes: string[] | undefined,
+): Set<string> {
+  const set = new Set<string>();
+  if (drain !== undefined) set.add(drain);
+  for (const id of drainNodes ?? []) set.add(id);
+  return set;
 }
 
 /** A service's resolved placement after re-planning (reusing its published image). */
@@ -121,34 +152,43 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
   let candidateNodes = pool.candidateNodes;
   let clusterAppNodeIds = pool.clusterAppNodeIds;
 
-  // `--drain`: evacuate the footprint off a node by removing it from the schedulable pool.
-  // Pinned (node/nodes) services on it can't move — their placement is config-locked.
-  if (opts.drain !== undefined) {
-    if (!nodes.has(opts.drain)) {
-      throw new CliError(`node "${opts.drain}" is not in cluster "${aws.clusterId}"`, {
-        hint: "pass an app/both node id from `launch-pad node list`",
-      });
+  // `--drain` / `drainNodes`: evacuate the footprint off node(s) by removing them from the
+  // schedulable pool. Pinned (node/nodes) services on them can't move (config-locked), so a
+  // pinned service on a drained node is a hard block — `EvacuationBlockedError` so a calling
+  // command (`node destroy --evacuate`) can tell it apart from a real failure.
+  const drainSet = resolveDrainSet(opts.drain, opts.drainNodes);
+  if (drainSet.size > 0) {
+    const drainList = [...drainSet].sort();
+    for (const id of drainList) {
+      if (!nodes.has(id)) {
+        throw new CliError(`node "${id}" is not in cluster "${aws.clusterId}"`, {
+          hint: "pass an app/both node id from `launch-pad node list`",
+        });
+      }
     }
     const pinnedOnNode = config.service.filter(
-      (s) => !usesClusterPlacement(s) && targetNodes(s).includes(opts.drain as string),
+      (s) => !usesClusterPlacement(s) && targetNodes(s).some((n) => drainSet.has(n)),
     );
     if (pinnedOnNode.length > 0) {
-      throw new CliError(
-        `can't evacuate "${opts.drain}": ${pinnedOnNode.map((s) => s.name).join(", ")} pinned to it`,
+      throw new EvacuationBlockedError(
+        `can't evacuate ${quoteList(drainList)}: ${pinnedOnNode.map((s) => s.name).join(", ")} pinned to it`,
         { hint: "pinned placement is config-locked — undeploy those services or recreate the footprint to move them" },
       );
     }
-    candidateNodes = candidateNodes.filter((c) => c.nodeId !== opts.drain);
-    clusterAppNodeIds = clusterAppNodeIds.filter((id) => id !== opts.drain);
+    candidateNodes = candidateNodes.filter((c) => !drainSet.has(c.nodeId));
+    clusterAppNodeIds = clusterAppNodeIds.filter((id) => !drainSet.has(id));
   }
 
   if (clusterAppNodeIds.length === 0) {
-    throw new CliError(
-      opts.drain !== undefined
-        ? `draining "${opts.drain}" would leave cluster "${aws.clusterId}" with no app nodes`
-        : `cluster "${aws.clusterId}" has no app nodes to place services on`,
-      { hint: `create one: launch-pad node create <name> --cluster ${aws.clusterId} --role app` },
-    );
+    if (drainSet.size > 0) {
+      throw new EvacuationBlockedError(
+        `draining ${quoteList([...drainSet].sort())} would leave cluster "${aws.clusterId}" with no app nodes`,
+        { hint: `add capacity first: launch-pad node create <name> --cluster ${aws.clusterId} --role app` },
+      );
+    }
+    throw new CliError(`cluster "${aws.clusterId}" has no app nodes to place services on`, {
+      hint: `create one: launch-pad node create <name> --cluster ${aws.clusterId} --role app`,
+    });
   }
 
   // Current placement + each service's published image (rebalance reuses, never rebuilds).
@@ -227,18 +267,22 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
     });
   }
 
+  const draining = drainSet.size > 0;
+  const drainLabel = [...drainSet].sort().join(", ");
   const diff = diffPlacement(currentPlacement(priorPlacement), plannedPlacement(resolved));
 
   if (!diff.changed) {
     if (isJsonMode()) {
-      printJson({ rebalanced: false, reason: "already-balanced", project: ownerProject });
+      if (!opts.quiet) printJson({ rebalanced: false, reason: "already-balanced", project: ownerProject });
       return;
     }
-    log.success(
-      opts.drain !== undefined
-        ? `${color.cyan(ownerProject)} has nothing on ${color.cyan(opts.drain)} — nothing to evacuate`
-        : `${color.cyan(ownerProject)} is already balanced across ${clusterAppNodeIds.length} node(s) — nothing to move`,
-    );
+    if (!opts.quiet) {
+      log.success(
+        draining
+          ? `${color.cyan(ownerProject)} has nothing on ${color.cyan(drainLabel)} — nothing to evacuate`
+          : `${color.cyan(ownerProject)} is already balanced across ${clusterAppNodeIds.length} node(s) — nothing to move`,
+      );
+    }
     return;
   }
 
@@ -264,17 +308,73 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
 
   await applyRebalance(aws, ownerProject, env, resolved, diff, nodes, imageByService);
 
+  // `wait`: block until the surviving pool reports its new running replica counts — so a
+  // caller (`node destroy --evacuate`) never tears down the drained node before its replicas
+  // are confirmed up elsewhere. Throws on non-convergence so the destroy aborts (fail-safe).
+  if (opts.wait === true) await waitForRebalanceConvergence(aws, ownerProject, resolved, imageByService, opts);
+
   if (isJsonMode()) {
-    printJson({ rebalanced: true, project: ownerProject, drained: opts.drain ?? null, ...diffJson(diff) });
+    if (!opts.quiet) {
+      printJson({ rebalanced: true, project: ownerProject, drained: draining ? [...drainSet].sort() : null, ...diffJson(diff) });
+    }
     return;
   }
-  if (opts.drain !== undefined) {
-    log.success(`evacuated ${color.cyan(ownerProject)} off ${color.cyan(opts.drain)} — the agents converge on their next poll`);
-    log.dim(`  once \`launch-pad status\` shows it drained, you can pause/destroy ${opts.drain}`);
+  if (opts.quiet) return;
+  if (draining) {
+    log.success(`evacuated ${color.cyan(ownerProject)} off ${color.cyan(drainLabel)} — the agents converge on their next poll`);
+    log.dim(`  once \`launch-pad status\` shows it drained, you can pause/destroy ${drainLabel}`);
   } else {
     log.success(`rebalanced ${color.cyan(ownerProject)} — the agents converge on their next poll`);
     log.dim("  run `launch-pad status` to watch the replicas move");
   }
+}
+
+/** Quote + comma-join a list of ids for an error message: `"a", "b"`. */
+function quoteList(ids: string[]): string {
+  return ids.map((id) => `"${id}"`).join(", ");
+}
+
+/**
+ * Wait for a republished placement to converge: every (node, service) in `resolved`
+ * reports its target running replica count on the reused image. Drained nodes aren't in
+ * `resolved`, so we don't wait on them (the caller is about to terminate them anyway).
+ */
+async function waitForRebalanceConvergence(
+  aws: AwsEnv,
+  ownerProject: string,
+  resolved: Map<string, Resolved>,
+  imageByService: Map<string, string>,
+  opts: RebalanceOptions,
+): Promise<void> {
+  const targets: WatchTarget[] = [];
+  for (const [service, r] of resolved) {
+    const image = imageByService.get(service);
+    if (image === undefined) continue;
+    for (const p of r.placements) {
+      if (p.replicas <= 0) continue;
+      targets.push({ nodeId: p.nodeId, project: ownerProject, service, image, expectedReplicas: p.replicas });
+    }
+  }
+  if (targets.length === 0) return;
+
+  const timeoutMs = (opts.timeout ?? DEFAULT_REBALANCE_TIMEOUT_SECONDS) * 1000;
+  const spin = isJsonMode() ? null : spinner("waiting for the footprint to converge elsewhere…").start();
+  const results = await waitForConvergence(aws.s3, aws.bucket, aws.clusterId, targets, timeoutMs, (rs) => {
+    if (!spin) return;
+    const ready = rs.filter((r) => r.ok).length;
+    spin.text = `converging: ${ready}/${rs.length} placements ready`;
+  });
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length > 0) {
+    spin?.fail("the footprint did not converge in time");
+    throw new CliError(
+      `evacuation published but ${failed.length} placement(s) haven't converged yet`,
+      {
+        hint: "the desired state is written; watch `launch-pad status` and re-run the destroy once it's running — nothing was torn down",
+      },
+    );
+  }
+  spin?.succeed("the footprint is running on the surviving nodes");
 }
 
 /** Publish the new placement (additions first), then clean nodes the footprint fully left. */

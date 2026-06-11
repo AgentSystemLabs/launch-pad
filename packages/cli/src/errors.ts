@@ -14,3 +14,17 @@ export class CliError extends Error {
     this.exitCode = opts?.exitCode ?? 1;
   }
 }
+
+/**
+ * A rebalance/evacuation can't move a footprint off the drained node(s): a service
+ * pinned to one of them is config-locked, or draining would leave the cluster with no
+ * app nodes to place onto. A typed subclass so `node destroy --evacuate` can tell this
+ * "nothing-could-be-moved" case apart from a real failure (config-lock drift, AWS error)
+ * and fall through to its own orphan/`--force` decision instead of aborting.
+ */
+export class EvacuationBlockedError extends CliError {
+  constructor(message: string, opts?: { hint?: string }) {
+    super(message, opts);
+    this.name = "EvacuationBlockedError";
+  }
+}
