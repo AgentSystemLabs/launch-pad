@@ -73,7 +73,9 @@ not a silent hung deploy. Key modules: `config.ts` (the `launch-pad.toml` schema
 `ServiceDecl`/`LaunchPadConfig`), `desired.ts` (`desired.json`), `status.ts` (`status.json`),
 `registry.ts` (`node.json`), `cluster.ts`, `s3-keys.ts` (all S3 key derivation), `edge.ts`
 (upstream-shard routing types), `capacity.ts` (admission check + instance sizing),
-`merge.ts` (ownership-aware desired-state merge), `health.ts`, `constants.ts`.
+`merge.ts` (ownership-aware desired-state merge: `mergeProjectServices` REPLACES a project's
+whole footprint on a node for a full deploy; `mergeProjectServicesPartial` UPSERTS for a subset
+deploy), `health.ts`, `constants.ts`.
 
 - `PROTOCOL_VERSION` (constants.ts) must be bumped whenever the wire shape of
   `desired.json`/`status.json` changes.
@@ -120,7 +122,11 @@ redeploy paths skip buildx and reuse an existing image, pinned to the published 
 env/secret change) and `--image <uri>` (redeploy a specific existing immutable ECR tag of one
 `--service` — rollback / promote; validated to that service's own repo via
 `shared/src/ecr.ts` `parseEcrImageUri`). The shared `reuseExistingImages` flag gates the
-skip-build + pin-to-published-placement behavior for both.
+skip-build + pin-to-published-placement behavior for both. `--changed <ref>` (monorepo
+"deploy only what changed") narrows the deploy to services whose docker **build inputs**
+differ from a git ref — pure mapping in `deploy/changed-services.ts` (`selectChangedServices`
+over each service's repo-relative `context`/`dockerfile`, with `collectChangedPaths` unioning
+`git diff <ref>` + untracked files); zero changed services is a clean exit-0 no-op.
 
 - `src/aws/*` — thin AWS SDK clients (ec2, ecr, iam, ssm, s3-state, sts via `context.ts`).
 - `src/provision/*` — node bootstrap generation: `user-data.ts` (cloud-init), `systemd-unit.ts`,
@@ -208,9 +214,20 @@ migration. State lives under `nodes/` (the machine is the durable identity), not
   protocol change): `"co-located"` = one both-role node, `edge: null` (cluster default
   edge deliberately ignored); `"split"` = app+both nodes behind a required edge. Deploy
   must clean a vacated node's desired.json when placement moves (skipped for
-  `--service` partials), and `deploy --restart` pins to the published footprint so a
+  `--service`/`--changed` partials), and `deploy --restart` pins to the published footprint so a
   re-plan can't move services. `schedule`/`topology` are config-locked like
   `node`/`nodes`/`edge`.
+- **Partial (subset) deploys** (`deploy --service` / `deploy --changed`, and the `scale`/`config
+  set` edits that wrap a single-service deploy): the per-node publish must **upsert** the
+  project's services (`mergeProjectServicesPartial`), never replace its whole footprint. A subset
+  deploy only knows the service(s) it republishes; full-replacing would silently drop the
+  project's *other* services co-located on that node and the agent would tear down their
+  containers next poll. `publishDesired(..., partial=true)` selects the upsert; `capacityDemands`
+  takes the same `partial` flag so the pre-flight still counts the preserved siblings. A FULL
+  deploy keeps replace semantics (a service dropped from the config is removed). `deploy
+  --changed <ref>` derives its subset from a git diff; with zero changed services it's a no-op
+  that exits 0 (CI-safe) — see `deploy/changed-services.ts` (pure mapping by build context /
+  dockerfile).
 - **Config lock** (`shared/src/config-lock.ts`): after a footprint's first deploy, only the
   **operational** fields may change — `cpu`, `memory`, `replicas`, `env`, and `secrets` (key
   names). Everything else is identity/shape and is frozen (placement, `domain`/`port`,

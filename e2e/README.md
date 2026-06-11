@@ -10,6 +10,7 @@ cents) and take minutes — so they only run when you explicitly ask for them. B
 | Full lifecycle (`src/run.ts`) | `pnpm e2e` | provision → HTTPS → secrets → logs → zero-downtime rollout → scale → pause/resume → destroy | 10–20 min |
 | Scaling (`src/scale.ts`) | `pnpm e2e:scale` | provision a `both` node → deploy a worker → `scale` replicas 1→3 → `config set` env → scale 3→1 → destroy | ~8–12 min |
 | Undeploy (`src/undeploy.ts`) | `pnpm e2e:undeploy` | provision a `both` node → deploy 2 workers → `undeploy --service` one → redeploy the trimmed TOML (lock must permit) → undeploy the whole footprint → fresh redeploy | ~8–12 min |
+| Deploy changed (`src/deploy-changed.ts`) | `pnpm e2e:deploy-changed` | provision a `both` node → deploy a 2-service monorepo (api + worker, co-located) → a partial `scale worker` deploy PRESERVES the co-located `api` (sibling-drop regression) → edit only apps/worker → `deploy --changed <v1>` rolls just `worker`, leaves `api` untouched → `deploy --changed HEAD` is a clean no-op → destroy | ~10–14 min |
 | Image redeploy (`src/deploy-image.ts`) | `pnpm e2e:deploy-image` | deploy worker (v1) → change content + deploy (v2) → `deploy --image <v1>` rolls back without building → repeat is an idempotent no-op | ~10–14 min |
 | Rollback (`src/rollback.ts`) | `pnpm e2e:rollback` | deploy worker (v1) → change content + deploy (v2) → `rollback` auto-picks the previous build (v1) → `rollback --to <v2-tag>` rolls forward | ~10–14 min |
 | DNS setup (`src/dns-setup.ts`) | `pnpm e2e:dns` | provision a `both` node → `dns setup` writes a DNS-only Route53 A record at its Elastic IP → `dns verify` resolves to it → re-run is a no-op → record removed on teardown (no deploy) | ~3–5 min |
@@ -21,12 +22,14 @@ cents) and take minutes — so they only run when you explicitly ask for them. B
 | Deploy history (`src/history.ts`) | `pnpm e2e:history` | deploy worker (v1) → deploy (v2) → `history --json` shows 2 events, newest-first, each with image + converged + caller ARN | ~8–12 min |
 | Node IAM cleanup (`src/node-iam.ts`) | `pnpm e2e:node-iam` | create a node → assert its IAM role + instance profile exist → `node destroy` → assert they're gone (no deploy) | ~3–5 min |
 
-The scaling, undeploy, image-redeploy, and rollback harnesses are deliberately worker-only (no
-domain/cert/DNS/secrets) so they're fast and agent-agnostic. Scaling guards `scale`/`config`
-and the config-lock relief that lets `replicas`/`env` change after the first deploy; undeploy
-guards `launch-pad undeploy` and the baseline-trim relief that lets a service be removed;
-image-redeploy guards `deploy --image`, and rollback guards `launch-pad rollback`'s auto-pick of
-the previous immutable ECR tag (and `--to`).
+The scaling, undeploy, deploy-changed, image-redeploy, and rollback harnesses are deliberately
+worker-only (no domain/cert/DNS/secrets) so they're fast and agent-agnostic. Scaling guards
+`scale`/`config` and the config-lock relief that lets `replicas`/`env` change after the first
+deploy; undeploy guards `launch-pad undeploy` and the baseline-trim relief that lets a service
+be removed; deploy-changed guards `deploy --changed` (monorepo "deploy only what changed") **and
+the partial-deploy upsert** that keeps a co-located sibling alive when one service is
+(re)deployed; image-redeploy guards `deploy --image`, and rollback guards `launch-pad rollback`'s
+auto-pick of the previous immutable ECR tag (and `--to`).
 
 ## What `pnpm e2e` (full lifecycle) verifies
 
@@ -70,6 +73,7 @@ From the repo root:
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e          # full lifecycle (needs a Route53 zone)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:scale        # scaling only (no domain/DNS needed)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:undeploy     # undeploy / service removal (no domain/DNS needed)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-changed # monorepo deploy --changed + sibling preservation (no domain/DNS needed)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-image # deploy --image rollback (no domain/DNS needed)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rollback     # rollback auto-pick + --to (no domain/DNS needed)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:history      # deploy history events (no domain/DNS needed)

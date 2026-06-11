@@ -1,7 +1,10 @@
 import {
   PROTOCOL_VERSION,
   configBaselineKey,
+  desiredKey,
+  parseDesiredState,
   parseLaunchPadConfig,
+  type ServiceConfig,
   snapshotConfigBaseline,
   type LaunchPadConfig,
 } from "@agentsystemlabs/launch-pad-shared";
@@ -15,6 +18,7 @@ import {
   assertVolumesSupported,
   enforceConfigLock,
   loadOverrideImage,
+  publishDesired,
   toServiceConfig,
 } from "./deploy";
 
@@ -381,5 +385,75 @@ describe("assertVolumesSupported — rust-agent gate", () => {
 
   it("allows a volume-less service on any agent (including rust)", () => {
     expect(() => assertVolumesSupported("n1", node("rust"), placed([]))).not.toThrow();
+  });
+});
+
+describe("publishDesired — partial deploy preserves co-located siblings", () => {
+  const NODE = "node-app";
+  const cfgSvc = (service: string, image: string): ServiceConfig => ({
+    project: OWNER,
+    service,
+    image,
+    cpu: 256,
+    memory: 256,
+    replicas: 1,
+    env: {},
+    secretRefs: [],
+    ingress: null,
+    healthCheck: null,
+    rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
+    volumes: [],
+  });
+
+  /** Mock S3 that serves a desired.json with web+worker and captures the next write. */
+  function makePublishAws(existingServices: ServiceConfig[]): { aws: AwsEnv; written: () => ServiceConfig[] | null } {
+    let writtenBody: string | null = null;
+    const send = async (command: { constructor: { name: string }; input?: Record<string, unknown> }): Promise<unknown> => {
+      const kind = command.constructor.name;
+      if (kind === "GetObjectCommand") {
+        const key = command.input?.Key as string;
+        if (key === desiredKey("default", NODE)) {
+          const body = JSON.stringify({
+            version: PROTOCOL_VERSION,
+            nodeId: NODE,
+            updatedAt: "now",
+            services: existingServices,
+          });
+          return { Body: { transformToString: async () => body }, ETag: '"d"' };
+        }
+        const err = new Error("missing") as Error & { name: string };
+        err.name = "NoSuchKey";
+        throw err;
+      }
+      if (kind === "PutObjectCommand") {
+        writtenBody = command.input?.Body as string;
+        return { ETag: '"d2"' };
+      }
+      throw new Error(`unexpected S3 command ${kind}`);
+    };
+    const aws = { clusterId: "default", bucket: "bucket", s3: { send } } as unknown as AwsEnv;
+    return {
+      aws,
+      written: () => (writtenBody ? parseDesiredState(JSON.parse(writtenBody)).services : null),
+    };
+  }
+
+  // Generous capacity so the merge — not an admission failure — is what's under test.
+  const node = { totalCpu: 4096, totalMemory: 8192, reservedCpu: 0, reservedMemory: 0 } as NodeRegistryEntry;
+
+  it("partial=true UPSERTS web and KEEPS the co-located worker (the bug fix)", async () => {
+    const { aws, written } = makePublishAws([cfgSvc("web", "img:web-old"), cfgSvc("worker", "img:worker")]);
+    await publishDesired(aws, NODE, node, OWNER, [cfgSvc("web", "img:web-new")], true);
+    const services = written();
+    expect(services?.map((s) => `${s.service}@${s.image}`).sort()).toEqual([
+      "web@img:web-new",
+      "worker@img:worker",
+    ]);
+  });
+
+  it("partial=false (full deploy) REPLACES the footprint, dropping the unlisted worker", async () => {
+    const { aws, written } = makePublishAws([cfgSvc("web", "img:web-old"), cfgSvc("worker", "img:worker")]);
+    await publishDesired(aws, NODE, node, OWNER, [cfgSvc("web", "img:web-new")], false);
+    expect(written()?.map((s) => s.service)).toEqual(["web"]);
   });
 });

@@ -16,6 +16,7 @@
     "e2e": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e",
     "e2e:scale": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:scale",
     "e2e:undeploy": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:undeploy",
+    "e2e:deploy-changed": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:deploy-changed",
     "e2e:deploy-image": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:deploy-image",
     "e2e:rollback": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:rollback",
     "e2e:dns": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:dns",

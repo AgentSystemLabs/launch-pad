@@ -56,6 +56,7 @@ agent-agnostic, and need no Route53 zone) guard the post-deploy mutation paths:
 ```bash
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:scale         # scale replicas/cpu/memory + config set
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:undeploy      # undeploy a service / footprint + config-lock relief
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-changed # monorepo deploy --changed + co-located sibling preservation
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-image  # deploy --image rollback to an existing tag
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rollback      # rollback auto-picks the previous build (+ --to)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:history       # deploy history events (who/when/image/converged)
@@ -92,6 +93,13 @@ orphan the replica, then `node destroy <b> --evacuate` moves that replica onto t
 and tears `<b>` down — confirming its registry entry is gone. Finally it asserts `node destroy <a>
 --evacuate` **refuses** when `<a>` is the last app node (nowhere to move the replicas), leaving it
 intact.
+
+`e2e:deploy-changed` deploys a 2-service monorepo (api + worker co-located on one `both` node),
+then (1) runs a partial `scale worker` deploy and asserts the co-located `api` container is
+**preserved byte-for-byte** — the regression guard for the subset-merge that used to drop a
+sibling — then (2) edits only `apps/worker`, runs `deploy --changed <v1>`, and asserts only
+`worker` rebuilds/rolls while `api`'s container and published image are untouched, and finally
+(3) asserts `deploy --changed HEAD` with nothing changed is a clean no-op that rolls nothing.
 
 `e2e:undeploy` deploys two workers, removes one with `undeploy --service`, proves a redeploy of
 the trimmed `launch-pad.toml` passes the config lock, then removes the whole footprint and

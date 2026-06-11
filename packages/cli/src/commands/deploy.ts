@@ -35,6 +35,7 @@ import {
   envProject,
   LABEL_REGEX,
   mergeProjectServices,
+  mergeProjectServicesPartial,
   nodeRegistryKey,
   parseDesiredState,
   parseNodeRegistryEntry,
@@ -72,6 +73,12 @@ import {
   planClusterPlacementAutoAdd,
 } from "../deploy/placement";
 import { buildCandidateNodes, demandsOf } from "../deploy/candidate-nodes";
+import {
+  buildServiceBuildPaths,
+  collectChangedPaths,
+  resolveRepoRoot,
+  selectChangedServices,
+} from "../deploy/changed-services";
 import {
   estimateProvisionCost,
   formatProvisionCostLines,
@@ -113,6 +120,8 @@ const BOOTSTRAP_NODE_ID = "app-1";
 
 export interface DeployOptions extends GlobalOpts {
   service?: string;
+  /** Deploy only services whose build inputs changed since this git ref (monorepo). */
+  changed?: string;
   node?: string;
   env?: string;
   wait?: boolean;
@@ -397,13 +406,24 @@ async function loadRunningContainerIds(
  * extra replicas run simultaneously during the roll (the agent caps total at
  * `replicas + maxSurge` but never exceeds `replicas` *new* ones at once).
  */
-/** Full demands a node carries after this deploy (other projects + this project's placements). */
+/**
+ * Full demands a node carries after this deploy. Always counts other projects'
+ * services plus this deploy's placements. For a PARTIAL deploy it ALSO counts the
+ * project's own services already on the node that this run isn't republishing — a
+ * partial deploy upserts (preserves) them, so they keep consuming capacity and the
+ * pre-flight must see them (a full deploy replaces the footprint, so they're absent).
+ */
 function capacityDemands(
   project: string,
   state: DesiredState,
   placed: NodeService[],
+  partial: boolean,
 ): CapacityServiceDemand[] {
   const others = demandsOf(state.services.filter((s) => s.project !== project));
+  const placedNames = new Set(placed.map((p) => p.built.decl.name));
+  const keptSiblings = partial
+    ? demandsOf(state.services.filter((s) => s.project === project && !placedNames.has(s.service)))
+    : [];
   const incoming = placed.map((p) => {
     const surge = Math.min(p.built.decl.rollout.maxSurge, p.replicas);
     return {
@@ -415,7 +435,7 @@ function capacityDemands(
       surgeMemory: p.built.decl.memory * surge,
     };
   });
-  return [...others, ...incoming];
+  return [...others, ...keptSiblings, ...incoming];
 }
 
 function assertCapacity(nodeId: string, node: NodeRegistryEntry, merged: CapacityServiceDemand[]): void {
@@ -538,18 +558,29 @@ function printCapacitySummary(nodeId: string, node: NodeRegistryEntry, placed: N
   ]);
 }
 
-/** Read → merge → capacity-check → conditional write, retrying on concurrent writes. */
+/**
+ * Read → merge → capacity-check → conditional write, retrying on concurrent writes.
+ *
+ * `partial` selects the merge: a FULL deploy (default) replaces the project's whole
+ * footprint on the node, so a service dropped from the config is removed; a PARTIAL
+ * deploy (`--service` / `--changed`) UPSERTS only `incoming`, preserving the project's
+ * co-located siblings the subset deploy didn't republish (mergeProjectServicesPartial)
+ * — otherwise deploying one service would tear down the others on a shared node.
+ */
 export async function publishDesired(
   aws: AwsEnv,
   nodeId: string,
   node: NodeRegistryEntry,
   project: string,
   incoming: ServiceConfig[],
+  partial = false,
 ): Promise<void> {
   for (let attempt = 0; attempt < MAX_PUBLISH_RETRIES; attempt += 1) {
     const existing = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, nodeId));
     const state = existing ? parseDesiredState(existing.raw) : emptyDesiredState(nodeId, nowIso());
-    const merged = mergeProjectServices(state.services, project, incoming);
+    const merged = partial
+      ? mergeProjectServicesPartial(state.services, project, incoming)
+      : mergeProjectServices(state.services, project, incoming);
     assertCapacity(nodeId, node, demandsOf(merged));
 
     const next: DesiredState = { version: PROTOCOL_VERSION, nodeId, updatedAt: nowIso(), services: merged };
@@ -760,6 +791,11 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
   const ownerProject = envProject(config.project, env);
 
   let services = config.service;
+  if (opts.service !== undefined && opts.changed !== undefined) {
+    throw new CliError("--service and --changed select services two different ways — use one", {
+      hint: "--service <name> picks one explicitly; --changed <ref> derives the set from a git diff",
+    });
+  }
   if (opts.service) {
     services = services.filter((s) => s.name === opts.service);
     if (services.length === 0) {
@@ -768,6 +804,46 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
       });
     }
   }
+  // `--changed <ref>`: deploy only services whose build inputs (context dir / Dockerfile)
+  // differ from <ref> — first-class "deploy changed services only" for monorepos / CI.
+  if (opts.changed !== undefined) {
+    if (opts.image !== undefined || opts.restart === true) {
+      const other = opts.image !== undefined ? "--image" : "--restart";
+      throw new CliError(`--changed cannot be combined with ${other}`, {
+        hint: `--changed rebuilds the services whose code changed; ${other} re-publishes an existing image of one service`,
+      });
+    }
+    const repoRoot = await resolveRepoRoot(dir);
+    let changedPaths: Set<string>;
+    try {
+      changedPaths = await collectChangedPaths(repoRoot, opts.changed);
+    } catch (error) {
+      throw new CliError((error as Error).message);
+    }
+    const changedNames = new Set(
+      selectChangedServices(buildServiceBuildPaths(config.service, dir, repoRoot), [...changedPaths]),
+    );
+    services = services.filter((s) => changedNames.has(s.name));
+    if (services.length === 0) {
+      // No service's build inputs changed since <ref> — a clean no-op (e.g. a docs-only
+      // commit in CI). Exit 0 BEFORE touching AWS so the deploy job stays green.
+      if (isJsonMode()) {
+        printJson({ changed: opts.changed, services: [], published: false, reason: "no changed services" });
+      } else {
+        log.info(`no services changed since ${color.cyan(opts.changed)} — nothing to deploy`);
+      }
+      return;
+    }
+    if (!isJsonMode()) {
+      log.step(
+        `changed since ${color.cyan(opts.changed)}: ${services.map((s) => color.cyan(s.name)).join(", ")}`,
+      );
+    }
+  }
+  // A partial (subset) deploy publishes fewer than the whole footprint, so it must
+  // UPSERT into each node's desired.json (preserving co-located siblings) and skip the
+  // vacated-node cleanup (which can't see the project's full intended placement).
+  const partialDeploy = opts.service !== undefined || opts.changed !== undefined;
   if (opts.node) {
     assertValidNodeId(opts.node);
     for (const s of services) {
@@ -1332,10 +1408,11 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
   }
 
   // Nodes this footprint occupies today but the new placement no longer targets.
-  // Skipped for --service deploys: a partial deploy can't see the project's full
-  // intended placement, so "vacated" would wrongly include the other services' nodes.
+  // Skipped for partial (--service / --changed) deploys: a subset deploy can't see the
+  // project's full intended placement, so "vacated" would wrongly include the other
+  // services' nodes (and the per-node merge already preserves those services in place).
   const vacatedNodeIds =
-    priorPlacement && !opts.service
+    priorPlacement && !partialDeploy
       ? priorPlacement.occupiedNodeIds.filter((id) => !nodePlacements.has(id))
       : [];
 
@@ -1351,7 +1428,7 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     const node = nodes.get(id) as NodeRegistryEntry;
     const existing = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, id));
     const state = existing ? parseDesiredState(existing.raw) : emptyDesiredState(id, nowIso());
-    assertCapacity(id, node, capacityDemands(ownerProject, state, placed));
+    assertCapacity(id, node, capacityDemands(ownerProject, state, placed, partialDeploy));
     printCapacitySummary(id, node, placed);
   }
 
@@ -1442,7 +1519,7 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
         opts.restart === true,
       ),
     );
-    await publishDesired(aws, id, node, ownerProject, incoming);
+    await publishDesired(aws, id, node, ownerProject, incoming, partialDeploy);
     log.success(`published desired state → ${color.cyan(id)}`);
   }
 
@@ -1627,6 +1704,10 @@ export function registerDeploy(program: Command): void {
     .command("deploy")
     .description("Build, push, and publish your services' desired state to their nodes")
     .option("--service <name>", "deploy only this service (default: every service in launch-pad.toml)")
+    .option(
+      "--changed <ref>",
+      "deploy only services whose build context/Dockerfile changed since this git ref (monorepo CI)",
+    )
     .option("--node <nodeId>", "override the target node for all services")
     .option("--env <name>", "deploy as a named environment: projects each domain + namespaces the footprint")
     .option("--no-create", "fail on a missing node instead of auto-provisioning it")
@@ -1671,9 +1752,18 @@ export function registerDeploy(program: Command): void {
         "allowed edits from the CLI. (When iterating on this lock locally, run the workspace",
         "CLI — `pnpm --filter @agentsystemlabs/launch-pad dev -- deploy`.)",
         "",
+        "Monorepo: --changed <ref> deploys only the services whose docker build context",
+        "or Dockerfile differs from <ref> (committed, uncommitted, or untracked) — wire it",
+        "into CI as `launch-pad deploy --changed origin/main --yes`. Unchanged services keep",
+        "their published image, and a co-located sibling on a shared node is preserved (a",
+        "subset deploy upserts, it doesn't replace the project's footprint). With no service",
+        "changed it's a clean no-op (exit 0). Config-only edits (cpu/replicas/env) aren't build",
+        "inputs — use `scale` / `config set` or a full `deploy` for those.",
+        "",
         "Examples:",
         "  $ launch-pad deploy",
         "  $ launch-pad deploy --service web --no-wait",
+        "  $ launch-pad deploy --changed origin/main --yes  # CI: deploy only what changed",
         "  $ launch-pad deploy --env staging          # parallel env on the shared edge",
         "  $ launch-pad deploy --env dev --node dev-app  # pin the env to its own node",
         "  $ launch-pad deploy --yes        # auto-provision without prompting",

@@ -212,6 +212,7 @@ launch-pad deploy [options]
 | Flag | Description |
 | ---- | ----------- |
 | `--service <name>` | Deploy only this service |
+| `--changed <ref>` | Deploy only services whose build context/Dockerfile changed since this git ref (monorepo CI) |
 | `--node <nodeId>` | Override target node for all services |
 | `--env <name>` | Named environment: projects domains + namespaces the footprint |
 | `--no-create` | Fail if a referenced node is missing (also disables empty-cluster bootstrap + capacity auto-add) |
@@ -228,12 +229,28 @@ launch-pad deploy [options]
 ```bash
 launch-pad deploy
 launch-pad deploy --service web --no-wait
+launch-pad deploy --changed origin/main --yes   # CI: deploy only what changed
 launch-pad deploy --env staging
 launch-pad deploy --yes               # CI
 launch-pad deploy --dry-run
 launch-pad deploy --restart --service api   # roll containers after a secret rotation
 launch-pad deploy --service web --image <uri>   # redeploy an existing tag (rollback)
 ```
+
+**`--changed <ref>`** is first-class "deploy changed services only" for **monorepos**. It runs
+a git diff between `<ref>` and your working tree (committed, uncommitted, and untracked files
+all count, because they all land in the image a rebuild would push) and deploys only the
+services whose **build inputs** changed — i.e. a changed file lives under the service's docker
+`context` directory, or is its `dockerfile`. Unchanged services keep their previously-published
+image. Wire it into CI as `launch-pad deploy --changed origin/main --yes` (or `--changed
+${{ github.event.before }}`). With **no** service changed it's a clean no-op that exits `0`, so
+a docs-only commit doesn't fail the deploy job. Config-only edits (`cpu`/`replicas`/`env` in
+`launch-pad.toml`) are **not** build inputs — use [`scale`](#scale) / [`config set`](#config)
+or a full `deploy` for those. Mutually exclusive with `--service`, `--image`, and `--restart`.
+
+A `--changed` (or `--service`) deploy is a **partial** deploy: it **upserts** into each node's
+desired state, preserving the project's other services co-located on the same node (it does not
+republish the whole footprint), so deploying one service never tears down its siblings.
 
 **`--image <uri>`** redeploys an existing immutable ECR tag of **one** `--service` without
 building — for rolling back to a known-good build or promoting a tested one. The URI must be a

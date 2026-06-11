@@ -8,6 +8,7 @@
     "e2e": "tsx src/run.ts",
     "e2e:scale": "tsx src/scale.ts",
     "e2e:undeploy": "tsx src/undeploy.ts",
+    "e2e:deploy-changed": "tsx src/deploy-changed.ts",
     "e2e:deploy-image": "tsx src/deploy-image.ts",
     "e2e:rollback": "tsx src/rollback.ts",
     "e2e:dns": "tsx src/dns-setup.ts",

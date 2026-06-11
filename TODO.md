@@ -32,7 +32,6 @@ Completed work lives in [DONE.md](DONE.md). Longer-horizon ideas live in [IDEAS.
 
 ### Developer experience
 
-- [ ] **Monorepo / multi-service deploy** — first-class “deploy changed services only” (git diff → `--service` list).
 - [ ] **Preview environments** — `deploy --env pr-123` with automatic DNS pattern + TTL teardown (env flag exists; full PR lifecycle automation does not).
 
 ### Workers
@@ -47,5 +46,5 @@ Completed work lives in [DONE.md](DONE.md). Longer-horizon ideas live in [IDEAS.
 2. **Reactive autoscaling + non-disruptive resize** — closes the gap between manual `scale` and hands-off node pool management.
 3. **Remote build** — slim CI runners without local Docker.
 4. **Managed data plane helpers** — RDS Postgres + Redis for stateful indie apps (the two most common day-one dependencies).
-5. **Preview environments + monorepo deploy** — team/PR workflows on top of the happy path.
+5. **Preview environments** — team/PR workflows on top of the happy path. (Monorepo "deploy changed services only" shipped as `deploy --changed <ref>`.)
 6. **Worker scheduling (cron)** — periodic jobs (cleanup, digests, billing runs) without a separate cron host.
