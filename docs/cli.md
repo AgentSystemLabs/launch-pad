@@ -166,6 +166,26 @@ aws iam attach-role-policy --role-name launch-pad-deploy \
   --policy-arn arn:aws:iam::<account>:policy/launch-pad-operator
 ```
 
+The generated **`.github/workflows/deploy.yml`** is keyless (OIDC), runs on a push to your
+branch (and `workflow_dispatch` for manual runs), and is **concurrency-guarded** — `deploy` is
+CAS-protected against concurrent writers, so the workflow runs one deploy per ref at a time and
+cancels a superseded run rather than racing it. The steps are: checkout → assume the role via
+OIDC → set up Docker Buildx → `npx @agentsystemlabs/launch-pad deploy --yes`.
+
+**Caching guidance** (CI build speed):
+
+- **Pin the CLI version** for reproducible deploys — replace `@agentsystemlabs/launch-pad` with
+  `@agentsystemlabs/launch-pad@<version>` in the `npx` step (an unpinned `npx` floats to latest).
+- **Cache the CLI download** if your repo has a `package-lock.json`: add `cache: npm` to the
+  `actions/setup-node` step (the generated workflow leaves it commented because the cache needs a
+  detectable lockfile).
+- **Docker build time** usually dominates. `deploy` runs Buildx internally, so the biggest lever
+  is your **Dockerfile layer order** — copy dependency manifests and install deps *before* copying
+  source, so an unchanged-deps build reuses cached layers. (An unchanged app still produces the
+  same content-addressed ECR tag, so the push is a no-op, but the local image is rebuilt.)
+- For heavy/frequent builds, a **self-hosted runner** (warm Buildx + Docker layer cache on disk)
+  or a registry-backed Buildx cache is the next step.
+
 ---
 
 ## `deploy`

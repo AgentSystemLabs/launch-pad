@@ -89,7 +89,14 @@ Shipped:
 
 ### CI/CD
 
-- [ ] **Official GitHub Action** — documented workflow: checkout → configure AWS (OIDC) → `launch-pad deploy --yes` with caching guidance.
+- [x] **Official GitHub Action** — `launch-pad setup github-oidc --repo <owner/name>` emits a keyless
+  (OIDC) `.github/workflows/deploy.yml`: checkout → assume role via OIDC → Docker Buildx →
+  `npx @agentsystemlabs/launch-pad deploy --yes`. Now **concurrency-guarded** (one deploy per ref,
+  cancel superseded — matches deploy's CAS write protection) with a manual `workflow_dispatch` trigger,
+  and documented in [cli.md](docs/cli.md#setup-github-oidc) with **caching guidance** (pin the CLI
+  version, optional `cache: npm` when a lockfile exists, Dockerfile layer ordering, self-hosted runner
+  for heavy builds). Pure `buildDeployWorkflow` unit-tested (+2); the deploy-under-OIDC runtime is
+  already real-AWS-verified by `pnpm e2e:operator-iam` (full provision→deploy→destroy under a scoped role).
 - [ ] **Remote build** — deploy without local Docker (CodeBuild / ECR build pipeline / pre-built image deploy) for slim CI runners.
 - [x] **`deploy --image <uri>`** — `deploy --service <name> --image <uri>` skips the build and redeploys an existing immutable ECR tag (rollback / promote). Validated to the service's own repo + an existing tag; re-rolls in place health-gated; idempotent on a repeat. Pure parser (`shared/src/ecr.ts` `parseEcrImageUri`) + `loadOverrideImage` unit-tested; real-AWS regression (`pnpm e2e:deploy-image`: v1 → v2 → roll back to v1 without building). Next: a `launch-pad rollback` wrapper that auto-picks the previous tag (ECR push order / deploy history).
 

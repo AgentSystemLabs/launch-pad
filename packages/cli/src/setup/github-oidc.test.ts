@@ -128,4 +128,14 @@ describe("buildDeployWorkflow", () => {
     expect(yaml).toContain("actions/checkout");
     expect(yaml).toContain("docker/setup-buildx-action");
   });
+
+  it("serializes deploys per ref (concurrency) so CAS-guarded deploys don't race", () => {
+    expect(yaml).toContain("concurrency:");
+    expect(yaml).toContain("group: launch-pad-deploy-${{ github.ref }}");
+    expect(yaml).toContain("cancel-in-progress: true");
+  });
+
+  it("allows a manual run via workflow_dispatch", () => {
+    expect(yaml).toContain("workflow_dispatch:");
+  });
 });

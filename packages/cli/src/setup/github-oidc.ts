@@ -126,11 +126,18 @@ export function buildDeployWorkflow(params: DeployWorkflowParams): string {
 on:
   push:
     branches: [ ${params.branch} ]
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
 
 # Required for the OIDC token exchange with AWS.
 permissions:
   id-token: write
   contents: read
+
+# Launch Pad's deploy is CAS-guarded against concurrent writers — run one deploy per
+# branch at a time and cancel a superseded run rather than race it.
+concurrency:
+  group: launch-pad-deploy-${"${{ github.ref }}"}
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -148,7 +155,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          # If your repo has a package-lock.json, uncomment to cache the npm download:
+          # cache: npm
 
+      # Pin the CLI version for reproducible deploys, e.g. @agentsystemlabs/launch-pad@1.2.3
       - run: npx --yes @agentsystemlabs/launch-pad deploy --yes
 `;
 }
