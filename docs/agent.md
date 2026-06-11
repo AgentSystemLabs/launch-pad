@@ -1,9 +1,8 @@
 # The node agent
 
 A long-running process on every node — **the only thing that touches Docker and Caddy**.
-It polls S3 for desired state and reconciles the node to match. There are two
-implementations: the production **TypeScript agent** ([`packages/agent`](../packages/agent))
-and a full-parity **Rust rewrite spike** ([`packages/agent-rust`](../packages/agent-rust)).
+It polls S3 for desired state and reconciles the node to match. The implementation lives in
+[`packages/agent`](../packages/agent) (TypeScript, bundled to a single CJS file).
 
 ## The reconcile loop
 
@@ -58,8 +57,8 @@ staleness check (60s) stays reliable; mid-rollout and error paths always write.
 - **Volumes** (`docker.ts` `volumeName`/`buildRunArgs`): mounts a service's declared
   `[[service.volumes]]` as docker named volumes (`launchpadvol_<project>_<service>_<name>`,
   index-independent so the data is re-mounted across rollouts). A `docker rm` leaves the
-  named volume intact, so the data outlives a container replacement. **TypeScript agent only**
-  today — deploy refuses to schedule a volume-bearing service onto a rust-agent node.
+  named volume intact, so the data outlives a container replacement. Deploy refuses to
+  schedule a volume-bearing service onto a legacy rust-agent node (see below).
 - **Logs** (`cloudwatch-logs.ts`): reconciles the Amazon CloudWatch Agent config
   (write-on-change) so container stdout ships to per-service log groups; degraded-safe —
   logging failures never break reconciliation.
@@ -84,21 +83,10 @@ by cloud-init at provision time.
 
 ## Distribution
 
-The agent is **not on npm**. The TS agent is bundled to one self-contained CJS file,
-uploaded to `nodes/<id>/agent.cjs` in S3, fetched via presigned URL by cloud-init, and run
-under systemd. The Rust agent is a static musl binary — baked into the
-[golden AMI](golden-ami.md) (where it's the default runtime) or downloaded from S3 on full
-bootstrap. `launch-pad node upgrade-agent` publishes a fresh bundle and restarts agents via
-SSM.
+The agent is **not on npm**. It is bundled to one self-contained CJS file, uploaded to
+`nodes/<id>/agent.cjs` in S3, fetched via presigned URL by cloud-init on full bootstrap (or
+pre-baked into the [golden AMI](golden-ami.md)), and run under systemd via Node.js.
+`launch-pad node upgrade-agent` publishes a fresh bundle and restarts agents via SSM.
 
-## The Rust rewrite (`packages/agent-rust`)
-
-A parallel Rust port built test-first from the agent's Vitest suite — the pure planners
-(`plan_reconcile`, write-on-change fingerprints, the rollout sequencer) have byte-for-byte
-parity (canonical JSON fingerprints match the TS output exactly), plus a runnable `main.rs`
-poll loop wired to real S3/ECR/Docker/Caddy/IMDS. 108 offline tests pass; it has no
-`package.json`, so the pnpm workspace ignores it — use `cargo test` / `cargo build`.
-
-Why: a single static binary removes the Node runtime from nodes, cuts RSS (~5–15 MB vs.
-40–80 MB), and speeds cold start. It ships in the golden AMI; the TS agent remains the
-reference implementation and the default on full bootstrap.
+Legacy nodes may still have `agentType: "rust"` in their registry entry from an earlier
+release; `node upgrade-agent` migrates them to the TypeScript bundle.

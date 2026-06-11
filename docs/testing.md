@@ -25,16 +25,6 @@ shared to source), but **runtime** resolution — `pnpm dev`, built binaries, an
 `shared`, rebuild it (`pnpm --filter @agentsystemlabs/launch-pad-shared build`) before
 running cli/agent tests or they exercise stale shared code.
 
-## Rust agent tests
-
-`packages/agent-rust` has no `package.json` (pnpm ignores it); use cargo:
-
-```bash
-cd packages/agent-rust
-cargo test                   # 108 offline tests — no AWS/Docker needed
-cargo clippy --all-targets
-```
-
 ## End-to-end test (real AWS)
 
 [`e2e/`](../e2e) provisions a **real** edge + private app node, deploys a real app over
@@ -72,7 +62,7 @@ LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:history       # deploy history
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:node-iam      # node destroy deletes the per-node IAM role/profile (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:operator-iam  # the generated operator IAM policy is sufficient (and scoped)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rebalance     # rebalance + node evacuate move cluster-placed replicas
-LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:volumes       # persistent volume data survives a container replace (--agent ts)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:volumes       # persistent volume data survives a container replace
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:idle          # cost flags an idle (paused) node (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:alerts        # alerts check fires on a dead node (heartbeat-stale) + webhook
 ```
@@ -82,7 +72,7 @@ the EC2 instance out-of-band** so the registry still says the node is up while t
 heartbeating — then asserts `alerts check` fires `heartbeat-stale`, POSTs a local webhook
 receiver, and exits non-zero.
 
-`e2e:volumes` provisions one `both` node on the **TypeScript agent** (`--agent ts`), deploys a
+`e2e:volumes` provisions one `both` node, deploys a
 worker pinned to it with a `/data` volume that appends a boot line on every container start, then
 `deploy --restart`s to replace the container and asserts (via `launch-pad logs`) the boot count
 went 1 → 2 — the same volume was re-mounted, so the data survived the replace. It also confirms

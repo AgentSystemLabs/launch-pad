@@ -37,7 +37,6 @@ import { applyNodeDrift } from "../../deploy/drift-apply";
 import { type NodeDrift, planNodeDrift } from "../../deploy/drift-plan";
 import { CliError } from "../../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
-import { defaultAgentTypeForBootstrap, type AgentType } from "../../provision/agent-bundle";
 import { resolveNodeAmi } from "../../provision/golden-ami";
 import { installLoggingOnNode } from "../../provision/install-logging";
 import { registerMonitor } from "./monitor";
@@ -98,12 +97,6 @@ function driftBadge(drift: NodeDrift["drift"]): string | null {
   }
 }
 
-function parseAgentType(value: string | undefined): AgentType | undefined {
-  if (value === undefined) return undefined;
-  if (value === "ts" || value === "rust") return value;
-  throw new CliError(`invalid --agent "${value}" (expected ts | rust)`);
-}
-
 // ── create ─────────────────────────────────────────────────────────────────────
 
 interface CreateOptions extends GlobalOpts {
@@ -113,7 +106,6 @@ interface CreateOptions extends GlobalOpts {
   keyName?: string;
   ami?: string;
   agentVersion?: string;
-  agent?: string;
   yes?: boolean;
   dryRun?: boolean;
 }
@@ -123,7 +115,6 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
   if (opts.edge !== undefined) assertValidNodeId(opts.edge);
   const aws = await prepareAws(opts);
   const agentVersion = opts.agentVersion ?? readVersion();
-  const requestedAgentType = parseAgentType(opts.agent);
 
   const roleResult = NodeRoleSchema.safeParse(opts.role);
   if (!roleResult.success) {
@@ -139,7 +130,6 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
     explicitAmiId: opts.ami,
   });
   const amiId = ami.imageId;
-  const agentType = requestedAgentType ?? defaultAgentTypeForBootstrap(ami.bootstrapMode);
   const vpcId = await getDefaultVpcId(aws.ec2);
 
   const agentConfig = {
@@ -152,15 +142,12 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
   };
 
   if (opts.dryRun) {
-    const needsDownload = ami.bootstrapMode === "full" || agentType === "ts";
+    const needsDownload = ami.bootstrapMode === "full";
     const userData = renderUserData({
       agent: agentConfig,
       bundleUrl: needsDownload
-        ? agentType === "rust"
-          ? "https://<state-bucket>.../agent?<presigned-at-launch>"
-          : "https://<state-bucket>.../agent.cjs?<presigned-at-launch>"
+        ? "https://<state-bucket>.../agent.cjs?<presigned-at-launch>"
         : undefined,
-      agentType,
       bootstrapMode: ami.bootstrapMode,
     });
     printDryRun(name, opts, aws, capacity, amiId, ami.source, ami.bootstrapMode, vpcId, userData);
@@ -218,7 +205,6 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
       vpcId,
       edgeNodeId,
       keyName: opts.keyName,
-      agentType,
       onProgress: (t) => {
         spin.text = t;
       },
@@ -1005,10 +991,9 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
   if (!isJsonMode()) {
     log.plain();
     for (const e of targets) {
-      const artifact = e.agentType === "rust" ? "rust agent binary" : "agent bundle";
       const action = opts.uploadOnly
-        ? `upload ${artifact} to S3`
-        : `upload ${artifact} + restart agent via SSM`;
+        ? "upload agent bundle to S3"
+        : "upload agent bundle + restart agent via SSM";
       log.plain(`  ${color.cyan(e.nodeId)}  ${color.dim(action)}  ${color.dim(e.instanceId ?? "")}`);
     }
     log.plain();
@@ -1061,7 +1046,7 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
         );
       } else {
         spin.warn(`${color.cyan(entry.nodeId)}  ${color.yellow("bundle uploaded — install manually")}`);
-        if (result.bundleUrl) manualLines.push(manualUpgradeHint(entry.nodeId, result.bundleUrl, result.agentType));
+        if (result.bundleUrl) manualLines.push(manualUpgradeHint(entry.nodeId, result.bundleUrl));
         if (result.error) manualLines.push(`    ${color.dim(result.error)}`);
       }
     } catch (error) {
@@ -1355,7 +1340,6 @@ export function registerNode(program: Command): void {
     .option("--key-name <keypair>", "EC2 key pair for SSH (omit to disable SSH)")
     .option("--ami <id>", "AMI id (default: launch-pad golden AMI, falling back to latest Amazon Linux 2023)")
     .option("--agent-version <semver>", "agent version to install (default: this CLI's version)")
-    .option("--agent <runtime>", "agent runtime (default: rust on golden AMI, ts on full bootstrap)")
     .option("--dry-run", "show the provisioning plan + bootstrap without creating anything")
     .option("--yes", "skip the launch confirmation prompt")
     .action(async (name: string, _opts, command: Command) => {

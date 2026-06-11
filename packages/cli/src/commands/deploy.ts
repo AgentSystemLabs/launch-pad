@@ -83,7 +83,7 @@ import { buildProvisionPlan, type NodeAction, type NodeDemand } from "../deploy/
 import { waitForConvergence, type WatchResult, type WatchTarget } from "../deploy/watch";
 import { CliError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
-import { DEFAULT_AGENT_TYPE, defaultAgentTypeForBootstrap, type AgentType } from "../provision/agent-bundle";
+import { DEFAULT_AGENT_TYPE } from "../provision/agent-bundle";
 import { resolveNodeAmi } from "../provision/golden-ami";
 import { provisionNode } from "../provision/provision-node";
 import { panel, table } from "../ui/box";
@@ -125,8 +125,6 @@ export interface DeployOptions extends GlobalOpts {
   repair?: boolean;
   /** commander sets this false for `--no-recreate` (a terminated instance is replaced by default). */
   recreate?: boolean;
-  /** Agent runtime to install on auto-provisioned nodes: "rust" (default) or "ts". */
-  agent?: string;
   /** AMI used for auto-provisioned/recreated nodes. */
   ami?: string;
   /** Skip build/push; re-publish desired state with restartAt to roll containers. */
@@ -155,12 +153,6 @@ interface NodeService {
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function parseAgentType(value: string | undefined): AgentType | undefined {
-  if (value === undefined) return undefined;
-  if (value === "ts" || value === "rust") return value;
-  throw new CliError(`invalid --agent "${value}" (expected ts | rust)`);
 }
 
 /** A stand-in registry entry for a to-be-created node, so a `--dry-run` can run the
@@ -471,7 +463,7 @@ export function assertVolumesSupported(nodeId: string, node: NodeRegistryEntry, 
   throw new CliError(
     `node "${nodeId}" runs the rust agent, which doesn't mount persistent volumes yet — ` +
       `service(s) ${withVolumes.join(", ")} declare [[service.volumes]]`,
-    { hint: `re-create the node with the TypeScript agent: launch-pad node create ${nodeId} --agent ts` },
+    { hint: `re-create the node: launch-pad node create ${nodeId}` },
   );
 }
 
@@ -757,8 +749,6 @@ async function recordDeployEvent(aws: AwsEnv, input: DeployEventInput): Promise<
 
 export async function runDeploy(opts: DeployOptions): Promise<void> {
   const { config, dir } = loadConfig();
-
-  const requestedAgentType = parseAgentType(opts.agent);
 
   const env = opts.env;
   if (env !== undefined && !LABEL_REGEX.test(env)) {
@@ -1211,7 +1201,6 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
       const amiId = toCreate.length > 0 ? ami?.imageId : undefined;
       const vpcId = toCreate.length > 0 ? await getDefaultVpcId(aws.ec2) : undefined;
       const agentVersion = readVersion();
-      const agentType = requestedAgentType ?? defaultAgentTypeForBootstrap(ami?.bootstrapMode);
 
       // Edges/both first — an app node's security group references its edge's SG,
       // and ingress must exist before app replicas health-check.
@@ -1232,7 +1221,6 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
             amiBootstrapMode: ami?.bootstrapMode,
             vpcId,
             edgeNodeId: a.edgeNodeId,
-            agentType,
             onProgress: (t) => {
               spin.text = t;
             },
@@ -1258,7 +1246,6 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
             entry: r.entry,
             action: r.drift.action,
             agentVersion,
-            agentType: requestedAgentType,
             amiId: ami?.imageId,
             amiBootstrapMode: ami?.bootstrapMode,
             onProgress: (t) => {
@@ -1654,7 +1641,6 @@ export function registerDeploy(program: Command): void {
     .option("--yes", "skip confirmation prompts (required to auto-provision in CI)")
     .option("--dry-run", "do everything except push images, write state, or create nodes")
     .option("--ami <id>", "AMI id for auto-provisioned/recreated nodes")
-    .option("--agent <runtime>", "agent runtime for auto-provisioned nodes (default: rust on golden AMI, ts on full bootstrap)")
     .option("--restart", "skip build/push and roll containers (picks up secret/env changes)")
     .option(
       "--image <uri>",

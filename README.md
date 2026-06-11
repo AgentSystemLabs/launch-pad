@@ -64,7 +64,7 @@ Full prerequisites (Docker, AWS credentials, DNS) and a guided first deploy:
 | [docs/configuration.md](docs/configuration.md) | The `launch-pad.toml` schema — services, placement, health checks, rollouts, secrets, environments, config lock |
 | [docs/cli.md](docs/cli.md) | Complete CLI reference: `init` · `doctor` · `setup` · `deploy` · `undeploy` · `rollback` · `rebalance` · `scale` · `config` · `status` · `history` · `logs` · `secret` · `dns` · `node` · `cluster` · `backup` / `restore` · `cost` |
 | [docs/architecture.md](docs/architecture.md) | How it works: the S3 contract, node roles, edge routing, capacity, invariants |
-| [docs/agent.md](docs/agent.md) | The node reconciler (TypeScript) and the Rust rewrite |
+| [docs/agent.md](docs/agent.md) | The node reconciler (TypeScript) |
 | [docs/golden-ami.md](docs/golden-ami.md) | The Packer-built golden AMI and node provisioning/bootstrap |
 | [docs/dashboard.md](docs/dashboard.md) | The local web dashboard (work in progress) |
 | [docs/testing.md](docs/testing.md) | Unit tests, the real-AWS e2e harness, build processes, CI status |
@@ -78,7 +78,6 @@ Full prerequisites (Docker, AWS credentials, DNS) and a guided first deploy:
 packages/shared       the typed CLI ↔ agent contract (Zod schemas)
 packages/cli          the CLI — what users run (npx @agentsystemlabs/launch-pad)
 packages/agent        the node agent — reconciles Docker + Caddy to desired state
-packages/agent-rust   Rust agent rewrite (static binary, baked into the golden AMI)
 packages/dashboard    local web UI (Bun; work in progress)
 e2e/                  real-AWS end-to-end test harness (opt-in)
 examples/             runnable example apps, one per feature combination
@@ -90,9 +89,8 @@ Details and a "where to change what" table: [docs/codebase-layout.md](docs/codeb
 ## Project status
 
 Working and verified end-to-end against real AWS (see [docs/testing.md](docs/testing.md)),
-pre-1.0. The **dashboard is a work in progress**, the **Rust agent** ships in the golden AMI
-with the TypeScript agent as the reference implementation, and there is **no CI pipeline
-yet** — tests run locally.
+pre-1.0. The **dashboard is a work in progress**, and there is **no CI pipeline yet** — tests
+run locally.
 
 ## Development
 

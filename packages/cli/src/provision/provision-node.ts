@@ -32,7 +32,7 @@ import { getJson, PreconditionFailedError, putJson } from "../aws/s3-state";
 import { resolveLatestAl2023Ami } from "../aws/ssm";
 import { adoptEdgeIfUnset, ensureClusterConfig } from "../cluster/store";
 import { CliError } from "../errors";
-import { defaultAgentTypeForBootstrap, type AgentType, uploadAndPresignAgent } from "./agent-bundle";
+import { presignAgentBundle, uploadAgentBundle } from "./agent-bundle";
 import type { AmiBootstrapMode } from "./golden-ami";
 import { planResizedEntry } from "./resize-plan";
 import { renderUserData } from "./user-data";
@@ -71,8 +71,6 @@ export interface ProvisionNodeParams {
   /** The edge node fronting this node — required when role === "app". */
   edgeNodeId?: string;
   keyName?: string;
-  /** Agent runtime to install. Defaults to rust on golden AMIs and ts on full bootstrap. */
-  agentType?: AgentType;
   /** Spinner bridge: called with the current step label. */
   onProgress?: (text: string) => void;
 }
@@ -100,16 +98,16 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
   };
 
   const amiBootstrapMode = p.amiBootstrapMode ?? "full";
-  const agentType: AgentType = p.agentType ?? defaultAgentTypeForBootstrap(amiBootstrapMode);
-  const needsDownload = amiBootstrapMode === "full" || agentType === "ts";
+  const needsDownload = amiBootstrapMode === "full";
+  report("uploading agent bundle");
+  await uploadAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
   let bundleUrl: string | undefined;
   if (needsDownload) {
-    report(agentType === "rust" ? "uploading rust agent binary" : "uploading agent bundle");
-    bundleUrl = await uploadAndPresignAgent(aws.s3, aws.bucket, aws.clusterId, nodeId, agentType);
+    bundleUrl = await presignAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
   } else {
-    report("using baked rust agent");
+    report("using baked agent bundle");
   }
-  const userData = renderUserData({ agent: agentConfig, bundleUrl, agentType, bootstrapMode: amiBootstrapMode });
+  const userData = renderUserData({ agent: agentConfig, bundleUrl, bootstrapMode: amiBootstrapMode });
 
   report("ensuring IAM role + instance profile");
   const { profileName } = await ensureNodeIam(aws.iam, {
@@ -220,7 +218,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
       iamInstanceProfile: profileName,
       agentId: agentIdForNode(nodeId),
       agentVersion: p.agentVersion,
-      agentType,
+      agentType: "ts",
       createdAt: nowIso(),
       createdBy: aws.callerArn,
       state: "provisioning",
@@ -356,8 +354,6 @@ export interface ReplaceInstanceParams {
   node: NodeRegistryEntry;
   /** Agent version to install on the replacement (the caller's CLI version). */
   agentVersion: string;
-  /** Agent runtime to install. Defaults to the existing node runtime. */
-  agentType?: AgentType;
   amiId?: string;
   amiBootstrapMode?: AmiBootstrapMode;
   onProgress?: (text: string) => void;
@@ -394,17 +390,17 @@ export async function replaceInstance(p: ReplaceInstanceParams): Promise<NodeReg
     role,
   };
 
-  const agentType: AgentType = p.agentType ?? node.agentType;
   const amiBootstrapMode = p.amiBootstrapMode ?? "full";
-  const needsDownload = amiBootstrapMode === "full" || agentType === "ts";
+  const needsDownload = amiBootstrapMode === "full";
+  report("uploading agent bundle");
+  await uploadAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
   let bundleUrl: string | undefined;
   if (needsDownload) {
-    report(agentType === "rust" ? "uploading rust agent binary" : "uploading agent bundle");
-    bundleUrl = await uploadAndPresignAgent(aws.s3, aws.bucket, aws.clusterId, nodeId, agentType);
+    bundleUrl = await presignAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
   } else {
-    report("using baked rust agent");
+    report("using baked agent bundle");
   }
-  const userData = renderUserData({ agent: agentConfig, bundleUrl, agentType, bootstrapMode: amiBootstrapMode });
+  const userData = renderUserData({ agent: agentConfig, bundleUrl, bootstrapMode: amiBootstrapMode });
 
   report(`launching ${node.instanceType}`);
   const instanceId = await runNode(aws.ec2, {
@@ -453,7 +449,7 @@ export async function replaceInstance(p: ReplaceInstanceParams): Promise<NodeReg
     publicIp,
     eipAllocationId,
     agentVersion: p.agentVersion,
-    agentType,
+    agentType: "ts",
     state: "ready",
   };
 

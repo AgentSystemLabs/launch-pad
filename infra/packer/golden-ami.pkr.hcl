@@ -12,7 +12,7 @@ variable "region" {
   default = "us-east-1"
 }
 
-variable "agent_binary_path" {
+variable "agent_bundle_path" {
   type = string
 }
 
@@ -61,7 +61,7 @@ source "amazon-ebs" "launch_pad_golden" {
     Name         = local.ami_name
     Project      = "launch-pad"
     ManagedBy    = "packer"
-    AgentType    = "rust"
+    AgentType    = "ts"
     AgentVersion = var.agent_version
   }
 }
@@ -71,8 +71,8 @@ build {
   sources = ["source.amazon-ebs.launch_pad_golden"]
 
   provisioner "file" {
-    source      = var.agent_binary_path
-    destination = "/tmp/launch-pad-agent"
+    source      = var.agent_bundle_path
+    destination = "/tmp/launch-pad-agent.cjs"
   }
 
   provisioner "shell" {
@@ -83,10 +83,10 @@ build {
       "sudo dnf install -y docker nodejs amazon-cloudwatch-agent",
       "curl -fsSL 'https://caddyserver.com/api/download?os=linux&arch=amd64' -o /tmp/caddy",
       "sudo install -m 755 /tmp/caddy /usr/local/bin/caddy",
-      "sudo install -m 755 /tmp/launch-pad-agent /opt/launch-pad/agent",
+      "sudo install -m 644 /tmp/launch-pad-agent.cjs /opt/launch-pad/agent.cjs",
       "sudo systemctl enable docker",
       "sudo dnf clean all",
-      "sudo rm -rf /var/cache/dnf /tmp/caddy /tmp/launch-pad-agent",
+      "sudo rm -rf /var/cache/dnf /tmp/caddy /tmp/launch-pad-agent.cjs",
     ]
   }
 
@@ -94,7 +94,7 @@ build {
     output     = "infra/packer/latest-manifest.json"
     strip_path = true
     custom_data = {
-      agent_type    = "rust"
+      agent_type    = "ts"
       agent_version = var.agent_version
       architecture  = "x86_64"
     }

@@ -14,7 +14,6 @@ launch-pad/
 │   ├── shared/                # the typed CLI ↔ agent contract (Zod schemas)
 │   ├── cli/                   # the product: init/deploy/status/logs/secret/node/cluster
 │   ├── agent/                 # the node reconciler (TypeScript, production)
-│   ├── agent-rust/            # Rust agent rewrite (cargo-only; no package.json)
 │   └── dashboard/             # local web UI (Bun; excluded from pnpm workspace)
 ├── e2e/                       # real-AWS end-to-end harness (opt-in, costs money)
 ├── examples/                  # runnable example apps — one per feature combination
@@ -83,12 +82,6 @@ Both sides import it so they cannot drift; a mismatch is a parse error, not a hu
 | `secrets.ts` | SSM secret resolution at container start |
 | `ecr-auth.ts` / `health.ts` | Cached ECR login; HTTP health probing |
 | `cloudwatch-logs.ts` / `stats.ts` | Log-shipping config reconciliation; resource sampling |
-
-## `packages/agent-rust` — Rust rewrite
-
-Module-for-module port of the TS agent (`reconcile.rs`, `status_write.rs`, `caddy.rs`, …)
-with byte-for-byte fingerprint parity and 108 offline tests. No `package.json` — cargo
-only. Its release binary is what the golden AMI bakes in.
 
 ## `packages/dashboard` — local web UI (WIP)
 

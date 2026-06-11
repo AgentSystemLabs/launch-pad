@@ -125,9 +125,9 @@ Rules:
 - The data is **kept** on `undeploy` / `node destroy` of the data (the volume isn't deleted), so
   a redeploy reattaches it. It is **not** replicated and does **not** survive terminating the
   instance — it's node-local durability, not a managed database.
-- Persistent volumes are mounted by the **TypeScript agent** (`node create --agent ts`). Deploy
-  refuses to publish a volume-bearing service to a node running the rust agent (it would silently
-  drop the mount). See [`examples/worker-with-volume`](../examples/worker-with-volume).
+- Deploy refuses to publish a volume-bearing service to a **legacy rust-agent node**
+  (`agentType: "rust"` in the registry — run `node upgrade-agent` or re-create the node).
+  See [`examples/worker-with-volume`](../examples/worker-with-volume).
 - Upgrade a node's agent (`launch-pad node upgrade-agent`) to a volumes-aware build **before** the
   first deploy from a volumes-aware CLI — that deploy adds the `volumes` field to every service in
   the node's `desired.json`, which a pre-volumes agent won't parse.

@@ -6,7 +6,6 @@ import {
 import type { AwsEnv } from "../aws/context";
 import { putJson } from "../aws/s3-state";
 import { CliError } from "../errors";
-import type { AgentType } from "../provision/agent-bundle";
 import type { AmiBootstrapMode } from "../provision/golden-ami";
 import { replaceInstance, resumeNode } from "../provision/provision-node";
 import type { DriftAction } from "./drift-plan";
@@ -19,7 +18,6 @@ export interface ApplyNodeDriftParams {
   action: DriftAction;
   /** Agent version to install if the action recreates the instance. */
   agentVersion: string;
-  agentType?: AgentType;
   amiId?: string;
   amiBootstrapMode?: AmiBootstrapMode;
   onProgress?: (text: string) => void;
@@ -57,7 +55,6 @@ export async function applyNodeDrift(p: ApplyNodeDriftParams): Promise<NodeRegis
         aws,
         node: entry,
         agentVersion: p.agentVersion,
-        agentType: p.agentType,
         amiId: p.amiId,
         amiBootstrapMode: p.amiBootstrapMode,
         onProgress: p.onProgress,

@@ -1,5 +1,4 @@
 import type { NodeRole } from "@agentsystemlabs/launch-pad-shared";
-import type { AgentType } from "./agent-bundle";
 import { renderCloudWatchInstall } from "./cloudwatch";
 import { renderSystemdUnit } from "./systemd-unit";
 
@@ -14,11 +13,9 @@ export interface AgentConfig {
 
 export interface UserDataParams {
   agent: AgentConfig;
-  /** Presigned S3 URL the node curls to fetch the agent artifact. */
+  /** Presigned S3 URL the node curls to fetch the agent bundle (full bootstrap only). */
   bundleUrl?: string;
-  /** Agent runtime: "ts" (Node CJS bundle, default) or "rust" (static binary). */
-  agentType?: AgentType;
-  /** Golden AMIs already include host dependencies and the Rust agent binary. */
+  /** Golden AMIs already include host dependencies and the agent bundle. */
   bootstrapMode?: "full" | "golden";
 }
 
@@ -66,20 +63,15 @@ systemctl enable --now caddy
 `;
 }
 
-function needsAgentDownload(agentType: AgentType, bootstrapMode: "full" | "golden"): boolean {
-  return bootstrapMode === "full" || agentType === "ts";
-}
-
 /**
  * The cloud-init script a node runs on first boot: install Docker + Node (+ Caddy on
  * edge/both nodes), write the agent config + systemd unit, download the agent bundle
  * from a presigned S3 URL, then start it under systemd.
  */
 export function renderUserData(params: UserDataParams): string {
-  const agentType = params.agentType ?? "ts";
   const bootstrapMode = params.bootstrapMode ?? "full";
   const agentJson = JSON.stringify(params.agent, null, 2);
-  const unit = renderSystemdUnit(agentType);
+  const unit = renderSystemdUnit();
   const caddy = params.agent.role === "app" ? "" : `\n${caddyBlock(bootstrapMode === "full")}`;
   const cloudwatch = renderCloudWatchInstall({
     clusterId: params.agent.clusterId,
@@ -88,28 +80,23 @@ export function renderUserData(params: UserDataParams): string {
     installPackage: bootstrapMode === "full",
   });
 
-  // The Rust agent is a self-contained binary — no Node runtime needed on-box.
   const runtimeBlock =
     bootstrapMode === "golden"
       ? `# --- runtime already installed by launch-pad golden AMI ---
-${agentType === "rust" ? "test -x /opt/launch-pad/agent" : "node --version"}`
-      : agentType === "rust"
-      ? `# --- agent runtime: Rust (static binary, no Node needed) ---`
+node --version
+test -f /opt/launch-pad/agent.cjs`
       : `# --- Node.js 22 ---
 curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
 dnf install -y nodejs`;
 
-  if (needsAgentDownload(agentType, bootstrapMode) && !params.bundleUrl) {
-    throw new Error(`bundleUrl is required for ${agentType} agent on ${bootstrapMode} bootstrap`);
+  if (bootstrapMode === "full" && !params.bundleUrl) {
+    throw new Error("bundleUrl is required for full bootstrap");
   }
 
   const fetchAgent =
-    bootstrapMode === "golden" && agentType === "rust"
-      ? "# Rust agent binary is baked into the launch-pad golden AMI."
-      : agentType === "rust"
-        ? `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent
-chmod +x /opt/launch-pad/agent`
-        : `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent.cjs`;
+    bootstrapMode === "golden"
+      ? "# TypeScript agent bundle is baked into the launch-pad golden AMI."
+      : `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent.cjs`;
 
   const dockerBlock =
     bootstrapMode === "full"

@@ -6,13 +6,13 @@ import { type GoldenAmiManifest, resolveNodeAmi } from "./golden-ami";
 
 const manifest: GoldenAmiManifest = {
   schemaVersion: 1,
-  defaultAgentType: "rust",
+  defaultAgentType: "ts",
   amis: {
     "us-east-1": {
       amiId: "ami-golden",
       region: "us-east-1",
       architecture: "x86_64",
-      agentType: "rust",
+      agentType: "ts",
       agentVersion: "0.0.0",
       builtAt: "2026-06-10T00:00:00.000Z",
     },

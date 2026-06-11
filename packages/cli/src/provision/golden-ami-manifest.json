@@ -1,14 +1,5 @@
 {
   "schemaVersion": 1,
-  "defaultAgentType": "rust",
-  "amis": {
-    "us-east-1": {
-      "amiId": "ami-0e9abd01543239df7",
-      "region": "us-east-1",
-      "architecture": "x86_64",
-      "agentType": "rust",
-      "agentVersion": "0.0.0",
-      "builtAt": "2026-06-10T04:40:52.000Z"
-    }
-  }
+  "defaultAgentType": "ts",
+  "amis": {}
 }

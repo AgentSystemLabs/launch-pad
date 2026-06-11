@@ -29,13 +29,13 @@ const builtAt =
     : new Date().toISOString();
 
 cli.schemaVersion = 1;
-cli.defaultAgentType = "rust";
+cli.defaultAgentType = "ts";
 cli.amis ??= {};
 cli.amis[region] = {
   amiId,
   region,
   architecture: "x86_64",
-  agentType: "rust",
+  agentType: "ts",
   agentVersion,
   builtAt,
 };

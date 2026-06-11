@@ -6,9 +6,9 @@ makes that fast.
 ## Why a golden AMI
 
 The fallback bootstrap (plain Amazon Linux 2023) installs Docker, Caddy, the CloudWatch
-Agent, and an agent runtime on **every** first boot — slow and dependent on package mirrors.
-The golden AMI bakes all of that in once, so first boot only writes node-specific config and
-starts services.
+Agent, Node.js, and the agent bundle on **every** first boot — slow and dependent on package
+mirrors. The golden AMI bakes all of that in once, so first boot only writes node-specific
+config and starts services.
 
 ## What's baked in
 
@@ -18,13 +18,12 @@ builds from the latest Amazon Linux 2023 (x86_64) and installs:
 - **Docker**
 - **Caddy** (static binary)
 - **Amazon CloudWatch Agent**
-- **Node.js 22** (so the TS agent can run if selected)
-- **The Rust Launch Pad agent** — a static `x86_64-unknown-linux-musl` binary at
-  `/opt/launch-pad/agent`
+- **Node.js 22**
+- **The Launch Pad agent** — the TypeScript bundle at `/opt/launch-pad/agent.cjs`
 - Pre-created directories: `/etc/launch-pad`, `/var/lib/launch-pad`, `/opt/launch-pad`,
   `/var/log/launch-pad`
 
-The AMI is tagged `AgentType: rust` + `AgentVersion: <version>` so tooling can identify it.
+The AMI is tagged `AgentType: ts` + `AgentVersion: <version>` so tooling can identify it.
 
 ## Building the AMI
 
@@ -32,11 +31,10 @@ The AMI is tagged `AgentType: rust` + `AgentVersion: <version>` so tooling can i
 pnpm build:golden-ami        # runs scripts/build-golden-ami.sh
 ```
 
-The script (requires **Packer**, **cargo** with **cargo-zigbuild**, and ambient AWS
-credentials; region defaults to `us-east-1`):
+The script (requires **Packer** and ambient AWS credentials; region defaults to `us-east-1`):
 
-1. Cross-compiles the Rust agent: `cargo zigbuild --release --target x86_64-unknown-linux-musl`.
-2. Runs `packer init` + `packer build`, passing the binary path and agent version.
+1. Builds the workspace (`pnpm build`) to produce `packages/agent/dist/index.cjs`.
+2. Runs `packer init` + `packer build`, passing the bundle path and agent version.
 3. Post-processes Packer's `infra/packer/latest-manifest.json` via
    [`scripts/update-golden-ami-manifest.mjs`](../scripts/update-golden-ami-manifest.mjs),
    writing the per-region AMI id into
@@ -60,27 +58,19 @@ resolves in precedence order:
 `LAUNCHPAD_AMI_BOOTSTRAP=full` if your custom `LAUNCHPAD_AMI_ID` is *not* a Launch Pad
 golden image.
 
-## Bootstrap modes & agent runtimes
+## Bootstrap modes
 
-Two agent runtimes exist (see [agent.md](agent.md)): the production **TypeScript agent**
-(bundled to a single self-contained CJS file) and the **Rust agent** (static binary). The
-agent is **not distributed via npm** — artifacts are uploaded to S3 and fetched by
-cloud-init via presigned URL, except when already baked into the golden AMI.
+The agent is **not distributed via npm** — the bundle is uploaded to S3 (for upgrades) and
+either baked into the golden AMI or downloaded via presigned URL on full bootstrap.
 
-Defaults: golden AMI → `rust`, full bootstrap → `ts`. Override with `--agent rust|ts` on
-`node create` / `deploy`.
-
-| Bootstrap × runtime | What cloud-init does |
-| ------------------- | -------------------- |
-| golden + rust (default on golden) | Verifies preinstalled Docker + `/opt/launch-pad/agent`; **no downloads**. |
-| golden + ts | Downloads the TS CJS bundle from S3; Node 22 already baked. |
-| full + rust | Installs Docker/Caddy via dnf; downloads the Rust binary from S3 (no Node needed). |
-| full + ts (default on full) | Installs Docker/Caddy + Node.js 22; downloads the CJS bundle from S3. |
+| Bootstrap | What cloud-init does |
+| --------- | -------------------- |
+| **golden** | Verifies preinstalled Docker, Node, and `/opt/launch-pad/agent.cjs`; **no agent download**. Still uploads the bundle to S3 for `node upgrade-agent`. |
+| **full** | Installs Docker, Caddy, Node.js 22, and CloudWatch Agent via dnf; curls the agent bundle from a presigned S3 URL. |
 
 The generated **systemd unit** (`packages/cli/src/provision/systemd-unit.ts`) runs
-`/opt/launch-pad/agent` (rust) or `node /opt/launch-pad/agent.cjs` (ts), restarts always,
-and waits for Docker + network. The chosen `agentType` is recorded in the node's registry
-entry so instance replacement reuses it.
+`node /opt/launch-pad/agent.cjs`, restarts always, and waits for Docker + network. New nodes
+are recorded in the registry with `agentType: "ts"`.
 
 ## Operational gotchas
 
@@ -91,3 +81,5 @@ entry so instance replacement reuses it.
   not-yet-existing `desired.json` returns 403 (not 404) and a fresh node can't reconcile.
 - CI can pin an AMI with `LAUNCHPAD_AMI_ID` (+ `LAUNCHPAD_AMI_BOOTSTRAP=full` when it's not
   a golden image).
+- After removing the Rust agent, run `pnpm build:golden-ami` to publish a new TS golden AMI
+  before relying on the committed manifest entries.

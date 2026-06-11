@@ -1,27 +1,18 @@
-import type { AgentType } from "./agent-bundle";
-
 /** Path on the instance where the bundled agent is installed. */
 export const TS_AGENT_INSTALL_PATH = "/opt/launch-pad/agent.cjs";
-export const RUST_AGENT_INSTALL_PATH = "/opt/launch-pad/agent";
 
 /** systemd unit restarted after a bundle swap. */
 export const AGENT_SYSTEMD_UNIT = "launch-pad-agent";
-
-export function agentInstallPath(agentType: AgentType): string {
-  return agentType === "rust" ? RUST_AGENT_INSTALL_PATH : TS_AGENT_INSTALL_PATH;
-}
 
 /**
  * Bash script run on the instance: download the presigned bundle and restart the agent.
  * Passed to SSM as base64 to avoid quoting issues in presigned URLs.
  */
-export function renderRemoteUpgradeScript(bundleUrl: string, agentType: AgentType = "ts"): string {
-  const tmpPath = agentType === "rust" ? "/tmp/launch-pad-agent" : "/tmp/launch-pad-agent.cjs";
-  const installPath = agentInstallPath(agentType);
+export function renderRemoteUpgradeScript(bundleUrl: string): string {
   return `#!/bin/bash
 set -euo pipefail
-curl -fsSL ${shellQuote(bundleUrl)} -o ${tmpPath}
-sudo install -m 755 ${tmpPath} ${installPath}
+curl -fsSL ${shellQuote(bundleUrl)} -o /tmp/launch-pad-agent.cjs
+sudo install -m 755 /tmp/launch-pad-agent.cjs ${TS_AGENT_INSTALL_PATH}
 sudo systemctl restart ${AGENT_SYSTEMD_UNIT}
 sudo systemctl is-active --quiet ${AGENT_SYSTEMD_UNIT}
 `;

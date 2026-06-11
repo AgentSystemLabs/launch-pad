@@ -222,7 +222,6 @@ launch-pad deploy [options]
 | `--yes` | Skip confirmation prompts (required for auto-provision in CI) |
 | `--dry-run` | Plan only — no image push, S3 writes, or node creation |
 | `--ami <id>` | AMI id for auto-provisioned/recreated nodes |
-| `--agent <runtime>` | Agent runtime for new nodes (`rust` on golden AMI, `ts` on full bootstrap) |
 | `--restart` | Skip build/push; re-publish desired state and roll containers |
 | `--image <uri>` | Skip build/push; redeploy an existing ECR tag of one `--service` (rollback / promote) |
 
@@ -591,7 +590,6 @@ Provision an EC2 instance, bootstrap the agent, and register the node.
 | `--key-name <keypair>` | EC2 key pair for SSH (omit to disable SSH) |
 | `--ami <id>` | AMI id (default: Launch Pad golden AMI, falling back to latest Amazon Linux 2023) |
 | `--agent-version <semver>` | Agent version to install |
-| `--agent <runtime>` | Agent runtime (`rust` on golden AMI, `ts` on full bootstrap) |
 | `--dry-run` | Show plan without creating anything |
 | `--yes` | Skip launch confirmation |
 

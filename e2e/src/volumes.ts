@@ -3,8 +3,7 @@
  * `[[service.volumes]]` is mounted by the agent and its data SURVIVES a container
  * replacement (the whole point: SQLite, uploads, local caches don't reset on deploy).
  *
- * Worker-only (no domain → no Caddy/cert/DNS). Uses the TypeScript agent (`--agent ts`),
- * which is the runtime that mounts volumes today. The `examples/worker-with-volume`
+ * Worker-only (no domain → no Caddy/cert/DNS). The `examples/worker-with-volume`
  * fixture appends one line to a file on the mounted volume on every boot, so the line
  * count == the number of times the container has started — if the volume persisted.
  *
@@ -156,7 +155,7 @@ async function main(): Promise<boolean> {
   const cli = makeCli({ home, region });
   const dir = prepareFixture(project, node, service);
 
-  note(`run ${runId} · cluster ${cluster} · region ${region} · persistent volumes (worker, --agent ts)`);
+  note(`run ${runId} · cluster ${cluster} · region ${region} · persistent volumes (worker)`);
   note(`isolated LAUNCHPAD_HOME=${home}`);
 
   await execa("git", ["init", "-q"], { cwd: dir });
@@ -180,11 +179,11 @@ async function main(): Promise<boolean> {
   };
 
   try {
-    await step("create a cluster + provision a both node on the TypeScript agent", async () => {
+    await step("create a cluster + provision a both node", async () => {
       await cli.run(["cluster", "create", cluster, "--region", region]);
-      await cli.run(["node", "create", node, "--role", "both", "--cluster", cluster, "--agent", "ts", "--yes"]);
+      await cli.run(["node", "create", node, "--role", "both", "--cluster", cluster, "--yes"]);
       const show = await cli.json<NodeShow>(["node", "show", node, "--cluster", cluster]);
-      assertEquals(show.node.agentType, "ts", "node runs the TypeScript agent (which mounts volumes)");
+      assertEquals(show.node.agentType, "ts", "node runs the TypeScript agent");
       assert(!!show.node.instanceId, "node has an EC2 instance id");
     });
 

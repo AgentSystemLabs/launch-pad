@@ -9,9 +9,9 @@ import { CliError } from "../errors";
 import { uploadAndPresignAgent } from "./agent-bundle";
 import {
   AGENT_SYSTEMD_UNIT,
-  agentInstallPath,
   renderRemoteUpgradeScript,
   ssmRunBashScript,
+  TS_AGENT_INSTALL_PATH,
 } from "./agent-upgrade";
 
 /**
@@ -65,7 +65,6 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
   const { aws, entry, agentVersion } = p;
   const report = p.onProgress ?? (() => {});
   const { nodeId, clusterId } = entry;
-  const agentType = entry.agentType;
 
   if (!entry.instanceId) {
     throw new CliError(`node "${nodeId}" has no EC2 instance yet`, {
@@ -77,25 +76,24 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
   const obs = obsMap.get(entry.instanceId) ?? { kind: "missing" as const };
   requireRunningInstance(obs, nodeId);
 
-  report(`uploading ${agentType === "rust" ? "rust agent binary" : "agent bundle"} for ${nodeId}`);
+  report(`uploading agent bundle for ${nodeId}`);
   const bundleUrl = await uploadAndPresignAgent(
     aws.s3,
     aws.bucket,
     clusterId,
     nodeId,
-    agentType,
     UPGRADE_PRESIGN_TTL_SECONDS,
   );
 
   if (p.uploadOnly) {
     await updateRegistryAgentVersion(aws, entry, agentVersion);
-    return { nodeId, instanceId: entry.instanceId, agentType, delivery: "upload-only", bundleUrl };
+    return { nodeId, instanceId: entry.instanceId, agentType: "ts", delivery: "upload-only", bundleUrl };
   }
 
   report(`installing on ${entry.instanceId} via SSM`);
   await ensureSsmManagedPolicyForNode(aws.iam, entry);
 
-  const script = renderRemoteUpgradeScript(bundleUrl, agentType);
+  const script = renderRemoteUpgradeScript(bundleUrl);
   try {
     const outcomes = await runShellScriptOnInstances(
       aws.ssm,
@@ -115,7 +113,7 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
     return {
       nodeId,
       instanceId: entry.instanceId,
-      agentType,
+      agentType: entry.agentType,
       delivery: "manual",
       bundleUrl,
       error: message,
@@ -123,7 +121,7 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
   }
 
   await updateRegistryAgentVersion(aws, entry, agentVersion);
-  return { nodeId, instanceId: entry.instanceId, agentType, delivery: "ssm" };
+  return { nodeId, instanceId: entry.instanceId, agentType: "ts", delivery: "ssm" };
 }
 
 async function updateRegistryAgentVersion(
@@ -131,7 +129,7 @@ async function updateRegistryAgentVersion(
   entry: NodeRegistryEntry,
   agentVersion: string,
 ): Promise<void> {
-  const updated: NodeRegistryEntry = { ...entry, agentVersion };
+  const updated: NodeRegistryEntry = { ...entry, agentVersion, agentType: "ts" };
   await putJson(aws.s3, aws.bucket, nodeRegistryKey(entry.clusterId, entry.nodeId), updated);
 }
 
@@ -139,18 +137,16 @@ async function updateRegistryAgentVersion(
 export function manualUpgradeHint(
   nodeId: string,
   bundleUrl: string,
-  agentType: NodeRegistryEntry["agentType"] = "ts",
   ttlSeconds = UPGRADE_PRESIGN_TTL_SECONDS,
 ): string {
   // Inline the real (quoted) URL into the curl line so the block is copy-paste
   // runnable as-is — the old `<presigned-url>` placeholder forced the operator to
   // hunt for the URL on a separate line. The TTL note is derived from the same
   // constant used to sign the URL, so it can't claim a wrong expiry.
-  const tmpPath = agentType === "rust" ? "/tmp/launch-pad-agent" : "/tmp/launch-pad-agent.cjs";
   return [
     `  ${nodeId}:`,
-    `    curl -fsSL '${bundleUrl}' -o ${tmpPath}`,
-    `    sudo install -m 755 ${tmpPath} ${agentInstallPath(agentType)}`,
+    `    curl -fsSL '${bundleUrl}' -o /tmp/launch-pad-agent.cjs`,
+    `    sudo install -m 755 /tmp/launch-pad-agent.cjs ${TS_AGENT_INSTALL_PATH}`,
     `    sudo systemctl restart ${AGENT_SYSTEMD_UNIT}`,
     "",
     "  Connect with EC2 Instance Connect (console) or SSH if the node has port 22 open.",
