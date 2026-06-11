@@ -114,7 +114,12 @@ Shipped:
   (not on-demand) monitoring, cert-renewal-fail + node-drift signals, and a deploy-convergence-fail
   hook (deploy already exits non-zero on non-convergence, which is CI-gateable today)._
 - [ ] **External uptime check** — synthetic HTTPS probe independent of the node (or integrated Route53 health check).
-- [ ] **Dashboard production story** — local Bun dashboard exists but is localhost-only, no auth; not a hosted control plane. Document gap or ship hosted/managed option.
+- [x] **Dashboard production story** — documented the gap in [`docs/dashboard.md`](docs/dashboard.md#production-story-the-gap):
+  the dashboard is a local operator convenience (localhost-only, no auth, drives the CLI with your
+  local AWS creds), **not** a hosted control plane — and a hosted one is deliberately out of scope
+  (Launch Pad is declarative with no control-plane server). Documents the supported shared-operation
+  paths instead: CI/CD (OIDC) as the shared control surface, scheduled `alerts check`/`cost --budget`
+  gates with webhooks, or running the dashboard behind your own auth/SSH tunnel.
 
 ### Data & stateful apps
 
@@ -174,7 +179,10 @@ Shipped:
   `cluster use`, …), and global flags. Pure `commandTree` + per-shell `generateCompletion`
   (`cli/src/completions/generate.ts`) unit-tested (5); each generated script validated for syntax
   (`bash -n`, `zsh -n`) + a functional bash check (prefix-filter + subcommand expansion).
-- [ ] **Global npm install story** — `npx` works; document global install, version pinning, and upgrade path for non-Node shops.
+- [x] **Global npm install story** — [`docs/getting-started.md`](docs/getting-started.md#installing-the-cli)
+  now documents the install options (npx / `npm i -g` / pin a version for reproducible CI / dev
+  dependency), the two bins (`launch-pad` + `lpd`), the upgrade path (`@latest`), and the
+  CLI-bundles-the-agent ordering caveat (upgrade CLI → `node upgrade-agent` → deploy across a wire change).
 
 ### Platform & integrations
 

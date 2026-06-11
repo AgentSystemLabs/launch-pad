@@ -65,3 +65,27 @@ bun run test:e2e
   the CLI returns.
 - `logs` requires a registered project directory (the CLI derives the project from its
   `launch-pad.toml`).
+
+## Production story (the gap)
+
+The dashboard is a **local operator convenience, not a hosted control plane.** It binds to
+`127.0.0.1` with **no authentication** and drives the CLI as a subprocess using **your local AWS
+credentials** — so it is exactly as powerful as your shell, and must never be exposed publicly.
+There is intentionally no multi-user, RBAC, audit, or always-on hosted version: Launch Pad's
+design is **declarative with no control-plane server** (the CLI writes desired state to S3; each
+node's agent reconciles), and a hosted dashboard would reintroduce the control plane that design
+deliberately omits (see [overview.md](overview.md) — API / control-plane / web-app are out of
+scope).
+
+If you want a shared, authenticated, always-on view today, the supported paths are:
+
+- **CI/CD as the shared control surface** — deploys run through GitHub Actions (OIDC, keyless;
+  `launch-pad setup github-oidc`), so the team operates through reviewed pull requests + workflow
+  runs rather than a shared web app.
+- **Scheduled health + cost gates** — run `launch-pad alerts check --webhook …` and
+  `launch-pad cost --budget …` on a schedule (cron / a GitHub Action); both exit non-zero on a
+  problem and can post to Slack/Discord, giving a hosted-style signal without a hosted server.
+- **Run the dashboard behind your own auth** — e.g. an authenticating reverse proxy or an SSH
+  tunnel to the operator's machine — if you accept that it wields that machine's AWS credentials.
+
+A first-class hosted/managed control plane remains explicitly out of scope.

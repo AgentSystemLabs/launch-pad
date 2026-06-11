@@ -24,6 +24,27 @@ docker buildx version
 aws sts get-caller-identity   # confirms credentials work
 ```
 
+### Installing the CLI
+
+The CLI ships as `@agentsystemlabs/launch-pad` and exposes two binaries: `launch-pad` and the
+short alias `lpd`.
+
+- **No install (recommended for trying it / CI):** `npx @agentsystemlabs/launch-pad <command>`.
+- **Global install:** `npm i -g @agentsystemlabs/launch-pad` (or `pnpm add -g …`), then run
+  `launch-pad` / `lpd` directly.
+- **Pin a version** so deploys are reproducible (especially in CI — an unpinned `npx` floats to
+  the latest): `npx @agentsystemlabs/launch-pad@<version> deploy`, or add it as a dev dependency
+  (`npm i -D @agentsystemlabs/launch-pad@<version>`) and run it via a package script.
+- **Upgrade:** `npm i -g @agentsystemlabs/launch-pad@latest` (global) or bump the pinned version.
+  The CLI bundles the node agent, so upgrading the CLI is also how you get a newer agent — run
+  `launch-pad node upgrade-agent` afterward to roll it onto running nodes.
+
+> The CLI ↔ agent wire contract is versioned, so the safe order when upgrading across a wire
+> change is: upgrade the CLI → `node upgrade-agent` (all nodes) → deploy.
+
+Optional: `launch-pad completions <bash|zsh|fish>` prints a tab-completion script (see
+[cli.md](cli.md#completions)).
+
 ### AWS account
 
 Launch Pad creates and manages resources in **your** AWS account. The CLI needs permission
