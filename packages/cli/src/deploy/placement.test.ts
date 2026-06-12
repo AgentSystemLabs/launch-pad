@@ -1,77 +1,20 @@
+import { NODE_ID_REGEX } from "@agentsystemlabs/launch-pad-shared";
 import { describe, expect, it } from "vitest";
-import type { NodeRole, ServiceDecl } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 import {
   bootstrapCandidateNode,
   type CandidateNode,
   CapacityPlacementError,
   type ClusterServiceInput,
-  distributeReplicas,
-  nextAppNodeId,
   planClusterPlacement,
   planClusterPlacementAutoAdd,
-  planPlacement,
   templateCandidateNode,
 } from "./placement";
 
-function decl(over: Partial<ServiceDecl>): ServiceDecl {
-  return {
-    name: "web",
-    dockerfile: "./Dockerfile",
-    context: ".",
-    replicas: 1,
-    cpu: 256,
-    memory: 256,
-    env: {},
-    rollout: { maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" },
-    ...over,
-  } as ServiceDecl;
-}
-
-describe("planPlacement", () => {
-  it("places all replicas on a single node", () => {
-    expect(planPlacement(decl({ node: "a", replicas: 2 }))).toEqual([{ nodeId: "a", replicas: 2 }]);
-  });
-
-  it("round-robins evenly across nodes", () => {
-    expect(planPlacement(decl({ nodes: ["a", "b"], replicas: 4 }))).toEqual([
-      { nodeId: "a", replicas: 2 },
-      { nodeId: "b", replicas: 2 },
-    ]);
-  });
-
-  it("gives the remainder to the earlier nodes", () => {
-    expect(planPlacement(decl({ nodes: ["a", "b"], replicas: 3 }))).toEqual([
-      { nodeId: "a", replicas: 2 },
-      { nodeId: "b", replicas: 1 },
-    ]);
-  });
-
-  it("drops nodes that receive zero replicas", () => {
-    expect(planPlacement(decl({ nodes: ["a", "b", "c"], replicas: 1 }))).toEqual([
-      { nodeId: "a", replicas: 1 },
-    ]);
-  });
-});
-
-describe("distributeReplicas (cluster auto-placement)", () => {
-  it("spreads replicas round-robin across resolved cluster nodes", () => {
-    expect(distributeReplicas(["dev-app", "staging-app"], 3)).toEqual([
-      { nodeId: "dev-app", replicas: 2 },
-      { nodeId: "staging-app", replicas: 1 },
-    ]);
-  });
-
-  it("returns nothing when the cluster has no app nodes", () => {
-    expect(distributeReplicas([], 4)).toEqual([]);
-  });
-});
-
 /** A candidate with 2 vCPU / 2048 MB allocatable and nothing running, unless overridden. */
-function cnode(nodeId: string, role: NodeRole = "app", over: Partial<CandidateNode> = {}): CandidateNode {
+function cnode(nodeId: string, over: Partial<CandidateNode> = {}): CandidateNode {
   return {
     nodeId,
-    role,
     allocatableCpu: 2048,
     allocatableMemory: 2048,
     steadyCpu: 0,
@@ -90,74 +33,39 @@ function svc(over: Partial<ClusterServiceInput> = {}): ClusterServiceInput {
     memory: 256,
     maxSurge: 1,
     isWeb: true,
-    explicitEdge: null,
-    schedule: "even",
-    topology: "auto",
+    hasVolumes: false,
+    stickyNodeId: null,
     ...over,
   };
 }
 
-function plan(
-  nodes: CandidateNode[],
-  services: ClusterServiceInput[],
-  clusterDefaultEdge: string | null = null,
-) {
-  return planClusterPlacement({ clusterId: "lower", clusterDefaultEdge, nodes, services });
+function plan(nodes: CandidateNode[], services: ClusterServiceInput[]) {
+  return planClusterPlacement({ clusterId: "lower", nodes, services });
 }
 
 describe("bootstrapCandidateNode (empty-cluster bootstrap)", () => {
-  it("is a both-role node so it's eligible for every topology's pool", () => {
+  it("is an empty app candidate with the given id", () => {
     const n = bootstrapCandidateNode("app-1");
     expect(n.nodeId).toBe("app-1");
-    expect(n.role).toBe("both");
     expect(n.steadyCpu).toBe(0);
     expect(n.steadyMemory).toBe(0);
+    expect(n.maxSurgeCpu).toBe(0);
+    expect(n.maxSurgeMemory).toBe(0);
   });
 
   it("has enough capacity that the planner places a large demand onto it", () => {
     const n = bootstrapCandidateNode("app-1");
     // A worker the largest real instance couldn't hold still fits the synthetic node —
     // the real instance is auto-sized to the demand at provision time, not here.
-    const [p] = plan([n], [svc({ isWeb: false, schedule: "capacity", cpu: 8192, memory: 65536, replicas: 4 })], null);
+    const [p] = plan([n], [svc({ isWeb: false, cpu: 8192, memory: 65536, replicas: 4 })]);
     expect(p?.placements).toEqual([{ nodeId: "app-1", replicas: 4 }]);
-  });
-
-  it("places a co-located web service onto the single bootstrap node (no edge)", () => {
-    const [p] = plan([bootstrapCandidateNode("app-1")], [svc({ topology: "co-located", replicas: 2 })], null);
-    expect(p?.placements).toEqual([{ nodeId: "app-1", replicas: 2 }]);
-    expect(p?.edge).toBeNull();
-  });
-
-  it("routes a split web service through the cluster default edge onto the bootstrap node", () => {
-    const [p] = plan([bootstrapCandidateNode("app-1")], [svc({ topology: "split" })], "edge-1");
-    expect(p?.placements).toEqual([{ nodeId: "app-1", replicas: 1 }]);
-    expect(p?.edge).toBe("edge-1");
-  });
-
-  it("still rejects a split service with no edge (planner owns the topology rules)", () => {
-    expect(() => plan([bootstrapCandidateNode("app-1")], [svc({ topology: "split" })], null)).toThrow(
-      /topology = "split" but no edge fronts it/,
-    );
-  });
-});
-
-describe("nextAppNodeId", () => {
-  it("returns app-1 for an empty cluster", () => {
-    expect(nextAppNodeId([])).toBe("app-1");
-  });
-  it("returns the lowest unused app-<n>", () => {
-    expect(nextAppNodeId(["app-1", "node-x"])).toBe("app-2");
-    expect(nextAppNodeId(["app-1", "app-2"])).toBe("app-3");
-    // Reuses a freed lower index.
-    expect(nextAppNodeId(["app-2", "app-3"])).toBe("app-1");
   });
 });
 
 describe("templateCandidateNode", () => {
-  it("sizes a new node like the cluster's largest existing node (role both, zero demand)", () => {
-    const existing = [cnode("a", "app", { allocatableCpu: 1024, allocatableMemory: 2048 }), cnode("b")];
+  it("sizes a new node like the cluster's largest existing node (zero demand)", () => {
+    const existing = [cnode("a", { allocatableCpu: 1024, allocatableMemory: 2048 }), cnode("b")];
     const t = templateCandidateNode("app-2", existing);
-    expect(t.role).toBe("both");
     expect(t.allocatableCpu).toBe(2048); // max(1024, 2048)
     expect(t.allocatableMemory).toBe(2048);
     expect(t.steadyCpu).toBe(0);
@@ -169,197 +77,200 @@ describe("templateCandidateNode", () => {
 });
 
 describe("planClusterPlacementAutoAdd", () => {
-  const input = (nodes: CandidateNode[], services: ClusterServiceInput[], edge: string | null = null) => ({
+  const input = (nodes: CandidateNode[], services: ClusterServiceInput[]) => ({
     clusterId: "lower",
-    clusterDefaultEdge: edge,
     nodes,
     services,
   });
 
-  it("adds no node when the existing pool already fits (capacity schedule)", () => {
-    const nodes = [cnode("a", "app", { allocatableCpu: 4096, allocatableMemory: 4096 })];
+  it("adds no node when the existing pool already fits", () => {
+    const nodes = [cnode("a", { allocatableCpu: 4096, allocatableMemory: 4096 })];
     const { plans, added } = planClusterPlacementAutoAdd(
-      input(nodes, [svc({ schedule: "capacity", isWeb: false, replicas: 2 })]),
+      input(nodes, [svc({ isWeb: false, replicas: 2 })]),
       { maxAdd: 8, existingNodeIds: ["a"] },
     );
     expect(added).toEqual([]);
     expect(plans[0]?.placements).toEqual([{ nodeId: "a", replicas: 2 }]);
   });
 
-  it("auto-adds capacity-schedule nodes until every replica fits", () => {
-    // One small node (fits ~1 replica incl. surge); 3 replicas need more nodes.
-    const nodes = [cnode("a", "app", { allocatableCpu: 512, allocatableMemory: 512 })];
+  it("auto-adds nodes until every replica fits", () => {
+    const nodes = [cnode("a", { allocatableCpu: 512, allocatableMemory: 512 })];
     const { plans, added } = planClusterPlacementAutoAdd(
-      input(nodes, [svc({ schedule: "capacity", isWeb: false, cpu: 256, memory: 256, replicas: 3 })]),
+      input(nodes, [svc({ isWeb: false, cpu: 256, memory: 256, replicas: 3 })]),
       { maxAdd: 8, existingNodeIds: ["a"] },
     );
     const total = plans[0]!.placements.reduce((n, p) => n + p.replicas, 0);
     expect(total).toBe(3);
     expect(added.length).toBeGreaterThan(0);
-    expect(added.every((n) => n.role === "both")).toBe(true);
-    // Names are app-<n>, not colliding with the existing "a".
-    expect(added.map((n) => n.nodeId)).toEqual(added.map((n) => n.nodeId).filter((id) => /^app-\d+$/.test(id)));
+    // Added nodes get generated names that are valid node ids and collide with nothing.
+    const ids = added.map((n) => n.nodeId);
+    for (const id of ids) expect(id).toMatch(NODE_ID_REGEX);
+    expect(new Set([...ids, "a"]).size).toBe(ids.length + 1);
   });
 
-  it("auto-adds for an EVEN schedule when the round-robin spread overflows the pool", () => {
-    // 2 nodes, each fits 1 replica (256 + 256 surge = 512); 4 replicas even = 2/node → overflow.
+  it("auto-adds when spread replicas overflow the pool", () => {
     const nodes = [
-      cnode("a", "app", { allocatableCpu: 512, allocatableMemory: 512 }),
-      cnode("b", "app", { allocatableCpu: 512, allocatableMemory: 512 }),
+      cnode("a", { allocatableCpu: 512, allocatableMemory: 512 }),
+      cnode("b", { allocatableCpu: 512, allocatableMemory: 512 }),
     ];
     const { plans, added } = planClusterPlacementAutoAdd(
-      input(nodes, [svc({ schedule: "even", isWeb: false, cpu: 256, memory: 256, replicas: 4 })], "e"),
+      input(nodes, [svc({ isWeb: false, cpu: 256, memory: 256, replicas: 4 })]),
       { maxAdd: 8, existingNodeIds: ["a", "b"] },
     );
     expect(added.length).toBeGreaterThan(0);
-    // After adding, no node holds more than it can fit (256 steady + 256 surge ≤ 512).
     for (const p of plans[0]!.placements) {
       expect(p.replicas).toBeLessThanOrEqual(1);
     }
   });
 
-  it("does not add for an even overflow when maxAdd is 0 (returns the plan; deploy errors later)", () => {
-    const nodes = [cnode("a", "app", { allocatableCpu: 512, allocatableMemory: 512 })];
-    const { plans, added } = planClusterPlacementAutoAdd(
-      input(nodes, [svc({ schedule: "even", isWeb: false, cpu: 256, memory: 256, replicas: 4 })], "e"),
-      { maxAdd: 0, existingNodeIds: ["a"] },
-    );
-    expect(added).toEqual([]);
-    expect(plans[0]?.placements).toEqual([{ nodeId: "a", replicas: 4 }]);
-  });
-
-  it("rethrows a capacity error when maxAdd is 0 (capacity schedule)", () => {
-    const nodes = [cnode("a", "app", { allocatableCpu: 256, allocatableMemory: 256 })];
+  it("rethrows a capacity error when maxAdd is 0", () => {
+    const nodes = [cnode("a", { allocatableCpu: 256, allocatableMemory: 256 })];
     expect(() =>
       planClusterPlacementAutoAdd(
-        input(nodes, [svc({ schedule: "capacity", isWeb: false, cpu: 256, memory: 256, replicas: 3 })]),
+        input(nodes, [svc({ isWeb: false, cpu: 256, memory: 256, replicas: 3 })]),
         { maxAdd: 0, existingNodeIds: ["a"] },
       ),
     ).toThrow(CapacityPlacementError);
   });
 
-  it("rethrows a NON-capacity planner error immediately (adding nodes won't fix it)", () => {
-    const nodes = [cnode("a", "app", { allocatableCpu: 4096, allocatableMemory: 4096 })];
+  it("rethrows a NON-capacity planner error immediately (adding nodes won't fix a full sticky volume node)", () => {
+    // The volume service is stuck on "a" which is too small for it — auto-add must NOT
+    // grow the pool (the data can't move), it must surface the sticky-node error as-is.
+    const nodes = [cnode("a", { allocatableCpu: 256, allocatableMemory: 256 })];
     expect(() =>
-      planClusterPlacementAutoAdd(input(nodes, [svc({ topology: "split" })]), {
-        maxAdd: 8,
-        existingNodeIds: ["a"],
-      }),
-    ).toThrow(/topology = "split" but no edge fronts it/);
+      planClusterPlacementAutoAdd(
+        input(nodes, [svc({ isWeb: false, hasVolumes: true, stickyNodeId: "a", cpu: 512, memory: 512 })]),
+        { maxAdd: 8, existingNodeIds: ["a"] },
+      ),
+    ).toThrow(/no longer has capacity/);
   });
-});
 
-describe("planClusterPlacement: even + auto (legacy byte-compat)", () => {
-  it("matches distributeReplicas over the app+both pool for every pool/replica combo", () => {
-    for (const poolIds of [["a"], ["a", "b"], ["a", "b", "c"]]) {
-      for (const replicas of [1, 3, 4]) {
-        const nodes = poolIds.map((id) => cnode(id));
-        const [p] = plan(nodes, [svc({ replicas })], "edge-1");
-        expect(p?.placements).toEqual(distributeReplicas(poolIds, replicas));
-        expect(p?.pool).toEqual(poolIds);
+  it("packs multi-service deploys onto free nodes without auto-adding", () => {
+    const nodes = [
+      cnode("auth-example-1", { steadyCpu: 1024, steadyMemory: 1024, allocatableCpu: 1792, allocatableMemory: 1536 }),
+      cnode("auth-example-node", { allocatableCpu: 1792, allocatableMemory: 1536 }),
+      cnode("biggie-smalls", { allocatableCpu: 1792, allocatableMemory: 7680 }),
+    ];
+    const services = ["auth", "portal", "notes", "chat"].map((name) =>
+      svc({ name, cpu: 256, memory: 256, replicas: 1 }),
+    );
+    const { plans, added } = planClusterPlacementAutoAdd(input(nodes, services), {
+      maxAdd: 4,
+      existingNodeIds: nodes.map((n) => n.nodeId),
+    });
+    expect(added).toEqual([]);
+    expect(plans).toHaveLength(4);
+    const byNode = new Map<string, string[]>();
+    for (const p of plans) {
+      for (const pl of p.placements) {
+        const list = byNode.get(pl.nodeId) ?? [];
+        list.push(p.service);
+        byNode.set(pl.nodeId, list);
       }
     }
+    // Nothing lands on the prod-loaded node — free nodes absorb the footprint.
+    expect(byNode.has("auth-example-1")).toBe(false);
+    expect(byNode.get("auth-example-node")?.length).toBeGreaterThan(0);
+    expect(byNode.get("biggie-smalls")?.length).toBeGreaterThan(0);
+  });
+});
+
+describe("planClusterPlacement: pool", () => {
+  it("registers the full eligible pool even for nodes that receive zero replicas", () => {
+    const nodes = [cnode("a"), cnode("b")];
+    const [p] = plan(nodes, [svc()]);
+    expect(p?.pool).toEqual(["a", "b"]);
+    expect(p?.placements.reduce((n, pl) => n + pl.replicas, 0)).toBe(1);
+  });
+});
+
+describe("planClusterPlacement: volume services (single-node + sticky)", () => {
+  it("puts ALL replicas of a volume service on ONE node", () => {
+    const nodes = [cnode("a"), cnode("b")];
+    const [p] = plan(nodes, [svc({ hasVolumes: true, replicas: 3 })]);
+    expect(p?.placements).toHaveLength(1);
+    expect(p?.placements[0]?.replicas).toBe(3);
   });
 
-  it("excludes edge-role nodes from the pool but keeps both-role nodes", () => {
-    const nodes = [cnode("a"), cnode("b", "both"), cnode("e", "edge")];
-    const [p] = plan(nodes, [svc({ replicas: 3 })], "e");
-    expect(p?.placements).toEqual(distributeReplicas(["a", "b"], 3));
+  it("first deploy (stickyNodeId null) picks the node with the best headroom that fits all replicas", () => {
+    const nodes = [cnode("a", { steadyCpu: 1024, steadyMemory: 1024 }), cnode("b")];
+    const [p] = plan(nodes, [svc({ hasVolumes: true, replicas: 4 })]);
+    expect(p?.placements).toEqual([{ nodeId: "b", replicas: 4 }]);
   });
 
-  it("resolves edge as explicitEdge ?? clusterDefaultEdge, even for a single-node pool", () => {
-    expect(plan([cnode("a")], [svc()], "edge-1")[0]?.edge).toBe("edge-1");
-    expect(plan([cnode("a")], [svc({ explicitEdge: "edge-2" })], "edge-1")[0]?.edge).toBe("edge-2");
-    expect(plan([cnode("a")], [svc()])[0]?.edge).toBeNull();
+  it("keeps a deployed volume service on its sticky node even when another node has more headroom", () => {
+    const nodes = [cnode("a", { steadyCpu: 1024, steadyMemory: 1024 }), cnode("b")];
+    const [p] = plan(nodes, [svc({ hasVolumes: true, stickyNodeId: "a", replicas: 2 })]);
+    expect(p?.placements).toEqual([{ nodeId: "a", replicas: 2 }]);
   });
 
-  it("errors with the legacy message when a multi-node-pool web service has no edge", () => {
-    expect(() => plan([cnode("a"), cnode("b")], [svc({ replicas: 1 })])).toThrow(
-      /service "web" spans 2 nodes but has no edge to load-balance them/,
-    );
+  it("throws a plain CliError (NOT CapacityPlacementError) when the sticky node no longer fits", () => {
+    const nodes = [cnode("a", { allocatableCpu: 512, allocatableMemory: 512 }), cnode("b")];
+    const attempt = () =>
+      plan(nodes, [svc({ hasVolumes: true, stickyNodeId: "a", cpu: 512, memory: 512, replicas: 2 })]);
+    expect(attempt).toThrow(CliError);
+    expect(attempt).toThrow(/persistent volumes on node "a"/);
+    expect(attempt).toThrow(/no longer has capacity/);
     try {
-      plan([cnode("a"), cnode("b")], [svc()]);
+      attempt();
       expect.unreachable();
     } catch (e) {
-      expect((e as CliError).hint).toMatch(/cluster set-edge lower/);
+      expect(e).not.toBeInstanceOf(CapacityPlacementError);
+      expect((e as CliError).hint).toMatch(/can't move nodes without stranding its data/);
     }
   });
 
-  it("gives a worker a null edge even when the cluster has a default edge", () => {
-    const [p] = plan([cnode("a"), cnode("b")], [svc({ isWeb: false, replicas: 2 })], "edge-1");
-    expect(p?.edge).toBeNull();
-    expect(p?.placements).toEqual(distributeReplicas(["a", "b"], 2));
+  it("places fresh on the best single node when the sticky node is gone (destroyed)", () => {
+    const nodes = [cnode("a", { steadyCpu: 512, steadyMemory: 512 }), cnode("b")];
+    const [p] = plan(nodes, [svc({ hasVolumes: true, stickyNodeId: "gone", replicas: 2 })]);
+    expect(p?.placements).toEqual([{ nodeId: "b", replicas: 2 }]);
   });
-});
 
-describe("planClusterPlacement: split", () => {
-  it("requires an edge even with a single-node pool", () => {
-    expect(() => plan([cnode("a")], [svc({ topology: "split" })])).toThrow(
-      /topology = "split" but no edge fronts it/,
+  it("throws CapacityPlacementError when no node fits a first-deploy volume service", () => {
+    const nodes = [cnode("a", { allocatableCpu: 512, allocatableMemory: 512 })];
+    expect(() => plan(nodes, [svc({ hasVolumes: true, cpu: 512, memory: 512, replicas: 2 })])).toThrow(
+      CapacityPlacementError,
     );
   });
 
-  it("uses the explicit edge over the cluster default", () => {
-    const [p] = plan([cnode("a")], [svc({ topology: "split", explicitEdge: "edge-2" })], "edge-1");
-    expect(p?.edge).toBe("edge-2");
-  });
-
-  it("distributes evenly over the app+both pool", () => {
-    const nodes = [cnode("a"), cnode("b", "both")];
-    const [p] = plan(nodes, [svc({ topology: "split", replicas: 3 })], "edge-1");
-    expect(p?.placements).toEqual(distributeReplicas(["a", "b"], 3));
-    expect(p?.edge).toBe("edge-1");
-  });
-});
-
-describe("planClusterPlacement: co-located", () => {
-  it("puts all replicas on the first both-role node under even", () => {
-    const nodes = [cnode("a"), cnode("b", "both"), cnode("c", "both")];
-    const [p] = plan(nodes, [svc({ topology: "co-located", replicas: 3 })], "edge-1");
-    expect(p?.placements).toEqual([{ nodeId: "b", replicas: 3 }]);
-    expect(p?.pool).toEqual(["b", "c"]);
-  });
-
-  it("keeps edge null even when the cluster has a default edge", () => {
-    const [p] = plan([cnode("b", "both")], [svc({ topology: "co-located" })], "edge-1");
-    expect(p?.edge).toBeNull();
-  });
-
-  it("errors when the cluster has no both-role node", () => {
-    expect(() => plan([cnode("a"), cnode("e", "edge")], [svc({ topology: "co-located" })])).toThrow(
-      /no both-role node to host it/,
-    );
-  });
-
-  it("under capacity, picks the both node with room for ALL replicas", () => {
+  it("commits the volume service's demand so a later service sees it", () => {
     const nodes = [
-      cnode("b1", "both", { steadyCpu: 1024, steadyMemory: 1024 }),
-      cnode("b2", "both"),
+      cnode("a", { allocatableCpu: 1024, allocatableMemory: 1024 }),
+      cnode("b", { allocatableCpu: 1024, allocatableMemory: 1024 }),
     ];
-    const [p] = plan(nodes, [svc({ topology: "co-located", schedule: "capacity", replicas: 4 })], null);
-    expect(p?.placements).toEqual([{ nodeId: "b2", replicas: 4 }]);
+    const db = svc({ name: "db", hasVolumes: true, stickyNodeId: "a", cpu: 512, memory: 512, isWeb: false });
+    const next = svc({ name: "next", cpu: 512, memory: 512, isWeb: false });
+    const plans = plan(nodes, [db, next]);
+    expect(plans[0]?.placements).toEqual([{ nodeId: "a", replicas: 1 }]);
+    expect(plans[1]?.placements).toEqual([{ nodeId: "b", replicas: 1 }]);
+  });
+
+  it("ignores stickyNodeId for a volume-less service", () => {
+    const nodes = [cnode("a", { steadyCpu: 1024, steadyMemory: 1024 }), cnode("b")];
+    const [p] = plan(nodes, [svc({ hasVolumes: false, stickyNodeId: "a" })]);
+    expect(p?.placements).toEqual([{ nodeId: "b", replicas: 1 }]);
   });
 });
 
-describe("planClusterPlacement: capacity", () => {
+describe("planClusterPlacement: bin-packing", () => {
   it("is deterministic — the same input twice yields the same plan", () => {
     const make = () => [
-      cnode("a", "app", { steadyCpu: 512, steadyMemory: 256 }),
+      cnode("a", { steadyCpu: 512, steadyMemory: 256 }),
       cnode("b"),
-      cnode("c", "both", { steadyCpu: 128, steadyMemory: 640 }),
+      cnode("c", { steadyCpu: 128, steadyMemory: 640 }),
     ];
-    const services = () => [svc({ schedule: "capacity", replicas: 5 })];
-    expect(plan(make(), services(), "e")).toEqual(plan(make(), services(), "e"));
+    const services = () => [svc({ replicas: 5 })];
+    expect(plan(make(), services())).toEqual(plan(make(), services()));
   });
 
   it("breaks exact ties by ascending nodeId", () => {
-    const [p] = plan([cnode("b"), cnode("a")], [svc({ schedule: "capacity" })], "e");
+    const [p] = plan([cnode("b"), cnode("a")], [svc()]);
     expect(p?.placements).toEqual([{ nodeId: "a", replicas: 1 }]);
   });
 
   it("prefers the node with the most headroom, alternating as headroom equalizes", () => {
-    const nodes = [cnode("a", "app", { steadyCpu: 1024, steadyMemory: 1024 }), cnode("b")];
-    const [p] = plan(nodes, [svc({ schedule: "capacity", cpu: 512, memory: 512, replicas: 3 })], "e");
+    const nodes = [cnode("a", { steadyCpu: 1024, steadyMemory: 1024 }), cnode("b")];
+    const [p] = plan(nodes, [svc({ cpu: 512, memory: 512, replicas: 3 })]);
     // b (empty) takes 2 to reach a's load; the equal-headroom tie goes to a by id.
     expect(p?.placements).toEqual([
       { nodeId: "a", replicas: 1 },
@@ -369,8 +280,8 @@ describe("planClusterPlacement: capacity", () => {
 
   it("skips a node that fits steady demand but not the rollout surge", () => {
     // One replica = 400 steady; two on one node = 800 steady + 400 surge = 1200 > 1024.
-    const nodes = [cnode("a", "app", { allocatableCpu: 1024 }), cnode("b", "app", { allocatableCpu: 1024 })];
-    const [p] = plan(nodes, [svc({ schedule: "capacity", cpu: 400, memory: 100, replicas: 2 })], "e");
+    const nodes = [cnode("a", { allocatableCpu: 1024 }), cnode("b", { allocatableCpu: 1024 })];
+    const [p] = plan(nodes, [svc({ cpu: 400, memory: 100, replicas: 2 })]);
     expect(p?.placements).toEqual([
       { nodeId: "a", replicas: 1 },
       { nodeId: "b", replicas: 1 },
@@ -382,10 +293,10 @@ describe("planClusterPlacement: capacity", () => {
     // needs 600+512+max(300,512)=1624 ≤ 2048 (ok on a), but a second replica needs
     // 600+1024+512=2136 > 2048 → it must go to b.
     const nodes = [
-      cnode("a", "app", { steadyCpu: 600, maxSurgeCpu: 300 }),
-      cnode("b", "app", { steadyCpu: 900 }),
+      cnode("a", { steadyCpu: 600, maxSurgeCpu: 300 }),
+      cnode("b", { steadyCpu: 900 }),
     ];
-    const [p] = plan(nodes, [svc({ schedule: "capacity", cpu: 512, memory: 64, replicas: 2 })], "e");
+    const [p] = plan(nodes, [svc({ cpu: 512, memory: 64, replicas: 2 })]);
     expect(p?.placements).toEqual([
       { nodeId: "a", replicas: 1 },
       { nodeId: "b", replicas: 1 },
@@ -393,30 +304,34 @@ describe("planClusterPlacement: capacity", () => {
   });
 
   it("lets a later service see an earlier service's consumption", () => {
-    const nodes = [cnode("a", "app", { allocatableCpu: 1024, allocatableMemory: 1024 }), cnode("b", "app", { allocatableCpu: 1024, allocatableMemory: 1024 })];
-    const big = svc({ name: "big", schedule: "capacity", cpu: 512, memory: 512, isWeb: false });
-    const next = svc({ name: "next", schedule: "capacity", cpu: 512, memory: 512, isWeb: false });
+    const nodes = [
+      cnode("a", { allocatableCpu: 1024, allocatableMemory: 1024 }),
+      cnode("b", { allocatableCpu: 1024, allocatableMemory: 1024 }),
+    ];
+    const big = svc({ name: "big", cpu: 512, memory: 512, isWeb: false });
+    const next = svc({ name: "next", cpu: 512, memory: 512, isWeb: false });
     const plans = plan(nodes, [big, next]);
     expect(plans[0]?.placements).toEqual([{ nodeId: "a", replicas: 1 }]);
     expect(plans[1]?.placements).toEqual([{ nodeId: "b", replicas: 1 }]);
   });
 
-  it("deprioritizes a node pre-seeded with pinned demand", () => {
-    const nodes = [cnode("a", "app", { steadyCpu: 768, steadyMemory: 768 }), cnode("b")];
-    const [p] = plan(nodes, [svc({ schedule: "capacity" })], "e");
+  it("deprioritizes a node pre-seeded with committed demand", () => {
+    const nodes = [cnode("a", { steadyCpu: 768, steadyMemory: 768 }), cnode("b")];
+    const [p] = plan(nodes, [svc()]);
     expect(p?.placements).toEqual([{ nodeId: "b", replicas: 1 }]);
   });
 
   it("fails with a per-node breakdown when nothing fits", () => {
     const nodes = [
-      cnode("a", "app", { allocatableCpu: 512, steadyCpu: 256 }),
-      cnode("b", "app", { allocatableCpu: 512, steadyCpu: 128 }),
+      cnode("a", { allocatableCpu: 512, steadyCpu: 256 }),
+      cnode("b", { allocatableCpu: 512, steadyCpu: 128 }),
     ];
     try {
-      plan(nodes, [svc({ schedule: "capacity", cpu: 256, memory: 64, replicas: 2 })], "e");
+      plan(nodes, [svc({ cpu: 256, memory: 64, replicas: 2 })]);
       expect.unreachable();
     } catch (e) {
       const err = e as CliError;
+      expect(err).toBeInstanceOf(CapacityPlacementError);
       expect(err.message).toMatch(/service "web" does not fit: replica \d of 2/);
       expect(err.message).toMatch(/a {2}free 0\.25 vCPU/);
       expect(err.message).toMatch(/b {2}free/);

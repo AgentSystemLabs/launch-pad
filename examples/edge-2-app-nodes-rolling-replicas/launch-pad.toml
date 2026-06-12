@@ -4,16 +4,15 @@
 #   node-app-a   (role: app)   — private, reachable only by the edge
 #   node-app-b   (role: app)   — private, reachable only by the edge
 #
-# Replicas are spread round-robin across both app nodes; the edge load-balances
-# app.agentsystem.dev across every healthy replica.
+# Placement is automatic: the scheduler bin-packs the 4 replicas across both
+# app nodes; the edge load-balances app.agentsystem.dev across every healthy
+# replica. The TOML names no infrastructure.
 project = "example-edge"
 
 [[service]]
 name = "web"
-nodes = ["node-app-a", "node-app-b"]
-edge = "node-edge"
-dockerfile = "../both-node-web-worker/Dockerfile"
-context = "../both-node-web-worker"
+dockerfile = "../web-worker/Dockerfile"
+context = "../web-worker"
 cpu = 256
 memory = 256
 replicas = 4

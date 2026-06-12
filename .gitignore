@@ -5,7 +5,7 @@ dist/
 .DS_Store
 .turbo/
 coverage/
-infra/packer/latest-manifest.json
+infra/packer/latest-manifest*.json
 
 # launch-pad local prefs/cache should never be committed from a project
 .launch-pad-cache/

@@ -1,5 +1,5 @@
 /**
- * launch-pad real-AWS end-to-end test.
+ * launchpad real-AWS end-to-end test.
  *
  * Gated, on-demand (NOT part of `pnpm test`). Drives the *built* CLI as a
  * subprocess against real AWS for a 1-edge + 1-app topology, and asserts the
@@ -211,7 +211,7 @@ async function main(): Promise<boolean> {
       const show = await cli.json<NodeShow>(["node", "show", appNode, "--cluster", cluster]);
       assertEquals(show.node.role, "app", "app node role is `app`");
       assert(!!show.node.privateIp, "app node has a private IP for the edge to dial");
-      // App nodes get a public IP for EGRESS only (launch-pad provisions no NAT /
+      // App nodes get a public IP for EGRESS only (launchpad provisions no NAT /
       // VPC endpoints, so they need outbound to pull from ECR + read S3). Privacy
       // is enforced at the INBOUND edge by the security group, which admits only
       // the edge SG — so the internet can't open ANY port. A security-group drop
@@ -230,7 +230,7 @@ async function main(): Promise<boolean> {
     });
 
     fixture = await prepareFixture({
-      project, service, appNode, edgeNode, domain, port, replicas: 2, cpu: 256, memory: 256,
+      project, service, domain, port, replicas: 2, cpu: 256, memory: 256,
     });
 
     await step("set an SSM secret via the CLI and register it in launch-pad.toml", async () => {
@@ -256,7 +256,9 @@ async function main(): Promise<boolean> {
       assert(!encoded.includes(secretV1), "desired.json does NOT contain the plaintext secret value");
     });
 
-    await step("point DNS at the edge and verify HTTPS (v1)", async () => {
+    await step("point DNS at the edge (as the user would) and verify HTTPS (v1)", async () => {
+      // Harness-only: the edge's EIP is freshly allocated this run, so the harness
+      // plays the user's "point your domain at the edge" step via Route53.
       zoneId = await dns.findZoneId(domain);
       const changeId = await dns.upsertA(zoneId, domain, edgeIp);
       await dns.waitInsync(changeId);
@@ -456,7 +458,7 @@ async function main(): Promise<boolean> {
   } finally {
     if (keep) {
       note(`--keep set — leaving cluster "${cluster}" running. Tear it down later with:`);
-      note(`  LAUNCHPAD_HOME=${home} launch-pad cluster destroy ${cluster} --yes`);
+      note(`  LAUNCHPAD_HOME=${home} launchpad cluster destroy ${cluster} --yes`);
     } else {
       await teardown();
     }

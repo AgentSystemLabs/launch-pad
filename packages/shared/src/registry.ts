@@ -10,7 +10,11 @@ export const NodeStateSchema = z.enum([
 ]);
 export type NodeState = z.infer<typeof NodeStateSchema>;
 
-/** What a node does: run app containers, be a Caddy edge router, or both. */
+/**
+ * What a node does: run app containers, front ingress (Caddy), or both (legacy).
+ * New provisions use `app` | `edge` only; `both` remains in the schema so
+ * pre-v2 node.json files still parse.
+ */
 export const NodeRoleSchema = z.enum(["app", "edge", "both"]);
 export type NodeRole = z.infer<typeof NodeRoleSchema>;
 
@@ -18,9 +22,9 @@ export type NodeRole = z.infer<typeof NodeRoleSchema>;
 export const NodeAgentTypeSchema = z.enum(["ts", "rust"]);
 export type NodeAgentType = z.infer<typeof NodeAgentTypeSchema>;
 
-/** `edge` / `both` need a stable public IP for DNS and HTTPS; `app` nodes are VPC-private only. */
+/** `edge` and legacy `both` need a stable public IP; `app` nodes are VPC-private only. */
 export function nodeUsesElasticIp(role: NodeRole): boolean {
-  return role !== "app";
+  return role === "edge" || role === "both";
 }
 
 /**
@@ -38,8 +42,8 @@ export const NodeRegistryEntrySchema = z
     instanceType: z.string().min(1),
     region: z.string().min(1),
     availabilityZone: z.string().nullable(),
-    /** Node role (defaults to "both" so pre-role node.json files still parse). */
-    role: NodeRoleSchema.default("both"),
+    /** Node role: "app" (containers, private), "edge" (Caddy router, public), or legacy "both". */
+    role: NodeRoleSchema,
     /** VPC-internal IP an edge dials to reach this node's app containers. */
     privateIp: z.string().nullable().default(null),
     /** Total CPU in vCPU shares (1024 = 1 vCPU). */
@@ -49,7 +53,7 @@ export const NodeRegistryEntrySchema = z
     reservedCpu: z.number().int().nonnegative(),
     reservedMemory: z.number().int().nonnegative(),
     publicIp: z.string().nullable(),
-    /** Elastic IP allocation id for edge/both nodes (stable public IP across stop/start). */
+    /** Elastic IP allocation id for the edge node (stable public IP across stop/start). */
     eipAllocationId: z.string().nullable().default(null),
     securityGroupId: z.string().nullable(),
     iamInstanceProfile: z.string().nullable(),

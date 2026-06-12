@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { Command } from "commander";
 import {
   agentIdForNode,
@@ -5,21 +6,22 @@ import {
   checkCapacity,
   DEFAULT_CLUSTER,
   desiredKey,
-  envProject,
+  footprintOwner,
+  generateNodeNames,
   HEARTBEAT_STALE_MS,
   type InstanceCapacity,
   isHeartbeatStale,
   LABEL_REGEX,
   type NodeRegistryEntry,
-  NodeRoleSchema,
+  nodePrefix,
   nodeRegistryKey,
   nodeUsesElasticIp,
+  ProvisionNodeRoleSchema,
   parseDesiredState,
   parseNodeRegistryEntry,
   parseNodeStatus,
   sharesToVcpu,
   statusKey,
-  usesClusterPlacement,
 } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../../aws/context";
 import {
@@ -35,15 +37,17 @@ import { awsErrorName, isDestroyAlreadyGoneError } from "../../aws/errors";
 import { deleteNodeIam, nodeProfileName, nodeRoleName } from "../../aws/iam";
 import { getClusterConfig, putClusterConfig } from "../../cluster/store";
 import { rememberClusterTarget } from "../../config/local";
-import { deleteObject, ensureBucket, getJson, listNodeIds, putJson } from "../../aws/s3-state";
+import { deletePrefix, ensureBucket, getJson, listNodeIds, putJson } from "../../aws/s3-state";
 import { applyNodeDrift } from "../../deploy/drift-apply";
 import { type NodeDrift, planNodeDrift } from "../../deploy/drift-plan";
 import { findConfigPath, loadConfig } from "../../config/load";
 import { CliError, EvacuationBlockedError } from "../../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
-import { resolveNodeAmi } from "../../provision/golden-ami";
+import { provisionRoleOf, resolveNodeAmi, resolveNodeAmiByRole } from "../../provision/golden-ami";
 import { installLoggingOnNode } from "../../provision/install-logging";
+import { parseCreateAmount, planNodeCreateNames } from "./create-names";
 import { registerMonitor } from "./monitor";
+import { type ResizeEvacuationPlan, planResizeEvacuation } from "./resize-evacuate";
 import { type RebalanceOptions, runRebalance } from "../rebalance";
 import {
   provisionNode,
@@ -65,7 +69,7 @@ async function loadNode(aws: AwsEnv, nodeId: string): Promise<NodeRegistryEntry>
   const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, nodeId));
   if (!obj) {
     throw new CliError(`node "${nodeId}" does not exist in cluster "${aws.clusterId}"`, {
-      hint: "list nodes with `launch-pad node list`",
+      hint: "list nodes with `launchpad node list`",
     });
   }
   return parseNodeRegistryEntry(obj.raw);
@@ -110,19 +114,27 @@ interface CreateOptions extends GlobalOpts {
   keyName?: string;
   ami?: string;
   agentVersion?: string;
+  amount?: string | number;
   yes?: boolean;
   dryRun?: boolean;
 }
 
-async function runCreate(name: string, opts: CreateOptions): Promise<void> {
-  assertValidNodeId(name);
+async function runCreate(baseName: string | undefined, opts: CreateOptions): Promise<void> {
+  if (baseName !== undefined) assertValidNodeId(baseName);
+  const amount = parseCreateAmount(opts.amount);
   if (opts.edge !== undefined) assertValidNodeId(opts.edge);
   const aws = await prepareAws(opts);
+  // No name given → generate `<noun>-<verb>-<adverb>` id(s), unique against the
+  // cluster's existing nodes. An explicit base name keeps the sequential behavior.
+  const names =
+    baseName !== undefined
+      ? planNodeCreateNames(baseName, amount)
+      : generateNodeNames(amount, await listNodeIds(aws.s3, aws.bucket, aws.clusterId));
   const agentVersion = opts.agentVersion ?? readVersion();
 
-  const roleResult = NodeRoleSchema.safeParse(opts.role);
+  const roleResult = ProvisionNodeRoleSchema.safeParse(opts.role);
   if (!roleResult.success) {
-    throw new CliError(`invalid --role "${opts.role}" (expected app | edge | both)`);
+    throw new CliError(`invalid --role "${opts.role}" (expected app | edge)`);
   }
   const role = roleResult.data;
 
@@ -131,37 +143,66 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
     ec2: aws.ec2,
     ssm: aws.ssm,
     region: aws.region,
+    role,
     explicitAmiId: opts.ami,
   });
   const amiId = ami.imageId;
   const vpcId = await getDefaultVpcId(aws.ec2);
 
-  const agentConfig = {
-    nodeId: name,
-    agentId: agentIdForNode(name),
-    bucket: aws.bucket,
-    region: aws.region,
-    clusterId: aws.clusterId,
-    role,
-  };
-
   if (opts.dryRun) {
-    const needsDownload = ami.bootstrapMode === "full";
-    const userData = renderUserData({
-      agent: agentConfig,
-      bundleUrl: needsDownload
-        ? "https://<state-bucket>.../agent.cjs?<presigned-at-launch>"
-        : undefined,
-      bootstrapMode: ami.bootstrapMode,
-    });
-    printDryRun(name, opts, aws, capacity, amiId, ami.source, ami.bootstrapMode, vpcId, userData);
+    const dryPlans: unknown[] = [];
+    for (const name of names) {
+      const needsDownload = ami.bootstrapMode === "full";
+      const userData = renderUserData({
+        agent: {
+          nodeId: name,
+          agentId: agentIdForNode(name),
+          bucket: aws.bucket,
+          region: aws.region,
+          clusterId: aws.clusterId,
+          role,
+        },
+        agentBinaryUrl: needsDownload
+          ? "https://<state-bucket>.../agent?<presigned-at-launch>"
+          : undefined,
+        bootstrapMode: ami.bootstrapMode,
+      });
+      if (isJsonMode()) {
+        dryPlans.push({
+          dryRun: true,
+          node: name,
+          cluster: aws.clusterId,
+          region: aws.region,
+          instanceType: opts.instanceType,
+          capacity,
+          amiId,
+          amiSource: ami.source,
+          amiBootstrapMode: ami.bootstrapMode,
+          vpcId,
+          securityGroup: securityGroupName(name),
+          iamRole: nodeRoleName(aws.clusterId, name),
+          instanceProfile: nodeProfileName(aws.clusterId, name),
+          ssh: opts.keyName !== undefined,
+          userData,
+        });
+      } else {
+        printDryRun(name, opts, aws, capacity, amiId, ami.source, ami.bootstrapMode, vpcId, userData);
+      }
+    }
+    if (isJsonMode()) {
+      printJson(amount === 1 ? dryPlans[0] : dryPlans);
+    }
     return;
   }
 
   // Cost gate: launching an instance is billable + hard to undo.
   if (opts.yes !== true) {
+    const nodeLabel =
+      names.length === 1
+        ? `"${names[0]}"`
+        : `${names.length} nodes (${names.map((n) => color.cyan(n)).join(", ")})`;
     const ok = await confirm(
-      `launch a ${color.cyan(opts.instanceType)} EC2 instance in ${color.cyan(aws.region)} (billed hourly) and register node "${name}"?`,
+      `launch ${names.length === 1 ? "a" : names.length} ${color.cyan(opts.instanceType)} EC2 instance${names.length === 1 ? "" : "s"} in ${color.cyan(aws.region)} (billed hourly) and register ${nodeLabel}?`,
       false,
     );
     if (!ok) {
@@ -174,11 +215,13 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
   // cluster created implicitly via `--cluster` (S3 stays authoritative for existence).
   rememberClusterTarget(aws.clusterId, { region: aws.region, profile: opts.profile });
 
-  const existing = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, name));
-  if (existing) {
-    throw new CliError(`node "${name}" already exists in cluster "${aws.clusterId}"`, {
-      hint: "pick another name or `launch-pad node destroy` it first",
-    });
+  for (const name of names) {
+    const existing = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, name));
+    if (existing) {
+      throw new CliError(`node "${name}" already exists in cluster "${aws.clusterId}"`, {
+        hint: "pick another name or `launchpad node destroy` it first",
+      });
+    }
   }
 
   // Resolve the edge for an app node: explicit --edge wins, else the cluster's default.
@@ -191,33 +234,41 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
       hint:
         aws.clusterId === DEFAULT_CLUSTER
           ? "pass --edge <edge-node-id> (create the edge first)"
-          : `pass --edge, or set the cluster's default edge first: launch-pad cluster set-edge ${aws.clusterId} <edge-node-id>`,
+          : `pass --edge, or set the cluster's default edge first: launchpad cluster set-edge ${aws.clusterId} <edge-node-id>`,
     });
   }
 
-  const spin = spinner("provisioning…").start();
-  try {
-    const entry = await provisionNode({
-      aws,
-      nodeId: name,
-      role,
-      instanceType: opts.instanceType,
-      agentVersion,
-      capacity,
-      amiId,
-      amiBootstrapMode: ami.bootstrapMode,
-      vpcId,
-      edgeNodeId,
-      keyName: opts.keyName,
-      onProgress: (t) => {
-        spin.text = t;
-      },
-    });
-    if (spin.isSpinning) spin.succeed(`launched node ${color.cyan(name)} (${entry.instanceId})`);
-    reportCreated(entry);
-  } catch (error) {
-    if (spin.isSpinning) spin.fail("provisioning failed");
-    throw error;
+  const created: NodeRegistryEntry[] = [];
+  for (const name of names) {
+    const spin = spinner(`provisioning ${color.cyan(name)}…`).start();
+    try {
+      const entry = await provisionNode({
+        aws,
+        nodeId: name,
+        role,
+        instanceType: opts.instanceType,
+        agentVersion,
+        capacity,
+        amiId,
+        amiBootstrapMode: ami.bootstrapMode,
+        vpcId,
+        edgeNodeId,
+        keyName: opts.keyName,
+        onProgress: (t) => {
+          spin.text = t;
+        },
+      });
+      if (spin.isSpinning) spin.succeed(`launched node ${color.cyan(name)} (${entry.instanceId})`);
+      created.push(entry);
+      if (!isJsonMode()) reportCreated(entry);
+    } catch (error) {
+      if (spin.isSpinning) spin.fail(`provisioning ${name} failed`);
+      throw error;
+    }
+  }
+
+  if (isJsonMode()) {
+    printJson(amount === 1 ? created[0] : created);
   }
 }
 
@@ -349,17 +400,26 @@ async function runList(opts: GlobalOpts): Promise<void> {
   const aws = await prepareAws(opts);
   const ids = await safeListNodeIds(aws);
 
-  const entries: NodeRegistryEntry[] = [];
+  type ListItem =
+    | { kind: "ok"; node: NodeRegistryEntry }
+    | { kind: "broken"; nodeId: string }
+    | { kind: "missing-registry"; nodeId: string };
+
+  const items: ListItem[] = [];
   for (const id of ids) {
     const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
-    if (obj) {
-      try {
-        entries.push(parseNodeRegistryEntry(obj.raw));
-      } catch {
-        /* skip malformed entries */
-      }
+    if (!obj) {
+      items.push({ kind: "missing-registry", nodeId: id });
+      continue;
+    }
+    try {
+      items.push({ kind: "ok", node: parseNodeRegistryEntry(obj.raw) });
+    } catch {
+      items.push({ kind: "broken", nodeId: id });
     }
   }
+
+  const entries = items.flatMap((item) => (item.kind === "ok" ? [item.node] : []));
 
   // One batch DescribeInstances surfaces live EC2 state + drift for every node.
   let obsMap = new Map<string, Ec2Observation>();
@@ -380,21 +440,44 @@ async function runList(opts: GlobalOpts): Promise<void> {
 
   if (isJsonMode()) {
     printJson(
-      entries.map((e) => {
-        const obs = observe(e);
-        return { ...e, ec2State: obs ? ec2StateLabel(obs) : null, drift: driftOf(e) };
+      items.map((item) => {
+        if (item.kind === "missing-registry") {
+          return { nodeId: item.nodeId, status: "missing-registry" };
+        }
+        if (item.kind === "broken") {
+          return { nodeId: item.nodeId, status: "broken" };
+        }
+        const obs = observe(item.node);
+        return {
+          ...item.node,
+          ec2State: obs ? ec2StateLabel(obs) : null,
+          drift: driftOf(item.node),
+        };
       }),
     );
     return;
   }
-  if (entries.length === 0) {
+  if (items.length === 0) {
     log.info("no nodes registered yet");
-    log.dim("  create one with `launch-pad node create <name>`");
+    log.dim("  create one with `launchpad node create <name>`");
     return;
   }
 
   log.plain();
-  for (const node of entries) {
+  for (const item of items) {
+    if (item.kind === "missing-registry") {
+      log.plain(
+        `  ${color.cyan(item.nodeId)}  ${color.red("missing node.json")}  ${color.dim("(prefix exists in S3 but no registry entry)")}`,
+      );
+      continue;
+    }
+    if (item.kind === "broken") {
+      log.plain(
+        `  ${color.cyan(item.nodeId)}  ${color.red("BROKEN")}  ${color.dim("node.json failed to parse")}`,
+      );
+      continue;
+    }
+    const node = item.node;
     const used = await usedCapacity(aws, node.nodeId);
     const beat = await heartbeat(aws, node.nodeId);
     const obs = observe(node);
@@ -402,8 +485,9 @@ async function runList(opts: GlobalOpts): Promise<void> {
       ? `${color.dim(node.instanceId)} ${node.publicIp ?? ""}`.trim()
       : color.yellow("not provisioned");
     const badge = driftBadge(driftOf(node));
+    const legacyBadge = node.role === "both" ? color.yellow("legacy both") : null;
     log.plain(
-      `  ${color.cyan(node.nodeId)}  ${color.dim(`${node.role} · ${node.instanceType}`)}  ${beat}  ${where}${badge ? `  ${badge}` : ""}`,
+      `  ${color.cyan(node.nodeId)}  ${color.dim(`${node.role} · ${node.instanceType}`)}  ${beat}  ${where}${legacyBadge ? `  ${legacyBadge}` : ""}${badge ? `  ${badge}` : ""}`,
     );
     log.plain(
       `    ${color.dim(
@@ -460,7 +544,7 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
     ["region / az", `${node.region} ${color.dim(node.availabilityZone ?? "")}`],
     [
       "public ip",
-      node.role === "app" ? color.dim("none (VPC-private)") : (publicIp ?? color.dim("—")),
+      nodeUsesElasticIp(node.role) ? (publicIp ?? color.dim("—")) : color.dim("none (VPC-private)"),
     ],
     ["security group", node.securityGroupId ?? color.dim("—")],
     ["capacity", `${sharesToVcpu(node.totalCpu)} vCPU · ${node.totalMemory} MB`],
@@ -539,29 +623,30 @@ export interface EvacuationAssessment {
   /** Target nodes that host at least one movable service — pass these as the drain set. */
   drainNodes: string[];
   /**
-   * Per target node, the services auto-evacuate can NOT move: a service pinned to the node
-   * (config-locked) or any other project's service (`node destroy --evacuate` only moves the
-   * current project's cluster-placed services). If any remain, destroy still needs `--force`.
+   * Per target node, the services auto-evacuate can NOT move: a service whose volumes
+   * live on the node (data is node-local) or any other project's service
+   * (`node destroy --evacuate` only moves the current project's services). If any
+   * remain, destroy still needs `--force`.
    */
   unmovable: OrphanRisk[];
 }
 
 /**
  * Split a destroy target's hosted services into movable vs. unmovable for `--evacuate`.
- * A service is movable iff it belongs to `ownerProject` AND is cluster-placed (its name is
- * in `clusterPlacedNames` — it omits node/nodes). Pure so the evacuate-vs-refuse decision
- * is unit-tested without S3/AWS.
+ * A service is movable iff it belongs to `ownerProject` AND is volume-less (its name is
+ * in `movableNames` — volume data is node-local and can't move). Pure so the
+ * evacuate-vs-refuse decision is unit-tested without S3/AWS.
  */
 export function assessEvacuation(
   targets: Array<{ name: string; services: ScheduledService[] }>,
   ownerProject: string,
-  clusterPlacedNames: Set<string>,
+  movableNames: Set<string>,
 ): EvacuationAssessment {
   const drainNodes: string[] = [];
   const unmovable: OrphanRisk[] = [];
   for (const t of targets) {
     const isMovable = (s: ScheduledService): boolean =>
-      s.project === ownerProject && clusterPlacedNames.has(s.service);
+      s.project === ownerProject && movableNames.has(s.service);
     if (t.services.some(isMovable)) drainNodes.push(t.name);
     const stuck = t.services.filter((s) => !isMovable(s));
     if (stuck.length > 0) unmovable.push({ name: t.name, services: stuck });
@@ -624,7 +709,7 @@ async function loadDestroyTarget(aws: AwsEnv, name: string): Promise<DestroyTarg
 async function tryDestroyStep(
   progress: TeardownProgress | undefined,
   label: string,
-  step: () => Promise<void>,
+  step: () => Promise<unknown>,
 ): Promise<void> {
   try {
     await step();
@@ -676,15 +761,19 @@ export async function teardownNode(
     });
   }
 
-  progress?.text?.("removing registry entry");
-  for (const key of [
-    statusKey(node.clusterId, name),
-    desiredKey(node.clusterId, name),
-    nodeRegistryKey(node.clusterId, name),
-  ]) {
-    await tryDestroyStep(progress, `delete s3://${aws.bucket}/${key}`, () =>
-      deleteObject(aws.s3, aws.bucket, key),
-    );
+  progress?.text?.("removing node state");
+  const prefix = nodePrefix(node.clusterId, name);
+  await tryDestroyStep(progress, `delete s3://${aws.bucket}/${prefix}`, () =>
+    deletePrefix(aws.s3, aws.bucket, prefix),
+  );
+}
+
+/** Sweep leftover S3 objects when a node prefix exists but node.json is gone. */
+async function sweepOrphanNodePrefix(aws: AwsEnv, nodeId: string): Promise<number> {
+  try {
+    return await deletePrefix(aws.s3, aws.bucket, nodePrefix(aws.clusterId, nodeId));
+  } catch {
+    return 0;
   }
 }
 
@@ -697,11 +786,24 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
   const alreadyGone = targets.filter((t) => t.node === null).map((t) => t.name);
 
   if (active.length === 0) {
+    const swept = await Promise.all(
+      alreadyGone.map(async (name) => ({ name, removed: await sweepOrphanNodePrefix(aws, name) })),
+    );
+    const cleaned = swept.filter((s) => s.removed > 0);
     if (isJsonMode()) {
       printJson({
         destroyed: [],
         alreadyDestroyed: names.length === 1 ? names[0] : names,
+        ...(cleaned.length > 0
+          ? { sweptOrphans: cleaned.map((s) => ({ nodeId: s.name, objects: s.removed })) }
+          : {}),
       });
+      return;
+    }
+    if (cleaned.length > 0) {
+      log.success(
+        `removed orphaned state for ${cleaned.length} node(s): ${cleaned.map((s) => color.cyan(s.name)).join(", ")}`,
+      );
       return;
     }
     const label = names.length === 1 ? `node ${color.cyan(names[0]!)}` : `${names.length} nodes`;
@@ -716,7 +818,7 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
   // --evacuate: before the orphan gate, auto-move the current project's cluster-placed
   // services off the doomed node(s) and wait for them to come up elsewhere. After this the
   // re-read services drive the gate below — so a node cleanly evacuated proceeds, while one
-  // still hosting pinned/other-project services is caught by the gate.
+  // still hosting volume-bearing/other-project services is caught by the gate.
   let orphaning = nodesThatWouldOrphan(active);
   let evacuation: EvacuateRun | null = null;
   if (orphaning.length > 0 && opts.evacuate === true) {
@@ -732,7 +834,7 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
       (o) => `  ${color.cyan(o.name)}: ${o.services.map((s) => `${s.project}/${s.service}`).join(", ")}`,
     );
     const hint = opts.evacuate === true
-      ? "auto-evacuate only moves THIS project's cluster-placed services — pinned or other-project services remain; evacuate those projects too, or pass --force to orphan them"
+      ? "auto-evacuate only moves THIS project's services — volume-bearing or other-project services remain; evacuate those projects too, or pass --force to orphan them"
       : "evacuate them first (`node evacuate` / `node destroy --evacuate`), or pass --force to destroy and orphan them anyway";
     throw new CliError(
       `refusing to destroy — ${orphaning.length} node(s) still host services that would be orphaned:\n${lines.join("\n")}`,
@@ -789,16 +891,33 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
     }
   }
 
+  const sweptOrphans =
+    alreadyGone.length > 0
+      ? (await Promise.all(
+          alreadyGone.map(async (name) => ({ name, removed: await sweepOrphanNodePrefix(aws, name) })),
+        )).filter((s) => s.removed > 0)
+      : [];
+
+  if (!isJsonMode() && sweptOrphans.length > 0) {
+    log.dim(
+      `  removed orphaned state: ${sweptOrphans.map((s) => color.cyan(s.name)).join(", ")}`,
+    );
+  }
+
   if (isJsonMode()) {
     const payload: {
       destroyed: string | string[];
       alreadyDestroyed?: string | string[];
+      sweptOrphans?: Array<{ nodeId: string; objects: number }>;
       evacuated?: { project: string; nodes: string[] };
     } = {
       destroyed: destroyed.length === 1 ? destroyed[0]! : destroyed,
     };
     if (alreadyGone.length > 0) {
       payload.alreadyDestroyed = alreadyGone.length === 1 ? alreadyGone[0]! : alreadyGone;
+    }
+    if (sweptOrphans.length > 0) {
+      payload.sweptOrphans = sweptOrphans.map((s) => ({ nodeId: s.name, objects: s.removed }));
     }
     if (evacuation && evacuation.drainNodes.length > 0) {
       payload.evacuated = { project: evacuation.project, nodes: evacuation.drainNodes };
@@ -807,11 +926,56 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
   }
 }
 
+async function runPrune(opts: GlobalOpts & { yes?: boolean }): Promise<void> {
+  const aws = await prepareAws(opts);
+  const ids = await safeListNodeIds(aws);
+  const orphans: string[] = [];
+  for (const id of ids) {
+    const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
+    if (!obj) orphans.push(id);
+  }
+
+  if (orphans.length === 0) {
+    if (isJsonMode()) {
+      printJson({ pruned: [] });
+      return;
+    }
+    log.info("no orphaned node prefixes");
+    return;
+  }
+
+  if (opts.yes !== true) {
+    const ok = await confirm(
+      `remove orphaned S3 state for ${orphans.length} node(s) (${orphans.map((n) => `"${n}"`).join(", ")})?`,
+      false,
+    );
+    if (!ok) throw new CliError("aborted", { hint: "re-run with --yes to skip this prompt" });
+  }
+
+  const pruned: Array<{ nodeId: string; objects: number }> = [];
+  for (const id of orphans) {
+    const removed = await sweepOrphanNodePrefix(aws, id);
+    if (removed > 0) pruned.push({ nodeId: id, objects: removed });
+  }
+
+  if (isJsonMode()) {
+    printJson({ pruned });
+    return;
+  }
+  if (pruned.length === 0) {
+    log.info("no orphaned node prefixes");
+    return;
+  }
+  log.success(
+    `pruned ${pruned.length} orphaned node prefix(es): ${pruned.map((p) => color.cyan(p.nodeId)).join(", ")}`,
+  );
+}
+
 interface EvacuateRun {
   project: string;
   /** Nodes drained (those that hosted the project's cluster-placed services). */
   drainNodes: string[];
-  /** True if the evacuation couldn't move everything (pinned / last app node). */
+  /** True if the evacuation couldn't move everything (volume-bearing / last app node). */
   blocked: boolean;
 }
 
@@ -839,12 +1003,12 @@ async function autoEvacuate(
     });
   }
   const { config } = loadConfig();
-  const ownerProject = envProject(config.project, opts.env);
-  const clusterPlacedNames = new Set(
-    config.service.filter((s) => usesClusterPlacement(s)).map((s) => s.name),
+  const ownerProject = footprintOwner(config, opts.env);
+  const movableNames = new Set(
+    config.service.filter((s) => s.volumes.length === 0).map((s) => s.name),
   );
 
-  const assessment = assessEvacuation(active, ownerProject, clusterPlacedNames);
+  const assessment = assessEvacuation(active, ownerProject, movableNames);
   if (assessment.drainNodes.length === 0) return null; // nothing this project can move
 
   if (!isJsonMode()) {
@@ -932,7 +1096,7 @@ async function runPause(name: string, opts: GlobalOpts): Promise<void> {
       ? "  compute billing stops; the Elastic IP + EBS volume still incur a small charge"
       : "  compute billing stops; the EBS volume still incurs a small charge",
   );
-  log.dim(`  resume with: ${color.cyan(`launch-pad node resume ${name}`)}`);
+  log.dim(`  resume with: ${color.cyan(`launchpad node resume ${name}`)}`);
 }
 
 async function runResume(name: string, opts: GlobalOpts): Promise<void> {
@@ -946,11 +1110,10 @@ async function runResume(name: string, opts: GlobalOpts): Promise<void> {
   const spin = spinner(`resuming ${name} (starting ${node.instanceId})…`).start();
   try {
     const updated = await resumeNode(aws, node);
-    const addr =
-      updated.role === "app"
-        ? (updated.privateIp ?? "?")
-        : (updated.publicIp ?? "?");
-    const label = updated.role === "app" ? "private ip" : "public ip";
+    const addr = nodeUsesElasticIp(updated.role)
+      ? (updated.publicIp ?? "?")
+      : (updated.privateIp ?? "?");
+    const label = nodeUsesElasticIp(updated.role) ? "public ip" : "private ip";
     spin.succeed(`resumed node ${color.cyan(name)} at ${label} ${addr}`);
   } catch (error) {
     if (spin.isSpinning) spin.fail("resume failed");
@@ -972,6 +1135,15 @@ interface ResizeOptions extends GlobalOpts {
   instanceType?: string;
   yes?: boolean;
   dryRun?: boolean;
+  /**
+   * Non-disruptive resize: evacuate the current project's cluster-placed services off the
+   * node (= `rebalance --drain --wait`), resize the emptied instance, then rebalance back.
+   */
+  evacuate?: boolean;
+  /** Target a named environment footprint for --evacuate (same as deploy --env). */
+  env?: string;
+  /** Seconds --evacuate waits for each convergence (drain, then rebalance-back). */
+  timeout?: string;
 }
 
 /** Full capacity demand (incl. rollout surge) of every service scheduled on a node. */
@@ -997,19 +1169,97 @@ async function scheduledDemands(aws: AwsEnv, nodeId: string): Promise<CapacitySe
   });
 }
 
+/**
+ * Resolve what `--evacuate` can do for this resize (pure decision in
+ * {@link planResizeEvacuation}) and refuse the impossible cases up front — a paused node
+ * (nothing running, and the rebalance-back would wait on a stopped agent) and a node this
+ * project keeps persistent volumes on (`rebalance --drain` hard-blocks on volume-bearing services).
+ */
+async function assessResizeEvacuation(
+  aws: AwsEnv,
+  name: string,
+  node: NodeRegistryEntry,
+  opts: ResizeOptions,
+): Promise<{ plan: ResizeEvacuationPlan; ownerProject: string }> {
+  if (!findConfigPath(process.cwd())) {
+    throw new CliError("--evacuate needs your project's launch-pad.toml to know what to move", {
+      hint: "run from your project directory, or omit --evacuate to resize with brief downtime",
+    });
+  }
+  if (opts.env !== undefined && !LABEL_REGEX.test(opts.env)) {
+    throw new CliError(`invalid --env "${opts.env}"`, {
+      hint: "use lowercase letters, numbers and hyphens (a valid DNS label)",
+    });
+  }
+  const { config } = loadConfig();
+  const ownerProject = footprintOwner(config, opts.env);
+  const movableNames = new Set(
+    config.service.filter((s) => s.volumes.length === 0).map((s) => s.name),
+  );
+  const plan = planResizeEvacuation({
+    nodeState: node.state,
+    services: await listScheduledServices(aws, name),
+    ownerProject,
+    clusterPlacedNames: movableNames,
+  });
+  if (plan.kind === "refuse-stopped") {
+    throw new CliError(`node "${name}" is paused — there is nothing running to evacuate`, {
+      hint: "a paused node resizes in place with no downtime; re-run without --evacuate",
+    });
+  }
+  if (plan.kind === "refuse-pinned") {
+    throw new CliError(
+      `can't evacuate "${name}": ${plan.pinned.map((s) => `${s.project}/${s.service}`).join(", ")} keep persistent volumes on it`,
+      { hint: "re-run without --evacuate to accept the brief downtime for the volume-bearing service(s)" },
+    );
+  }
+  return { plan, ownerProject };
+}
+
+/**
+ * Best-effort: after the drain is published (and the replicas are confirmed running
+ * elsewhere), wait for the drained node's agent to report the footprint's services gone —
+ * so containers get a graceful agent-driven stop (and an app node retracts its upstream
+ * shard) instead of being killed by the instance stop. A timeout proceeds with a warning
+ * rather than failing: the replicas are already up elsewhere, only graceful shutdown is
+ * at stake.
+ */
+async function waitForNodeDrained(
+  aws: AwsEnv,
+  nodeId: string,
+  ownerProject: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const obj = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, nodeId));
+    if (obj) {
+      try {
+        const status = parseNodeStatus(obj.raw);
+        const mine = status.services.filter((s) => s.project === ownerProject);
+        if (mine.every((s) => s.runningReplicas === 0)) return true;
+      } catch {
+        /* malformed status — keep polling */
+      }
+    }
+    if (Date.now() > deadline) return false;
+    await sleep(3000);
+  }
+}
+
 async function runResize(name: string, opts: ResizeOptions): Promise<void> {
   assertValidNodeId(name);
   const instanceType = opts.instanceType;
   if (!instanceType) {
     throw new CliError("--instance-type is required", {
-      hint: `e.g. launch-pad node resize ${name} --instance-type t3.large`,
+      hint: `e.g. launchpad node resize ${name} --instance-type t3.large`,
     });
   }
   const aws = await prepareAws(opts);
   const node = await loadNode(aws, name);
   if (!node.instanceId) {
     throw new CliError(`node "${name}" has no instance to resize`, {
-      hint: "provision it first with `launch-pad node create`",
+      hint: "provision it first with `launchpad node create`",
     });
   }
   if (node.instanceType === instanceType) {
@@ -1037,6 +1287,12 @@ async function runResize(name: string, opts: ResizeOptions): Promise<void> {
     );
   }
 
+  // --evacuate: decide what can move BEFORE the dry-run/prompt so both tell the truth,
+  // and refuse the cases where a non-disruptive resize is impossible up front.
+  const evac = opts.evacuate === true ? await assessResizeEvacuation(aws, name, node, opts) : null;
+  const evacPlan = evac?.plan ?? null;
+  const draining = evacPlan?.kind === "drain";
+
   const summaryRows: Array<[string, string]> = [
     [
       "from",
@@ -1047,6 +1303,14 @@ async function runResize(name: string, opts: ResizeOptions): Promise<void> {
       `${instanceType} ${color.dim(`(${sharesToVcpu(capacity.totalCpu)} vCPU · ${capacity.totalMemory} MB)`)}`,
     ],
   ];
+  if (evacPlan) {
+    summaryRows.push([
+      "evacuate",
+      draining
+        ? "drain cluster-placed services → resize → rebalance back"
+        : "nothing this project can move — plain resize",
+    ]);
+  }
 
   if (opts.dryRun) {
     if (isJsonMode()) {
@@ -1055,6 +1319,7 @@ async function runResize(name: string, opts: ResizeOptions): Promise<void> {
         node: name,
         from: { instanceType: node.instanceType, totalCpu: node.totalCpu, totalMemory: node.totalMemory },
         to: { instanceType, totalCpu: capacity.totalCpu, totalMemory: capacity.totalMemory },
+        ...(evacPlan ? { evacuate: draining } : {}),
       });
     } else {
       panel(`Resize node ${name} ${color.dim("(dry run — nothing changed)")}`, [...table(summaryRows)]);
@@ -1065,18 +1330,65 @@ async function runResize(name: string, opts: ResizeOptions): Promise<void> {
   if (opts.yes !== true && !isJsonMode()) {
     panel(`Resize node ${name}`, [...table(summaryRows)]);
     const ok = await confirm(
-      `resize "${name}" to ${color.cyan(instanceType)}? the instance stops and starts — its services are briefly down.`,
+      draining
+        ? `resize "${name}" to ${color.cyan(instanceType)}? its cluster-placed services move off first and rebalance back after.`
+        : `resize "${name}" to ${color.cyan(instanceType)}? the instance stops and starts — its services are briefly down.`,
       false,
     );
     if (!ok) throw new CliError("aborted", { hint: "re-run with --yes to skip this prompt" });
   }
+
+  // Drain: move the footprint's cluster-placed services elsewhere and WAIT for them to be
+  // confirmed running before the instance stops — that's the non-disruptive part.
+  if (draining) {
+    if (evacPlan.ridesDowntime.length > 0) {
+      log.warn(
+        `can't move ${evacPlan.ridesDowntime.map((s) => `${s.project}/${s.service}`).join(", ")} (other projects) — they ride the brief stop/start`,
+      );
+    }
+    if (!isJsonMode()) log.step(`evacuating ${color.cyan(name)} before the resize…`);
+    try {
+      await runRebalance({
+        ...pickGlobalOpts(opts),
+        env: opts.env,
+        drain: name,
+        yes: true,
+        wait: true,
+        quiet: true,
+        timeout: parseEvacuateTimeout(opts.timeout),
+      });
+    } catch (error) {
+      if (error instanceof EvacuationBlockedError) {
+        throw new CliError(`can't evacuate "${name}" for a non-disruptive resize: ${error.message}`, {
+          hint: "add an app node first, or re-run without --evacuate to accept the brief downtime",
+        });
+      }
+      throw error; // config-lock drift, convergence timeout, AWS error — abort before any downtime
+    }
+
+    // Give the drained node's agent one poll to stop its containers gracefully (and an
+    // app node to retract its upstream shard) before the instance is stopped under them.
+    const drainedCleanly = await waitForNodeDrained(
+      aws,
+      name,
+      evac!.ownerProject, // draining ⇒ evac is set
+      (parseEvacuateTimeout(opts.timeout) ?? 300) * 1000,
+    );
+    if (!drainedCleanly) {
+      log.warn(`${name}'s agent hasn't confirmed the drain — its old containers stop with the instance`);
+    }
+  }
+
+  // Re-read the registry entry after the (potentially long) drain so the final
+  // registry write doesn't clobber a concurrent edit made in the meantime.
+  const freshNode = draining ? await loadNode(aws, name) : node;
 
   const spin = spinner(`resizing ${name}…`).start();
   let updated: NodeRegistryEntry;
   try {
     updated = await resizeNode({
       aws,
-      node,
+      node: freshNode,
       instanceType,
       capacity,
       onProgress: (t) => {
@@ -1086,7 +1398,38 @@ async function runResize(name: string, opts: ResizeOptions): Promise<void> {
     spin.succeed(`resized node ${color.cyan(name)} to ${color.cyan(instanceType)}`);
   } catch (error) {
     if (spin.isSpinning) spin.fail("resize failed");
+    if (draining) {
+      // The footprint was already evacuated; point the operator at the recovery path
+      // (e.g. a failed start after the retype leaves the instance stopped).
+      throw new CliError(`resize failed after "${name}" was evacuated: ${(error as Error).message}`, {
+        hint: `the services are running on the other node(s) — if the instance is stopped, \`launchpad node resume ${name}\` (or retry the resize), then \`launchpad rebalance\` to restore the spread`,
+      });
+    }
     throw error;
+  }
+
+  // Rebalance back: re-plan over the full pool (the resized node included) and wait for
+  // convergence, so the command returns with the footprint settled at the new size. The
+  // booted agent reconciles desired state on its next poll; `wait` blocks on that.
+  if (draining) {
+    if (!isJsonMode()) log.step(`rebalancing services back onto ${color.cyan(name)}…`);
+    try {
+      await runRebalance({
+        ...pickGlobalOpts(opts),
+        env: opts.env,
+        yes: true,
+        wait: true,
+        quiet: true,
+        timeout: parseEvacuateTimeout(opts.timeout),
+      });
+    } catch (error) {
+      // The resize itself succeeded — don't let a slow rebalance-back read as a failed
+      // resize (re-running the resize would repeat the disruptive stop/start for nothing).
+      throw new CliError(
+        `node "${name}" was resized to ${instanceType}, but the rebalance back hasn't finished: ${(error as Error).message}`,
+        { hint: "the resize is done — watch `launchpad status` and re-run `launchpad rebalance` (NOT the resize) to restore the spread" },
+      );
+    }
   }
 
   if (isJsonMode()) {
@@ -1095,12 +1438,13 @@ async function runResize(name: string, opts: ResizeOptions): Promise<void> {
       instanceType: updated.instanceType,
       totalCpu: updated.totalCpu,
       totalMemory: updated.totalMemory,
+      ...(opts.evacuate === true ? { evacuated: draining } : {}),
     });
     return;
   }
   if (updated.state === "stopped") {
     log.dim(
-      `  node was paused — it stays stopped at the new size; resume with: ${color.cyan(`launch-pad node resume ${name}`)}`,
+      `  node was paused — it stays stopped at the new size; resume with: ${color.cyan(`launchpad node resume ${name}`)}`,
     );
   } else if (nodeUsesElasticIp(node.role) && !node.eipAllocationId) {
     log.warn("this node has no Elastic IP, so its public IP may have changed — re-check `node show`");
@@ -1130,7 +1474,7 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
     if (!obj) {
       if (name) {
         throw new CliError(`node "${id}" does not exist in cluster "${aws.clusterId}"`, {
-          hint: "list nodes with `launch-pad node list`",
+          hint: "list nodes with `launchpad node list`",
         });
       }
       continue;
@@ -1255,7 +1599,7 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
     if (!obj) {
       if (name) {
         throw new CliError(`node "${id}" does not exist in cluster "${aws.clusterId}"`, {
-          hint: "list nodes with `launch-pad node list`",
+          hint: "list nodes with `launchpad node list`",
         });
       }
       continue;
@@ -1347,9 +1691,12 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
   }
 
   const agentVersion = readVersion();
-  const recreateAmi = repairs.some((i) => i.drift.action.kind === "recreate")
-    ? await resolveNodeAmi({ ec2: aws.ec2, ssm: aws.ssm, region: aws.region })
-    : undefined;
+  const recreateAmiByRole = await resolveNodeAmiByRole(
+    { ec2: aws.ec2, ssm: aws.ssm, region: aws.region },
+    repairs
+      .filter((i) => i.drift.action.kind === "recreate")
+      .map((i) => provisionRoleOf(i.entry.role)),
+  );
   // Edge/both before app — ingress first.
   const order = [...repairs].sort(
     (x, y) => (x.entry.role === "app" ? 1 : 0) - (y.entry.role === "app" ? 1 : 0),
@@ -1357,6 +1704,7 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
   const reconciled: string[] = [];
   for (const i of order) {
     const spin = spinner(`reconciling ${i.entry.nodeId} (${i.drift.action.kind})…`).start();
+    const recreateAmi = recreateAmiByRole.get(provisionRoleOf(i.entry.role));
     try {
       await applyNodeDrift({
         aws,
@@ -1397,7 +1745,7 @@ async function runInstallLogging(name: string | undefined, opts: InstallLoggingO
     if (!obj) {
       if (name) {
         throw new CliError(`node "${id}" does not exist in cluster "${aws.clusterId}"`, {
-          hint: "list nodes with `launch-pad node list`",
+          hint: "list nodes with `launchpad node list`",
         });
       }
       continue;
@@ -1481,7 +1829,7 @@ async function runInstallLogging(name: string | undefined, opts: InstallLoggingO
     for (const line of manualNodes) log.plain(line);
     log.plain();
   } else {
-    log.dim("  logs flow within ~1–2 minutes — read them with `launch-pad logs <service>`");
+    log.dim("  logs flow within ~1–2 minutes — read them with `launchpad logs <service>`");
   }
 }
 
@@ -1490,20 +1838,27 @@ async function runInstallLogging(name: string | undefined, opts: InstallLoggingO
 export function registerNode(program: Command): void {
   const node = program
     .command("node")
-    .description("Manage launch-pad nodes — the machines that run your services");
+    .description("Manage launchpad nodes — the machines that run your services");
 
   const create = node
-    .command("create <name>")
-    .description("Provision an EC2 node, install the agent, and register it")
+    .command("create [name]")
+    .description(
+      "Provision an EC2 node, install the agent, and register it (name is generated when omitted)",
+    )
     .option("--instance-type <type>", "EC2 instance type", "t3.small")
-    .option("--role <role>", "node role: app | edge | both", "both")
+    .option("--role <role>", "node role: app | edge", "app")
     .option("--edge <nodeId>", "for an app node: the edge node that routes to it")
     .option("--key-name <keypair>", "EC2 key pair for SSH (omit to disable SSH)")
-    .option("--ami <id>", "AMI id (default: launch-pad golden AMI, falling back to latest Amazon Linux 2023)")
+    .option("--ami <id>", "AMI id (default: launchpad golden AMI, falling back to latest Amazon Linux 2023)")
     .option("--agent-version <semver>", "agent version to install (default: this CLI's version)")
+    .option(
+      "--amount <n>",
+      "create N nodes — generated names when [name] is omitted; sequential ids from an explicit base (app → app-1..app-N)",
+      "1",
+    )
     .option("--dry-run", "show the provisioning plan + bootstrap without creating anything")
     .option("--yes", "skip the launch confirmation prompt")
-    .action(async (name: string, _opts, command: Command) => {
+    .action(async (name: string | undefined, _opts, command: Command) => {
       await runCreate(name, mergedOpts<CreateOptions>(command));
     });
   applyGlobalOptions(create);
@@ -1515,6 +1870,15 @@ export function registerNode(program: Command): void {
       await runList(mergedOpts(command));
     });
   applyGlobalOptions(list);
+
+  const prune = node
+    .command("prune")
+    .description("Remove orphaned S3 node prefixes that have no node.json registry entry")
+    .option("--yes", "skip confirmation prompts")
+    .action(async (_opts, command: Command) => {
+      await runPrune(mergedOpts<GlobalOpts & { yes?: boolean }>(command));
+    });
+  applyGlobalOptions(prune);
 
   const show = node
     .command("show <name>")
@@ -1554,8 +1918,8 @@ export function registerNode(program: Command): void {
         "role/profile + S3 state. Use `cluster destroy` to tear down a whole cluster at once.",
         "",
         "Examples:",
-        "  $ launch-pad node destroy app-2 --evacuate --yes",
-        "  $ launch-pad node destroy app-2 --force --yes",
+        "  $ launchpad node destroy app-2 --evacuate --yes",
+        "  $ launchpad node destroy app-2 --force --yes",
       ].join("\n"),
     )
     .action(async (names: string[], _opts, command: Command) => {
@@ -1565,7 +1929,7 @@ export function registerNode(program: Command): void {
 
   const pause = node
     .command("pause <name>")
-    .description("Stop the node's instance to save money (edge/both keep Elastic IP + disk)")
+    .description("Stop the node's instance to save money (the edge keeps its Elastic IP + disk)")
     .action(async (name: string, _opts, command: Command) => {
       await runPause(name, mergedOpts(command));
     });
@@ -1581,8 +1945,14 @@ export function registerNode(program: Command): void {
 
   const resize = node
     .command("resize <name>")
-    .description("Change a node's EC2 instance type (stops + starts it — brief downtime)")
+    .description("Change a node's EC2 instance type (--evacuate moves services off first — no downtime)")
     .option("--instance-type <type>", "the EC2 instance type to resize to")
+    .option(
+      "--evacuate",
+      "move this project's cluster-placed services off first, resize, then rebalance back (run from the project directory)",
+    )
+    .option("--env <name>", "environment footprint for --evacuate (same as deploy --env)")
+    .option("--timeout <seconds>", "how long --evacuate waits for each convergence (default 300)")
     .option("--dry-run", "show the from→to change without modifying anything")
     .option("--yes", "skip the confirmation prompt")
     .addHelpText(
@@ -1592,11 +1962,18 @@ export function registerNode(program: Command): void {
         "EC2 can only change the type of a stopped instance, so the node is stopped,",
         "retyped, and started — its services are briefly down during the swap. A paused",
         "node stays paused at the new size. Shrinking is blocked when the node's scheduled",
-        "services no longer fit. An Elastic IP (edge/both) survives the resize.",
+        "services no longer fit. The edge's Elastic IP survives the resize.",
+        "",
+        "--evacuate makes it non-disruptive for this project's cluster-placed services:",
+        "drain them onto the rest of the app pool (= `node evacuate`), wait for them to be",
+        "confirmed running elsewhere, resize the emptied node, then rebalance back and wait",
+        "again. Needs another app node with room; volume-bearing services can't move (data is node-local),",
+        "and the edge node's INGRESS still blips while Caddy restarts.",
         "",
         "Examples:",
-        "  $ launch-pad node resize node-prod-1 --instance-type t3.large",
-        "  $ launch-pad node resize node-prod-1 --instance-type t3.small --dry-run",
+        "  $ launchpad node resize node-prod-1 --instance-type t3.large",
+        "  $ launchpad node resize node-prod-1 --instance-type t3.large --evacuate --yes",
+        "  $ launchpad node resize node-prod-1 --instance-type t3.small --dry-run",
       ].join("\n"),
     )
     .action(async (name: string, _opts, command: Command) => {
@@ -1606,7 +1983,7 @@ export function registerNode(program: Command): void {
 
   const upgradeAgent = node
     .command("upgrade-agent [name]")
-    .description("Publish a new agent bundle to S3 and install it on running instance(s)")
+    .description("Publish the role-specific Rust agent binary to S3 and install it on running instance(s)")
     .option("--upload-only", "upload to S3 only — do not restart the on-box agent")
     .option("--agent-version <semver>", "version recorded in the registry (default: this CLI's version)")
     .option("--dry-run", "show targets without uploading or restarting")
@@ -1615,13 +1992,16 @@ export function registerNode(program: Command): void {
       "after",
       [
         "",
-        "Build the workspace first (`pnpm build`) so the CLI ships the latest agent bundle.",
+        "Build the agent binaries first (`pnpm build:agent`) so the CLI ships the latest agent.",
         "With no name, upgrades every node in the cluster that has an EC2 instance.",
+        "Each node receives the binary for ITS role (edge → Caddy router, app → Docker",
+        "reconciler); nodes still on the legacy TypeScript agent are migrated in place",
+        "(systemd unit rewritten, no re-provision; an edge also stops its idle Docker).",
         "",
         "Examples:",
-        "  $ launch-pad node upgrade-agent node-edge",
-        "  $ launch-pad node upgrade-agent --yes",
-        "  $ launch-pad node upgrade-agent --upload-only   # S3 only, manual install",
+        "  $ launchpad node upgrade-agent node-edge",
+        "  $ launchpad node upgrade-agent --yes",
+        "  $ launchpad node upgrade-agent --upload-only   # S3 only, manual install",
       ].join("\n"),
     )
     .action(async (name: string | undefined, _opts, command: Command) => {
@@ -1643,8 +2023,8 @@ export function registerNode(program: Command): void {
         "CloudWatch Agent over SSM. Idempotent. With no name, targets every node in the cluster.",
         "",
         "Examples:",
-        "  $ launch-pad node install-logging node-prod-1",
-        "  $ launch-pad node install-logging --yes      # whole cluster",
+        "  $ launchpad node install-logging node-prod-1",
+        "  $ launchpad node install-logging --yes      # whole cluster",
       ].join("\n"),
     )
     .action(async (name: string | undefined, _opts, command: Command) => {
@@ -1664,12 +2044,12 @@ export function registerNode(program: Command): void {
         "",
         "With no name, reconciles every node in the cluster. Detects nodes that were",
         "stopped or terminated in the AWS console and starts / replaces them so the",
-        "registry matches reality. A replacement reuses the same node id (and Elastic IP on edge/both).",
+        "registry matches reality. A replacement reuses the same node id (and the edge's Elastic IP).",
         "",
         "Examples:",
-        "  $ launch-pad node reconcile                 # whole cluster",
-        "  $ launch-pad node reconcile node-prod-1     # one node",
-        "  $ launch-pad node reconcile --dry-run       # just show drift",
+        "  $ launchpad node reconcile                 # whole cluster",
+        "  $ launchpad node reconcile node-prod-1     # one node",
+        "  $ launchpad node reconcile --dry-run       # just show drift",
       ].join("\n"),
     )
     .action(async (name: string | undefined, _opts, command: Command) => {
@@ -1694,11 +2074,11 @@ export function registerNode(program: Command): void {
         "",
         "Pinned (node/nodes) services can't be evacuated — their placement is config-locked.",
         "A node hosting other projects needs each of them evacuated too. Equivalent to",
-        "`launch-pad rebalance --drain <name>`.",
+        "`launchpad rebalance --drain <name>`.",
         "",
         "Examples:",
-        "  $ launch-pad node evacuate node-prod-2 --dry-run",
-        "  $ launch-pad node evacuate node-prod-2 --yes",
+        "  $ launchpad node evacuate node-prod-2 --dry-run",
+        "  $ launchpad node evacuate node-prod-2 --yes",
       ].join("\n"),
     )
     .action(async (name: string, _opts, command: Command) => {

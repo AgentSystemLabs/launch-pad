@@ -80,10 +80,10 @@ scope).
 If you want a shared, authenticated, always-on view today, the supported paths are:
 
 - **CI/CD as the shared control surface** — deploys run through GitHub Actions (OIDC, keyless;
-  `launch-pad setup github-oidc`), so the team operates through reviewed pull requests + workflow
+  `launchpad setup github-oidc`), so the team operates through reviewed pull requests + workflow
   runs rather than a shared web app.
-- **Scheduled health + cost gates** — run `launch-pad alerts check --webhook …` and
-  `launch-pad cost --budget …` on a schedule (cron / a GitHub Action); both exit non-zero on a
+- **Scheduled health + cost gates** — run `launchpad alerts check --webhook …` and
+  `launchpad cost --budget …` on a schedule (cron / a GitHub Action); both exit non-zero on a
   problem and can post to Slack/Discord, giving a hosted-style signal without a hosted server.
 - **Run the dashboard behind your own auth** — e.g. an authenticating reverse proxy or an SSH
   tunnel to the operator's machine — if you accept that it wields that machine's AWS credentials.

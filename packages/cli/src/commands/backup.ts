@@ -99,7 +99,7 @@ async function runBackup(opts: BackupOptions): Promise<void> {
     log.warn("no state found for this cluster — nothing was backed up");
   } else {
     log.success(`backed up ${captured.length} object(s) → ${outDir}`);
-    log.dim(`restore with:  launch-pad restore ${outDir}`);
+    log.dim(`restore with:  launchpad restore ${outDir}`);
   }
 }
 
@@ -109,7 +109,7 @@ async function runRestore(dir: string, opts: RestoreOptions): Promise<void> {
     manifest = JSON.parse(readFileSync(join(dir, BACKUP_MANIFEST_FILE), "utf8")) as BackupManifest;
   } catch {
     throw new CliError(`no ${BACKUP_MANIFEST_FILE} found in "${dir}"`, {
-      hint: "point restore at a directory created by `launch-pad backup`",
+      hint: "point restore at a directory created by `launchpad backup`",
     });
   }
   if (manifest.version !== BACKUP_MANIFEST_VERSION) {
@@ -140,13 +140,13 @@ async function runRestore(dir: string, opts: RestoreOptions): Promise<void> {
     }
     if (!recorded.has(key)) {
       throw new CliError(`backup file "${key}" is not listed in ${BACKUP_MANIFEST_FILE} — refusing`, {
-        hint: "the backup directory was modified after it was taken; re-create it with `launch-pad backup`",
+        hint: "the backup directory was modified after it was taken; re-create it with `launchpad backup`",
       });
     }
     const { size } = statSync(file);
     if (size > MAX_RESTORE_OBJECT_BYTES) {
       throw new CliError(`backup file "${key}" is ${size} bytes (max ${MAX_RESTORE_OBJECT_BYTES}) — refusing`, {
-        hint: "launch-pad state objects are small; this file looks corrupted or tampered",
+        hint: "launchpad state objects are small; this file looks corrupted or tampered",
       });
     }
     uploads.push({ key, body: readFileSync(file, "utf8") });
@@ -186,7 +186,7 @@ async function runRestore(dir: string, opts: RestoreOptions): Promise<void> {
     return;
   }
   log.success(`restored ${uploads.length} object(s) → ${aws.bucket}`);
-  log.dim("nodes reconcile on their next poll; run `launch-pad status` to watch them converge.");
+  log.dim("nodes reconcile on their next poll; run `launchpad status` to watch them converge.");
 }
 
 export function registerBackup(program: Command): void {
@@ -203,8 +203,8 @@ export function registerBackup(program: Command): void {
         "secrets (desired.json stores SSM parameter references, not values).",
         "",
         "Examples:",
-        "  $ launch-pad backup",
-        "  $ launch-pad backup --cluster prod --out ./prod-backup",
+        "  $ launchpad backup",
+        "  $ launchpad backup --cluster prod --out ./prod-backup",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {
@@ -225,8 +225,8 @@ export function registerBackup(program: Command): void {
         "keyspace before writing. Nodes reconcile to the restored desired state on their next poll.",
         "",
         "Examples:",
-        "  $ launch-pad restore ./launch-pad-backup-prod-2026-06-10T12-00-00-000Z",
-        "  $ launch-pad restore ./prod-backup --cluster prod --yes",
+        "  $ launchpad restore ./launch-pad-backup-prod-2026-06-10T12-00-00-000Z",
+        "  $ launchpad restore ./prod-backup --cluster prod --yes",
       ].join("\n"),
     )
     .action(async (dir: string, _opts, command: Command) => {

@@ -1,9 +1,11 @@
 import { HeadBucketCommand } from "@aws-sdk/client-s3";
 import { Command } from "commander";
+import { nodeRegistryKey, parseNodeRegistryEntry } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import { awsErrorName, awsStatusCode } from "../aws/errors";
 import { getEcrAuth } from "../aws/ecr";
 import { getDefaultVpcId } from "../aws/ec2";
+import { getJson, listNodeIds } from "../aws/s3-state";
 import { checkDocker } from "../deploy/build";
 import { type Check, overallOk, summarize } from "../doctor/report";
 import { resolveNodeAmi } from "../provision/golden-ami";
@@ -14,7 +16,13 @@ import { color, symbols } from "../ui/theme";
 
 type DoctorOptions = GlobalOpts;
 
-const AWS_DEPENDENT_CHECKS = ["S3 state bucket", "ECR access", "default VPC", "golden AMI"] as const;
+const AWS_DEPENDENT_CHECKS = [
+  "S3 state bucket",
+  "ECR access",
+  "default VPC",
+  "golden AMIs",
+  "agent runtime",
+] as const;
 
 function fromError(name: string, error: unknown, hint: string): Check {
   return { name, status: "fail", detail: (error as Error).message, hint };
@@ -24,7 +32,7 @@ async function checkDockerHealth(): Promise<Check> {
   const name = "Docker + buildx";
   try {
     await checkDocker();
-    return { name, status: "pass", detail: "docker buildx available" };
+    return { name, status: "pass", detail: "docker daemon + buildx available" };
   } catch (error) {
     return fromError(name, error, "install Docker Desktop (or docker + buildx) and start the daemon");
   }
@@ -74,20 +82,62 @@ async function checkDefaultVpc(aws: AwsEnv): Promise<Check> {
 }
 
 async function checkGoldenAmi(aws: AwsEnv): Promise<Check> {
-  const name = "golden AMI";
+  const name = "golden AMIs";
   try {
-    const ami = await resolveNodeAmi({ ec2: aws.ec2, ssm: aws.ssm, region: aws.region });
-    if (ami.bootstrapMode === "golden") {
-      return { name, status: "pass", detail: `${ami.imageId} (${ami.source})` };
+    const base = { ec2: aws.ec2, ssm: aws.ssm, region: aws.region };
+    const [edge, app] = await Promise.all([
+      resolveNodeAmi({ ...base, role: "edge" }),
+      resolveNodeAmi({ ...base, role: "app" }),
+    ]);
+    if (edge.bootstrapMode === "golden" && app.bootstrapMode === "golden") {
+      return { name, status: "pass", detail: `edge ${edge.imageId}, app ${app.imageId}` };
+    }
+    const missing = [
+      ...(edge.bootstrapMode === "golden" ? [] : ["edge"]),
+      ...(app.bootstrapMode === "golden" ? [] : ["app"]),
+    ].join(" + ");
+    return {
+      name,
+      status: "warn",
+      detail: `no ${missing} golden AMI for ${aws.region}; those nodes full-bootstrap AL2023`,
+      hint: "first boot is slower — build the golden AMIs (scripts/build-golden-ami.sh) for faster provisioning",
+    };
+  } catch (error) {
+    return fromError(name, error, "couldn't resolve any AMI — check ec2:DescribeImages + SSM read access");
+  }
+}
+
+/**
+ * Warn while any node in the target cluster still runs the deprecated TypeScript
+ * agent — the Rust binaries are canonical and `node upgrade-agent` migrates a live
+ * node in place (no re-provision).
+ */
+async function checkLegacyAgents(aws: AwsEnv): Promise<Check> {
+  const name = "agent runtime";
+  try {
+    const ids = await listNodeIds(aws.s3, aws.bucket, aws.clusterId);
+    if (ids.length === 0) return { name, status: "skip", detail: "no nodes yet" };
+    const legacy: string[] = [];
+    for (const id of ids) {
+      const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
+      if (!obj) continue;
+      try {
+        if (parseNodeRegistryEntry(obj.raw).agentType === "ts") legacy.push(id);
+      } catch {
+        /* unparseable entries surface through other commands */
+      }
+    }
+    if (legacy.length === 0) {
+      return { name, status: "pass", detail: `all ${ids.length} node(s) run the rust agent` };
     }
     return {
       name,
       status: "warn",
-      detail: `no golden AMI for ${aws.region}; nodes full-bootstrap AL2023 (${ami.imageId})`,
-      hint: "first boot is slower — build a golden AMI (scripts/build-golden-ami.sh) for faster provisioning",
+      detail: `node(s) ${legacy.join(", ")} still run the deprecated TypeScript agent`,
+      hint: "migrate in place (no re-provision): launchpad node upgrade-agent --yes",
     };
   } catch (error) {
-    return fromError(name, error, "couldn't resolve any AMI — check ec2:DescribeImages + SSM read access");
+    return fromError(name, error, "couldn't read the node registry");
   }
 }
 
@@ -163,6 +213,7 @@ async function runDoctor(opts: DoctorOptions): Promise<void> {
     checks.push(await checkEcr(aws));
     checks.push(await checkDefaultVpc(aws));
     checks.push(await checkGoldenAmi(aws));
+    checks.push(await checkLegacyAgents(aws));
   } else {
     for (const name of AWS_DEPENDENT_CHECKS) {
       checks.push({ name, status: "skip", detail: "skipped — fix AWS credentials first" });
@@ -183,11 +234,11 @@ export function registerDoctor(program: Command): void {
         "",
         "Runs read-only checks and reports pass / warn / fail for each — it provisions",
         "nothing and spends nothing. Exit code is non-zero if any check fails, so it's",
-        "safe to gate a CI pipeline on `launch-pad doctor`.",
+        "safe to gate a CI pipeline on `launchpad doctor`.",
         "",
         "Examples:",
-        "  $ launch-pad doctor",
-        "  $ launch-pad doctor --region us-west-2 --json",
+        "  $ launchpad doctor",
+        "  $ launchpad doctor --region us-west-2 --json",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {

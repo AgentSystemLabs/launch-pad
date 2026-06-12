@@ -5,10 +5,25 @@
  * leaves entirely. Mutates nothing it's given.
  */
 
+import type { DeployedPlacementSnapshot } from "./deployed-footprint";
+
 /** A service's replica distribution: nodeId → replica count (zero-count nodes ignored). */
 export interface ServicePlacement {
   service: string;
   byNode: Map<string, number>;
+}
+
+/** Build per-service node→replicas maps from a footprint's published placement. */
+export function currentPlacement(snapshot: DeployedPlacementSnapshot): ServicePlacement[] {
+  const byService = new Map<string, Map<string, number>>();
+  for (const [nodeId, occupancies] of snapshot.byNode) {
+    for (const occ of occupancies) {
+      const m = byService.get(occ.service) ?? new Map<string, number>();
+      m.set(nodeId, occ.replicas);
+      byService.set(occ.service, m);
+    }
+  }
+  return [...byService].map(([service, byNode]) => ({ service, byNode }));
 }
 
 /** One (service, node) cell whose replica count changed. */

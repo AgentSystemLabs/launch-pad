@@ -8,8 +8,18 @@
  * additive `.default()` rule used for ordinary field additions — prefer adding an
  * optional/defaulted field WITHOUT a version bump. Only bump as part of a
  * coordinated agent upgrade across all nodes.
+ *
+ * v2: dropped the `both` node role and co-located Caddy — `ingress.edge` is now a
+ * required node id (was nullable, null = co-located). Every cluster is 1 dedicated
+ * edge + ≥1 app node.
  */
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
+
+/**
+ * Instance type for an auto-provisioned dedicated edge node. The edge only runs
+ * Caddy (no app containers), so the smallest burstable type is plenty.
+ */
+export const DEFAULT_EDGE_INSTANCE_TYPE = "t3.micro";
 
 /**
  * Format version of the per-project `config-baseline.json` (see config-lock.ts).
@@ -25,6 +35,21 @@ export const CONFIG_BASELINE_VERSION = 1 as const;
  * own. History is advisory (audit + rollback hint), never load-bearing for reconcile.
  */
 export const DEPLOY_EVENT_VERSION = 1 as const;
+
+/**
+ * Format version of a footprint's `preview.json` marker (see preview.ts). Written by
+ * `deploy --env`, read only by the `preview` CLI commands (list / destroy / prune) —
+ * the agent never sees it, so this is NOT part of PROTOCOL_VERSION.
+ */
+export const PREVIEW_MARKER_VERSION = 1 as const;
+
+/**
+ * Format version of a logical project's component index, `projects/_index/<project>.json`
+ * (see project-registry.ts). Written on deploy, read by `project list/show` and
+ * `destroy --project`. CLI-only state — the agent never reads it, so this is NOT
+ * part of PROTOCOL_VERSION.
+ */
+export const PROJECT_INDEX_VERSION = 1 as const;
 
 /**
  * The implicit cluster every pre-cluster node belongs to. Its state lives at the
@@ -50,6 +75,12 @@ export const LABELS = {
   cpu: "launchpad.cpu",
   memory: "launchpad.memory",
   configStamp: "launchpad.configStamp",
+  /**
+   * Scheduled-job run marker: the cron FIRE TIME (epoch ms) this container was
+   * started for. Presence distinguishes a cron run container from a long-running
+   * replica; the value is the durable "last fire" record the due-run check reads.
+   */
+  cronFire: "launchpad.cronFire",
 } as const;
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDnsChecklist, type DnsTarget } from "./dns-panel";
+import { buildDnsChecklist, type DnsTarget, wildcardForPattern } from "./dns-panel";
 
 describe("buildDnsChecklist", () => {
   it("returns [] when there are no web domains", () => {
@@ -19,7 +19,7 @@ describe("buildDnsChecklist", () => {
     expect(lines[1]).toContain("54.210.10.21");
     expect(lines[1]).toContain("node node-app-1");
     expect(lines.some((l) => /dns verify/.test(l))).toBe(true);
-    expect(lines.some((l) => /grey cloud/i.test(l))).toBe(true);
+    expect(lines.some((l) => /resolve directly to the edge IP/i.test(l))).toBe(true);
   });
 
   it("calls out a domain whose node has no public IP yet", () => {
@@ -37,5 +37,33 @@ describe("buildDnsChecklist", () => {
     ];
     const lines = buildDnsChecklist(targets);
     expect(lines.filter((l) => l.includes("app.example.com"))).toHaveLength(1);
+  });
+
+  it("adds a wildcard hint when given one and an EIP is known", () => {
+    const lines = buildDnsChecklist(
+      [{ domain: "app-pr-1.example.com", frontingNode: "node-edge", viaEdge: true, eip: "1.2.3.4" }],
+      "*.example.com",
+    );
+    expect(lines.some((l) => l.includes("*.example.com") && l.includes("1.2.3.4"))).toBe(true);
+  });
+
+  it("omits the wildcard hint when no node has an EIP yet", () => {
+    const lines = buildDnsChecklist(
+      [{ domain: "app-pr-1.example.com", frontingNode: "node-edge", viaEdge: true, eip: null }],
+      "*.example.com",
+    );
+    expect(lines.some((l) => l.includes("*.example.com"))).toBe(false);
+  });
+});
+
+describe("wildcardForPattern", () => {
+  it("derives the wildcard when the pattern varies only its first label", () => {
+    expect(wildcardForPattern("{service}-{env}.example.com")).toBe("*.example.com");
+    expect(wildcardForPattern("{service}.shop.example.com")).toBe("*.shop.example.com");
+  });
+
+  it("returns null when one wildcard label can't cover the projections", () => {
+    expect(wildcardForPattern("{service}.{env}.example.com")).toBeNull();
+    expect(wildcardForPattern("app-{env}.example.{tld}")).toBeNull();
   });
 });

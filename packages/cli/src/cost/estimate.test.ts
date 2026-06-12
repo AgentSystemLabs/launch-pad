@@ -5,6 +5,7 @@ import {
   estimateAgentS3Monthly,
   estimateEc2Monthly,
   estimateProvisionCost,
+  formatNodeMonthlyCost,
   formatProvisionCostSummary,
   HOURS_PER_MONTH,
   summarizeClusterCost,
@@ -14,7 +15,7 @@ import {
 function entry(over: Partial<NodeRegistryEntry> & Pick<NodeRegistryEntry, "nodeId">): NodeRegistryEntry {
   return {
     instanceType: "t3.small",
-    role: "both",
+    role: "app",
     state: "ready",
     totalCpu: 2048,
     totalMemory: 2048,
@@ -35,6 +36,30 @@ describe("estimateAgentS3Monthly", () => {
     expect(edge.putObjectsPerMonth).toBe(86_400);
     expect(app.totalUsd).toBeGreaterThan(0);
     expect(app.putCostUsd).toBeGreaterThan(app.getCostUsd);
+  });
+});
+
+describe("formatNodeMonthlyCost", () => {
+  it("includes EC2 and S3 for a billing node", () => {
+    const line = formatNodeMonthlyCost({
+      nodeId: "app-1",
+      role: "app",
+      instanceType: "t3.small",
+      billsEc2: true,
+    });
+    expect(line).toContain("/mo");
+    expect(line).toContain("~$");
+  });
+
+  it("shows S3 only for sync-only repairs", () => {
+    const line = formatNodeMonthlyCost({
+      nodeId: "app-1",
+      role: "app",
+      instanceType: "t3.small",
+      billsEc2: false,
+    });
+    expect(line).toContain("/mo");
+    expect(line).not.toContain("unknown");
   });
 });
 
@@ -63,7 +88,7 @@ describe("estimateProvisionCost", () => {
 
   it("skips EC2 for sync-only repairs but still estimates agent S3", () => {
     const est = estimateProvisionCost([
-      { nodeId: "n1", role: "both", instanceType: "t3.small", billsEc2: false },
+      { nodeId: "n1", role: "app", instanceType: "t3.small", billsEc2: false },
     ]);
 
     expect(est.ec2Lines).toHaveLength(0);

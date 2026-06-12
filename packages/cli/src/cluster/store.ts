@@ -27,6 +27,7 @@ export async function ensureClusterConfig(aws: AwsEnv, clusterId: string): Promi
     region: aws.region,
     createdAt: new Date().toISOString(),
     createdBy: aws.callerArn,
+    autoscale: null,
   };
   await putClusterConfig(aws, config);
   return config;
@@ -34,7 +35,7 @@ export async function ensureClusterConfig(aws: AwsEnv, clusterId: string): Promi
 
 /**
  * When a cluster has no edge yet, adopt this node as its default edge. Called
- * when an edge/both node is created in a cluster, so the first edge becomes the
+ * when an edge node is created in a cluster, so the first edge becomes the
  * cluster's router with no extra step.
  */
 export async function adoptEdgeIfUnset(aws: AwsEnv, clusterId: string, edgeNodeId: string): Promise<void> {

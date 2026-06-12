@@ -1,8 +1,8 @@
 /**
- * launch-pad real-AWS regression for `launch-pad cost` — ongoing monthly cost rollup
+ * launchpad real-AWS regression for `launchpad cost` — ongoing monthly cost rollup
  * + the `--budget` gate.
  *
- * Fast (one node, no deploy/Docker): provision a single `both` node, then assert `cost`
+ * Fast (one node, no deploy/Docker): provision a single edge node, then assert `cost`
  * reports it with a positive EC2 estimate, that `--budget 0` flags over-budget (non-zero
  * exit), and `--budget 10000` is within budget. Then destroy.
  *
@@ -44,7 +44,7 @@ async function main(): Promise<boolean> {
   const region = process.env.LAUNCHPAD_E2E_REGION ?? "us-east-1";
   const runId = randomBytes(3).toString("hex");
   const cluster = `e2e-cost-${runId}`;
-  const node = "cost-both";
+  const node = "cost-edge";
 
   const home = mkdtempSync(join(tmpdir(), "launch-pad-home-"));
   const cli = makeCli({ home, region });
@@ -67,9 +67,9 @@ async function main(): Promise<boolean> {
   };
 
   try {
-    await step("create a cluster + provision one both node", async () => {
+    await step("create a cluster + provision one edge node", async () => {
       await cli.run(["cluster", "create", cluster, "--region", region]);
-      await cli.run(["node", "create", node, "--role", "both", "--cluster", cluster, "--yes"]);
+      await cli.run(["node", "create", node, "--role", "edge", "--cluster", cluster, "--yes"]);
     });
 
     await step("cost reports the running node with a positive EC2 estimate", async () => {
@@ -97,7 +97,7 @@ async function main(): Promise<boolean> {
   } finally {
     if (keep) {
       note(`--keep set — leaving cluster "${cluster}" running. Tear it down later with:`);
-      note(`  LAUNCHPAD_HOME=${home} launch-pad cluster destroy ${cluster} --yes`);
+      note(`  LAUNCHPAD_HOME=${home} launchpad cluster destroy ${cluster} --yes`);
     } else {
       await teardown();
     }

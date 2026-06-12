@@ -45,7 +45,6 @@ project = "my-app"
 
 [[service]]
 name = "web"
-node = "node-prod-1"          # the machine to run on (auto-created if missing)
 dockerfile = "Dockerfile"
 context = "."
 domain = "app.example.com"    # makes this a web service (Caddy + HTTPS)
@@ -63,36 +62,34 @@ npx @agentsystemlabs/launch-pad deploy --yes
 ```
 
 `deploy` builds your image, pushes it to ECR with an **immutable** content-addressed tag,
-**auto-provisions** the missing node (a confirmation prompt unless `--yes`), publishes desired
-state, and waits for the agent to report convergence. It prints a **Placement** panel (where
-replicas landed) and a **DNS panel** with the exact A-record target.
+**auto-provisions** the missing nodes — the cluster's dedicated edge (`edge-1`, a `t3.micro`
+Caddy router) plus an auto-sized app node (a confirmation prompt unless `--yes`) — publishes
+desired state, and waits for the agent to report convergence. Placement is automatic: the
+scheduler picks the app node(s); you never name machines in the TOML. It prints a
+**Placement** panel (where replicas landed) and a **DNS panel** with the exact A-record
+target.
 
 ---
 
 ## 2. Point DNS and get HTTPS
 
-The DNS panel shows the node's (or its edge's) **Elastic IP**. At your DNS host:
+The DNS panel shows the edge node's **Elastic IP**. At your DNS host:
 
 1. Create an **A record** for `app.example.com` → that Elastic IP.
-2. Keep it **DNS-only** — a Cloudflare **proxied** (orange-cloud) record breaks Let's Encrypt
-   HTTP-01 issuance.
+2. The record must resolve **directly** to the edge IP — a proxied/CDN-fronted record breaks
+   Let's Encrypt HTTP-01 issuance.
 
-**Using AWS Route53?** Skip the manual step — let launch-pad write the record (DNS-only) for you:
+**Tip:** a single **wildcard** record (`*.example.com` → the edge's Elastic IP) covers every
+domain in one step — including the subdomains `deploy --env` projects for preview
+environments — so you only ever touch DNS once.
 
-```bash
-npx @agentsystemlabs/launch-pad dns setup --wait
-```
-
-It points every web domain at its fronting node's Elastic IP, and is a no-op if the record is
-already correct. For Cloudflare / another registrar, add the grey-cloud A record by hand.
-
-Either way, verify the record resolves correctly (and catch the orange-cloud footgun):
+Then verify the record resolves correctly:
 
 ```bash
 npx @agentsystemlabs/launch-pad dns verify app.example.com
 ```
 
-Once the A record resolves directly to the node, Caddy obtains a certificate automatically and
+Once the A record resolves directly to the edge, Caddy obtains a certificate automatically and
 `https://app.example.com` is live.
 
 ---
@@ -162,43 +159,37 @@ Deploy from CI by passing `--yes` (skips every prompt) and a generous timeout:
 npx @agentsystemlabs/launch-pad deploy --yes --timeout 600
 ```
 
-Run `launch-pad doctor` as a pre-flight gate (non-zero exit fails the job). Use a long-lived
-IAM user's keys, or — preferred — an OIDC-assumed deploy role (an official GitHub Action +
-OIDC template are on the [roadmap](../TODO.md)). The CLI builds with Docker, so the runner
-needs Docker available.
+Run `launchpad doctor` as a pre-flight gate (non-zero exit fails the job). Use a long-lived
+IAM user's keys, or — preferred — an OIDC-assumed deploy role
+([`setup github-oidc`](cli.md#setup-github-oidc) generates the trust policy + workflow).
+The CLI builds with Docker, so the runner needs Docker available (or use
+`deploy --remote-build`).
 
 ---
 
 ## 6. Grow to more than one box
 
-For multiple machines, use a **named cluster** and let Launch Pad place services across its
-app nodes. Omit `node`/`nodes` on a service so it's cluster-placed.
+For multiple machines, use a **named cluster** — placement stays automatic: the scheduler
+spreads services across the cluster's app nodes, all behind the cluster's dedicated edge.
 
 The quickest start: create the cluster, point your deploy at it, and let the **first deploy
-bootstrap a node** for you (just like the single-box flow) — then grow the pool when you need to:
+bootstrap the nodes** for you (the `edge-1` edge + an `app-1` app node) — then grow the pool
+when you need to:
 
 ```bash
 npx @agentsystemlabs/launch-pad cluster create prod --region us-east-1
 npx @agentsystemlabs/launch-pad cluster use prod      # make it the default target
-npx @agentsystemlabs/launch-pad deploy --yes          # auto-creates app-1, deploys onto it
+npx @agentsystemlabs/launch-pad deploy --yes          # auto-creates edge-1 + app-1, deploys
+npx @agentsystemlabs/launch-pad node create --cluster prod   # grow the app pool (name is generated)
+npx @agentsystemlabs/launch-pad rebalance --yes       # spread the footprint onto it
 ```
 
-For a **split** topology (private app nodes behind a dedicated edge — `topology = "split"`),
-create the edge and app nodes up front, since that shape needs more than one box:
-
-```bash
-npx @agentsystemlabs/launch-pad node create edge-1 --role edge --cluster prod
-npx @agentsystemlabs/launch-pad cluster set-edge prod edge-1
-npx @agentsystemlabs/launch-pad node create app-1 --role app --cluster prod
-npx @agentsystemlabs/launch-pad node create app-2 --role app --cluster prod
-```
+(Scaling `replicas` past the pool's capacity also auto-adds an app node on the next
+deploy — and [`autoscale`](cli.md#autoscale) can manage the pool size reactively.)
 
 ```toml
 [[service]]
 name = "web"
-# no node/nodes → cluster-placed
-schedule = "even"        # round-robin across the app pool ("capacity" = bin-pack)
-topology = "split"       # app nodes behind a dedicated edge ("co-located" = one both node)
 domain = "app.example.com"
 port = 3000
 replicas = 4
@@ -206,9 +197,10 @@ replicas = 4
 path = "/healthz"
 ```
 
-A full `deploy` replans placement across the **current** app pool, so adding `app-3` and
-re-deploying can spread replicas onto it (cluster-placed services only — pinned `node`/`nodes`
-services never move). See [configuration.md](configuration.md) for the placement rules.
+A full `deploy` or `rebalance` replans placement across the **current** app pool, so adding
+`app-3` can spread replicas onto it. The exception: a service with `[[service.volumes]]`
+stays on the node it first landed on (its data lives there). See
+[configuration.md](configuration.md) for the placement rules.
 
 ---
 
@@ -218,14 +210,14 @@ services never move). See [configuration.md](configuration.md) for the placement
 trims the lock baseline so removing its `[[service]]` block then deploys cleanly:
 
 ```bash
-npx @agentsystemlabs/launch-pad undeploy --service worker
+npx @agentsystemlabs/launch-pad destroy --service worker
 # then delete the [[service]] worker block from launch-pad.toml
 ```
 
 **Remove a whole project:**
 
 ```bash
-npx @agentsystemlabs/launch-pad undeploy          # clears the footprint (and its lock baseline)
+npx @agentsystemlabs/launch-pad destroy           # clears the footprint (and its lock baseline)
 ```
 
 **Destroy a node** — it fully tears down the instance, Elastic IP, security group, **per-node
@@ -242,7 +234,7 @@ npx @agentsystemlabs/launch-pad node destroy app-2
 npx @agentsystemlabs/launch-pad cluster destroy prod --yes
 ```
 
-**Pause to save money** without losing the node (edge/both keep their Elastic IP):
+**Pause to save money** without losing the node (the edge keeps its Elastic IP):
 
 ```bash
 npx @agentsystemlabs/launch-pad node pause app-1     # … node resume app-1 later

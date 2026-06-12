@@ -55,6 +55,7 @@ export function buildPlacementSnapshot(
           healthCheck: s.healthCheck,
           rollout: { ...s.rollout },
           volumes: s.volumes.map((v) => ({ ...v })),
+          ...(s.cron !== undefined ? { cron: s.cron } : {}),
         });
         continue;
       }

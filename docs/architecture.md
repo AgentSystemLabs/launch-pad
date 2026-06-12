@@ -24,7 +24,7 @@ crashes — the next tick reconciles back.
 | Package | Role |
 | ------- | ---- |
 | [`packages/cli`](../packages/cli) (`@agentsystemlabs/launch-pad`) | The product surface. Builds images, pushes to ECR, provisions EC2/IAM, publishes desired state, watches convergence. |
-| [`packages/agent`](../packages/agent) | The node reconciler — the only thing that touches Docker + Caddy. See [agent.md](agent.md). |
+| [`packages/agent-rust`](../packages/agent-rust) | The node reconciler (Rust; role-specific edge/app binaries) — the only thing that touches Docker + Caddy. See [agent.md](agent.md). |
 | [`packages/shared`](../packages/shared) | The typed contract. Every shape that crosses the CLI ↔ agent boundary is a Zod schema both sides import — a mismatch becomes a parse error, not a silent hung deploy. |
 
 `PROTOCOL_VERSION` (`shared/src/constants.ts`) versions the wire shape of
@@ -34,13 +34,16 @@ crashes — the next tick reconciles back.
 ## What a deploy does
 
 1. Load and validate `launch-pad.toml`; enforce the **config lock** against the stored
-   baseline (only the operational fields — `cpu`/`memory`/`replicas`/`env`/`secrets` — may
-   change after the first deploy; identity/placement is frozen).
+   baseline (only the operational fields —
+   `cpu`/`memory`/`replicas`/`env`/`secrets`/`domain`/`domainPattern` — may change after the first
+   deploy; identity/shape is frozen).
 2. `docker buildx` for `linux/amd64`; push to ECR under an **immutable content-addressed
    tag** (git SHA / content hash — never `:latest`).
-3. **Capacity admission check** — steady-state demand plus the largest single rollout surge
-   must fit each target node (with reserved host headroom).
-4. Auto-provision missing nodes / resume paused ones / repair EC2 drift (spend-gated:
+3. **Plan placement** — the scheduler bin-packs services across the cluster's app nodes by
+   free CPU/memory, then runs the **capacity admission check**: steady-state demand plus the
+   largest single rollout surge must fit each target node (with reserved host headroom).
+4. Auto-provision missing nodes — the cluster's dedicated edge plus any app nodes the
+   scheduler needs — / resume paused ones / repair EC2 drift (spend-gated:
    `--yes` / `--no-create` / `--dry-run`).
 5. Ownership-aware **merge** into each node's `desired.json` (never clobbers other
    projects' services), then a conditional S3 write.
@@ -67,9 +70,14 @@ keeps the legacy un-prefixed root so pre-cluster nodes need no migration.
 
 | Role | What runs there |
 | ---- | --------------- |
-| `both` (default) | Containers + co-located Caddy. The simple single-node setup. |
 | `edge` | A dedicated Caddy router. Public 80/443 + Elastic IP, no containers. |
 | `app` | Containers only. **Private** — no public IP; reachable only by its edge's security group over the VPC. |
+
+Every cluster has exactly **one dedicated edge node** — auto-provisioned as `edge-1`
+(default instance type `t3.micro`, `DEFAULT_EDGE_INSTANCE_TYPE` in
+`shared/src/constants.ts`) on the first deploy, or chosen via `cluster.json`'s
+`defaultEdge` / `cluster set-edge`. Every deploy therefore needs at least **2 nodes**:
+the edge + ≥1 app node.
 
 **Push-based routing, never cross-reads:** an `app` agent writes its own *upstream shard*
 into its edge's `upstream/` prefix; the `edge` agent reads only its own `upstream/*`. No
@@ -89,25 +97,27 @@ drain timeout, graceful `SIGTERM` stop). Every web service must declare a health
 it gates surged replicas before they join the load balancer and feeds Caddy's active health
 checking, which is what keeps `replicas = 1` rollouts downtime-free.
 
-## Clusters & auto-placement
+## Clusters & automatic placement
 
-A **cluster** scopes a group of nodes that share a default edge (and optionally an AWS
-account/region via local config). Services that omit `node`/`nodes` are auto-placed by
-`cli/src/deploy/placement.ts`:
+A **cluster** scopes a group of nodes that share a dedicated edge (and optionally an AWS
+account/region via local config). Placement is **fully automatic** — `launch-pad.toml`
+carries no node names. The scheduler (`cli/src/deploy/placement.ts`) bin-packs services
+across the cluster's app nodes by free CPU/memory, using exactly the admission-check math
+so a planned placement can never fail the pre-flight; when the pool is full it
+auto-provisions another app node.
 
-- `schedule = "even"` — round-robin over the app+both node pool (stable, lexicographic).
-- `schedule = "capacity"` — bin-packing using exactly the admission-check math, so a planned
-  placement can never fail the pre-flight.
-- `topology` — `"split"` (app/both nodes behind a required edge), `"co-located"` (one
-  both-role node, no remote edge), or `"auto"`.
+A service with `[[service.volumes]]` is **sticky**: the scheduler places all its replicas
+on one node and later deploys/rebalances keep it there (its data lives on that node's
+disk). If the node lacks capacity for it, that is a hard error — the data can't move — and
+draining/evacuating its node is refused.
 
-When placement moves a service between deploys, deploy cleans the vacated node's
-`desired.json`; `deploy --restart` pins to the published footprint so a re-plan can't move
-services.
+When placement moves a (volume-free) service between deploys, deploy cleans the vacated
+node's `desired.json`; `deploy --restart` pins to the published footprint so a re-plan
+can't move services.
 
 ## Secrets
 
-`launch-pad secret set` writes SecureStrings to SSM Parameter Store under
+`launchpad secret set` writes SecureStrings to SSM Parameter Store under
 `/launch-pad/<cluster>/<project>/<service>/<KEY>`. The TOML registers only key names; the
 agent resolves values at container start via the node's instance role. Rotation =
 `secret set` + `deploy --restart`.
@@ -116,9 +126,9 @@ agent resolves values at container start via the node's instance role. Rotation 
 
 - **Logs:** the agent reconciles an Amazon CloudWatch Agent config so container stdout is
   shipped to CloudWatch Logs (`/launch-pad/<cluster>/<project>/<service>` groups,
-  `<node>/<replica>` streams). `launch-pad logs` merges streams across nodes/replicas.
+  `<node>/<replica>` streams). `launchpad logs` merges streams across nodes/replicas.
 - **Stats:** the agent samples host + per-container CPU/memory and emits `launchpad.stats`
-  lines (~60s) that land in CloudWatch via the system log group. `launch-pad node monitor`
+  lines (~60s) that land in CloudWatch via the system log group. `launchpad node monitor`
   graphs them (historic) or samples live over SSM (`--watch`).
 - **Heartbeats:** the agent publishes `status.json` on meaningful change, plus a liveness
   heartbeat every 30s; the CLI flags a node stale after 60s without one.

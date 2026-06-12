@@ -31,8 +31,8 @@ export interface PlanResizedEntryArgs {
  * Pure: compute the registry entry after a resize. The instance type and capacity
  * always change; everything else mirrors {@link resumeNode}'s IP handling:
  *
- * - **edge/both with an Elastic IP** keep their stable public IP across the stop/start.
- * - **edge/both without an Elastic IP** pick up a fresh ephemeral one on restart.
+ * - **an edge with an Elastic IP** keeps its stable public IP across the stop/start.
+ * - **an edge without an Elastic IP** picks up a fresh ephemeral one on restart.
  * - **app** nodes stay VPC-private (no public IP); their private IP may change.
  * - a **paused** node (not restarted) stays `stopped` and drops any ephemeral public IP.
  */

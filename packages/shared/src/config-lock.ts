@@ -2,7 +2,6 @@ import { z } from "zod";
 import {
   type LaunchPadConfig,
   type ServiceDecl,
-  ServiceScheduleSchema,
   ServiceTopologySchema,
   type VolumeDecl,
   VolumeDeclSchema,
@@ -19,27 +18,36 @@ import type { Ingress } from "./desired";
  * (config.ts). The config lock can only forbid post-deploy changes to fields it
  * SNAPSHOTS — so if you add a field to `ServiceDeclSchema` that should be locked,
  * you MUST add it here AND to `serviceSnapshot` below, or the lock will silently
- * fail to catch changes to that field. (cpu/memory/replicas/env/secrets are
+   * fail to catch changes to that field. (cpu/memory/replicas/env/secrets/domain/domainPattern are
  * deliberately excluded from locking; see `lockedServiceView`.)
  */
 export const ConfigBaselineSchema = z
   .object({
     version: z.literal(CONFIG_BASELINE_VERSION),
     project: z.string().min(1),
+    // The component (federated multi-repo deploys). Optional so baselines written
+    // before components existed still parse.
+    component: z.string().min(1).optional(),
     domainPattern: z.string().min(1).optional(),
     services: z
       .array(
         z
           .object({
             name: z.string().min(1),
+            // Legacy — node pinning was removed; baselines written before that may
+            // still carry these. Parsed but ignored (stripped from the lock view).
             node: z.string().min(1).optional(),
             nodes: z.array(z.string().min(1)).min(1).optional(),
             edge: z.string().min(1).optional(),
-            // Defaults (not required) so baseline files written before these
-            // fields existed still parse — and compare equal to a fresh snapshot
-            // of an unchanged config.
-            schedule: ServiceScheduleSchema.default("even"),
-            topology: ServiceTopologySchema.default("auto"),
+            // Locked identity: a scheduled job can't change its cadence (or become a
+            // long-running worker) without a fresh footprint. Optional so baselines
+            // written before cron existed still parse.
+            cron: z.string().min(1).optional(),
+            // Legacy — `schedule` was removed; baselines written before that may still carry it.
+            schedule: z.enum(["even", "capacity"]).optional(),
+            // Legacy — `topology` was removed (the edge is always its own node);
+            // optional so old baselines parse, ignored like the other legacy fields.
+            topology: ServiceTopologySchema.optional(),
             dockerfile: z.string(),
             context: z.string(),
             replicas: z.number().int().min(1),
@@ -72,11 +80,7 @@ export function parseConfigBaseline(input: unknown): ConfigBaseline {
 function serviceSnapshot(decl: ServiceDecl): ConfigBaseline["services"][number] {
   return {
     name: decl.name,
-    ...(decl.node !== undefined ? { node: decl.node } : {}),
-    ...(decl.nodes !== undefined ? { nodes: [...decl.nodes] } : {}),
-    ...(decl.edge !== undefined ? { edge: decl.edge } : {}),
-    schedule: decl.schedule,
-    topology: decl.topology,
+    ...(decl.cron !== undefined ? { cron: decl.cron } : {}),
     dockerfile: decl.dockerfile,
     context: decl.context,
     replicas: decl.replicas,
@@ -102,6 +106,7 @@ export function snapshotConfigBaseline(config: LaunchPadConfig, lockedAt: string
   return {
     version: CONFIG_BASELINE_VERSION,
     project: config.project,
+    ...(config.component !== undefined ? { component: config.component } : {}),
     ...(config.domainPattern !== undefined ? { domainPattern: config.domainPattern } : {}),
     services: [...config.service]
       .map(serviceSnapshot)
@@ -133,6 +138,8 @@ export interface DeployedFootprint {
   rollout: Rollout;
   secrets: string[];
   volumes: VolumeDecl[];
+  /** Cron expression for a scheduled job (carried by desired.json). */
+  cron?: string | undefined;
 }
 
 export interface ConfigLockCompareOptions {
@@ -147,21 +154,18 @@ export interface ConfigLockCompareOptions {
 }
 
 /**
- * The locked-field view of a service: everything except the mutable post-deploy
- * fields. `cpu`/`memory` (vertical scale), `replicas` (horizontal scale), `env`
- * (non-secret config), and `secrets` (key names; values live in SSM) may all
- * change after the first deploy and are stripped here. Identity + placement +
- * ingress + rollout/health stay locked.
+ * The locked-IDENTITY view of a service: everything except the mutable post-deploy
+ * fields and the removed legacy fields. `cpu`/`memory` (vertical scale),
+ * `replicas` (horizontal scale), `env` (non-secret config), `secrets` (key
+ * names; values live in SSM), `domain` (prod hostname), and `domainPattern`
+ * (env hostname projection) may all change after the first deploy and are
+ * stripped here; the removed `node`/`nodes`/`edge`/`schedule`/`topology` fields
+ * are stripped because an old baseline may still carry them and they no longer
+ * mean anything. Identity + ingress + rollout/health stay locked.
  */
 function lockedServiceView(
   service: ConfigBaseline["services"][number],
   opts?: ConfigLockCompareOptions,
-  /**
-   * Drop `node`/`nodes`/`edge` too (fromDesired path only): a cluster-placed decl
-   * never declared them, but the reconstructed baseline carries the nodes replicas
-   * happened to land on — comparing them would false-trip the lock.
-   */
-  dropPlacement = false,
 ): Record<string, unknown> {
   const {
     cpu: _cpu,
@@ -169,23 +173,24 @@ function lockedServiceView(
     secrets: _secrets,
     replicas: _replicas,
     env: _env,
+    domain: _domain,
+    domainPattern: _domainPattern,
+    node: _node,
+    nodes: _nodes,
+    edge: _edge,
+    schedule: _schedule,
+    topology: _topology,
     ...locked
   } = service;
   if (opts?.baselineFromDesired) {
-    // desired.json can't carry dockerfile/context/domainPattern/schedule/topology,
-    // so they're unknowable on the reconstructed side — drop from BOTH sides.
+    // desired.json can't carry dockerfile/context, so they're unknowable
+    // on the reconstructed side — drop from BOTH sides. (domainPattern is already
+    // stripped above as a mutable field.)
     const {
       dockerfile: _dockerfile,
       context: _context,
-      domainPattern: _dp,
-      schedule: _schedule,
-      topology: _topology,
       ...rest
     } = locked;
-    if (dropPlacement) {
-      const { node: _node, nodes: _nodes, edge: _edge, ...unpinned } = rest;
-      return unpinned;
-    }
     return rest;
   }
   return locked;
@@ -197,23 +202,27 @@ function declaredEnv(env: Record<string, string>): Record<string, string> {
   return rest;
 }
 
-/** Reconstruct a baseline-shaped snapshot from live desired.json on nodes. */
+/**
+ * Reconstruct a baseline-shaped snapshot from live desired.json on nodes. The
+ * caller passes the logical `project` (+ `component`) from its own config — NOT
+ * the derived footprint owner — because the footprints were already looked up BY
+ * that owner, and `analyzeConfigChange` compares `project`/`component` against
+ * the current config's logical values. (Storing the owner here used to falsely
+ * trip "project changed" for any env-scoped footprint with no stored baseline.)
+ */
 export function baselineFromDeployedFootprints(
-  ownerProject: string,
+  identity: { project: string; component?: string | undefined },
   footprints: DeployedFootprint[],
   lockedAt: string,
 ): ConfigBaseline {
   return {
     version: CONFIG_BASELINE_VERSION,
-    project: ownerProject,
+    project: identity.project,
+    ...(identity.component !== undefined ? { component: identity.component } : {}),
     services: footprints
       .map((f) => ({
         name: f.service,
-        ...(f.nodeIds.length === 1 ? { node: f.nodeIds[0] } : { nodes: [...f.nodeIds].sort() }),
-        ...(f.ingress?.edge ? { edge: f.ingress.edge } : {}),
-        // Not derivable from desired.json; dropped from the fromDesired compare anyway.
-        schedule: "even" as const,
-        topology: "auto" as const,
+        ...(f.cron !== undefined ? { cron: f.cron } : {}),
         dockerfile: "",
         context: "",
         replicas: f.replicas,
@@ -243,45 +252,44 @@ export interface ConfigLockViolation {
  * named here are exactly the ones it strips before comparing.
  */
 export const CONFIG_LOCK_MUTABLE_HINT =
-  "only cpu, memory, replicas, env, and secrets may change after the initial deploy";
+  "only cpu, memory, replicas, env, secrets, domain, and domainPattern may change after the initial deploy";
 
-/**
- * Compare a stored baseline to the current config. Only the mutable post-deploy
- * fields (`cpu`, `memory`, `replicas`, `env`, `secrets`) may differ per service;
- * every other field (including service count and names) must match exactly.
- */
-export function findConfigLockViolations(
+interface ServiceChangeOutcome {
+  service: string;
+  identityChanged: boolean;
+}
+
+/** Shared core for `findConfigLockViolations`. */
+function analyzeConfigChange(
   baseline: ConfigBaseline,
   current: ConfigBaseline,
   opts?: ConfigLockCompareOptions,
-): ConfigLockViolation[] {
-  const violations: ConfigLockViolation[] = [];
+): { preServiceViolations: ConfigLockViolation[]; outcomes: ServiceChangeOutcome[] } {
+  const preServiceViolations: ConfigLockViolation[] = [];
 
   if (baseline.project !== current.project) {
-    violations.push({
+    preServiceViolations.push({
       path: "project",
       message: `project changed from "${baseline.project}" to "${current.project}"`,
     });
   }
 
-  // desired.json doesn't carry the project domainPattern, so skip it when the
-  // baseline was reconstructed from it (re-enforced once a baseline file exists).
-  if (
-    !opts?.baselineFromDesired &&
-    stableJson(baseline.domainPattern ?? null) !== stableJson(current.domainPattern ?? null)
-  ) {
-    violations.push({
-      path: "domainPattern",
-      message: "project domainPattern changed after the initial deploy",
+  if (baseline.component !== current.component) {
+    const show = (c: string | undefined) => (c === undefined ? "(none)" : `"${c}"`);
+    preServiceViolations.push({
+      path: "component",
+      message: `component changed from ${show(baseline.component)} to ${show(current.component)}`,
     });
   }
+
+  // Project domainPattern is env-only projection — mutable like per-service domainPattern.
 
   const baseByName = new Map(baseline.services.map((s) => [s.name, s]));
   const curByName = new Map(current.services.map((s) => [s.name, s]));
 
   for (const name of baseByName.keys()) {
     if (!curByName.has(name)) {
-      violations.push({
+      preServiceViolations.push({
         path: `service.${name}`,
         message: `service "${name}" was removed — ${CONFIG_LOCK_MUTABLE_HINT}`,
       });
@@ -290,37 +298,51 @@ export function findConfigLockViolations(
 
   for (const name of curByName.keys()) {
     if (!baseByName.has(name)) {
-      violations.push({
+      preServiceViolations.push({
         path: `service.${name}`,
         message: `service "${name}" was added — ${CONFIG_LOCK_MUTABLE_HINT}`,
       });
     }
   }
 
+  const outcomes: ServiceChangeOutcome[] = [];
   for (const [name, base] of baseByName) {
     const cur = curByName.get(name);
     if (!cur) continue;
 
-    // Cluster-placed services (current decl has no node/nodes) get their placement
-    // fields dropped in the fromDesired compare: the reconstructed baseline records
-    // wherever replicas landed, which the decl never pinned. A PINNED decl keeps
-    // them, so a node/nodes/edge edit is still caught.
-    const dropPlacement =
-      opts?.baselineFromDesired === true && cur.node === undefined && cur.nodes === undefined;
-
     // The view must be applied identically to both sides — dropping a field from
     // only one side would make every compare mismatch (a false lock violation).
-    if (
-      stableJson(lockedServiceView(base, opts, dropPlacement)) !==
-      stableJson(lockedServiceView(cur, opts, dropPlacement))
-    ) {
+    const identityChanged =
+      stableJson(lockedServiceView(base, opts)) !== stableJson(lockedServiceView(cur, opts));
+
+    outcomes.push({ service: name, identityChanged });
+  }
+
+  return { preServiceViolations, outcomes };
+}
+
+/**
+ * Compare a stored baseline to the current config. Only the mutable post-deploy
+ * fields (`cpu`, `memory`, `replicas`, `env`, `secrets`, `domain`, `domainPattern`) may
+ * differ per service; every other field (including service count and names)
+ * must match exactly.
+ */
+export function findConfigLockViolations(
+  baseline: ConfigBaseline,
+  current: ConfigBaseline,
+  opts?: ConfigLockCompareOptions,
+): ConfigLockViolation[] {
+  const { preServiceViolations, outcomes } = analyzeConfigChange(baseline, current, opts);
+
+  const violations = [...preServiceViolations];
+  for (const o of outcomes) {
+    if (o.identityChanged) {
       violations.push({
-        path: `service.${name}`,
-        message: `locked fields changed for service "${name}" — ${CONFIG_LOCK_MUTABLE_HINT}`,
+        path: `service.${o.service}`,
+        message: `locked fields changed for service "${o.service}" — ${CONFIG_LOCK_MUTABLE_HINT}`,
       });
     }
   }
-
   return violations;
 }
 

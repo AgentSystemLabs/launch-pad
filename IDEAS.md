@@ -44,7 +44,7 @@ Items moved out of [TODO.md](TODO.md) — useful polish, advanced ops, or longer
 ## Security & multi-tenant ops
 
 - **Cross-account clusters** — `cluster create --role-arn` is saved locally but explicitly “Phase 2 / not activated”.
-- **Edge hardening options** — rate limits, basic WAF (or deeper Cloudflare integration), IP allowlists — none in product surface (many indies front with Cloudflare already).
+- **Edge hardening options** — rate limits, basic WAF (or deeper CDN/proxy integration), IP allowlists — none in product surface (many indies already front with a CDN/proxy).
 
 ---
 
@@ -59,7 +59,7 @@ Items moved out of [TODO.md](TODO.md) — useful polish, advanced ops, or longer
 
 - **Multi-region** — single project spanning regions (or documented “one cluster = one region” with failover story).
 - **Custom domains at scale** — wildcard certs, apex + www, multiple domains per service without hand-editing Caddy.
-- **Static assets / CDN** — S3+CloudFront or “static service” type for SPAs without a container (often solved with Cloudflare or a tiny nginx sidecar).
+- **Static assets / CDN** — S3+CloudFront or “static service” type for SPAs without a container (often solved with a CDN or a tiny nginx sidecar).
 - **Control-plane API** — remote deploy triggers, team RBAC, audit (deliberately out of scope — declarative S3 contract, no vendor server).
 
 ---

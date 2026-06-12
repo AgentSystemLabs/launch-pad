@@ -79,4 +79,4 @@ bun run test:e2e
 
 - Localhost + no auth by design. Don't expose it publicly without putting auth in front.
 - Deploy / node-create are long-running; the submit button stays disabled until the CLI returns.
-- `launch-pad logs` needs a registered project directory (it derives the project from the toml).
+- `launchpad logs` needs a registered project directory (it derives the project from the toml).

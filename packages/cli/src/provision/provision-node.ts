@@ -8,6 +8,7 @@ import {
   lookupInstanceCapacity,
   type NodeRegistryEntry,
   type NodeRole,
+  nodeFrontsIngress,
   nodeRegistryKey,
   nodeUsesElasticIp,
   parseNodeRegistryEntry,
@@ -32,7 +33,7 @@ import { getJson, PreconditionFailedError, putJson } from "../aws/s3-state";
 import { resolveLatestAl2023Ami } from "../aws/ssm";
 import { adoptEdgeIfUnset, ensureClusterConfig } from "../cluster/store";
 import { CliError } from "../errors";
-import { presignAgentBundle, uploadAgentBundle } from "./agent-bundle";
+import { DEFAULT_AGENT_TYPE, presignAgentBinary, uploadAgentBinary } from "./agent-bundle";
 import type { AmiBootstrapMode } from "./golden-ami";
 import { planResizedEntry } from "./resize-plan";
 import { renderUserData } from "./user-data";
@@ -99,15 +100,16 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
 
   const amiBootstrapMode = p.amiBootstrapMode ?? "full";
   const needsDownload = amiBootstrapMode === "full";
-  report("uploading agent bundle");
-  await uploadAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
-  let bundleUrl: string | undefined;
+  const binaryRole = role === "app" ? "app" : "edge";
+  report("uploading agent binary");
+  await uploadAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId, binaryRole);
+  let agentBinaryUrl: string | undefined;
   if (needsDownload) {
-    bundleUrl = await presignAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
+    agentBinaryUrl = await presignAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId);
   } else {
-    report("using baked agent bundle");
+    report("using baked agent binary");
   }
-  const userData = renderUserData({ agent: agentConfig, bundleUrl, bootstrapMode: amiBootstrapMode });
+  const userData = renderUserData({ agent: agentConfig, agentBinaryUrl, bootstrapMode: amiBootstrapMode });
 
   report("ensuring IAM role + instance profile");
   const { profileName } = await ensureNodeIam(aws.iam, {
@@ -132,7 +134,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
       throw new CliError(`edge node "${p.edgeNodeId}" does not exist in cluster "${aws.clusterId}"`);
     }
     const edgeEntry = parseNodeRegistryEntry(edgeObj.raw);
-    if (edgeEntry.role !== "edge" && edgeEntry.role !== "both") {
+    if (!nodeFrontsIngress(edgeEntry.role)) {
       throw new CliError(`node "${p.edgeNodeId}" is not an edge (role=${edgeEntry.role})`);
     }
     edgeSecurityGroupId = edgeEntry.securityGroupId ?? undefined;
@@ -218,7 +220,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
       iamInstanceProfile: profileName,
       agentId: agentIdForNode(nodeId),
       agentVersion: p.agentVersion,
-      agentType: "ts",
+      agentType: DEFAULT_AGENT_TYPE,
       createdAt: nowIso(),
       createdBy: aws.callerArn,
       state: "provisioning",
@@ -236,7 +238,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
     }
 
     // Wire the node into its (named) cluster: ensure cluster.json exists, and let
-    // the first edge/both node become the cluster's default edge.
+    // the first edge node become the cluster's default edge.
     if (aws.clusterId !== DEFAULT_CLUSTER) {
       await ensureClusterConfig(aws, aws.clusterId);
       if (role !== "app") await adoptEdgeIfUnset(aws, aws.clusterId, nodeId);
@@ -298,7 +300,7 @@ export interface ResizeNodeParams {
  * Resize a node's EC2 instance to a different type, in place under the same node
  * identity. EC2 can only change the type of a **stopped** instance, so this is a
  * stop → modify → start sequence — the node's services are briefly down while the
- * instance swaps (edge/both ⇒ ingress downtime; app ⇒ that node's containers).
+ * instance swaps (edge ⇒ ingress downtime; app ⇒ that node's containers).
  *
  * Running/paused intent is preserved: a node that was up comes back up (`ready`);
  * a paused node stays `stopped`, just with new capacity. The registry entry's
@@ -318,7 +320,7 @@ export async function resizeNode(p: ResizeNodeParams): Promise<NodeRegistryEntry
   const obs = (await describeInstancesById(aws.ec2, [node.instanceId])).get(node.instanceId);
   if (obs?.kind === "missing") {
     throw new CliError(`node "${node.nodeId}"'s instance ${node.instanceId} is gone`, {
-      hint: "replace it with `launch-pad node reconcile`",
+      hint: "replace it with `launchpad node reconcile`",
     });
   }
   const restarted = obs?.kind !== "stopped";
@@ -362,7 +364,7 @@ export interface ReplaceInstanceParams {
 /**
  * Replace a terminated/missing instance under the SAME node identity — reuse the
  * node's preserved security group and IAM instance profile (and Elastic IP when
- * edge/both); only the
+ * the edge); only the
  * EC2 instance is new. Overwrites the registry entry in place (keeps capacity,
  * createdAt, role) and leaves `desired.json` untouched so the agent reconciles on
  * boot. UI-free.
@@ -375,7 +377,7 @@ export async function replaceInstance(p: ReplaceInstanceParams): Promise<NodeReg
   if (!node.securityGroupId || !node.iamInstanceProfile) {
     throw new CliError(
       `node "${nodeId}" can't be recreated — its security group or IAM profile is gone`,
-      { hint: "recreate its supporting resources with `launch-pad node destroy` then `node create`" },
+      { hint: "recreate its supporting resources with `launchpad node destroy` then `node create`" },
     );
   }
 
@@ -392,15 +394,15 @@ export async function replaceInstance(p: ReplaceInstanceParams): Promise<NodeReg
 
   const amiBootstrapMode = p.amiBootstrapMode ?? "full";
   const needsDownload = amiBootstrapMode === "full";
-  report("uploading agent bundle");
-  await uploadAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
-  let bundleUrl: string | undefined;
+  report("uploading agent binary");
+  await uploadAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId, role === "app" ? "app" : "edge");
+  let agentBinaryUrl: string | undefined;
   if (needsDownload) {
-    bundleUrl = await presignAgentBundle(aws.s3, aws.bucket, aws.clusterId, nodeId);
+    agentBinaryUrl = await presignAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId);
   } else {
-    report("using baked agent bundle");
+    report("using baked agent binary");
   }
-  const userData = renderUserData({ agent: agentConfig, bundleUrl, bootstrapMode: amiBootstrapMode });
+  const userData = renderUserData({ agent: agentConfig, agentBinaryUrl, bootstrapMode: amiBootstrapMode });
 
   report(`launching ${node.instanceType}`);
   const instanceId = await runNode(aws.ec2, {
@@ -449,7 +451,7 @@ export async function replaceInstance(p: ReplaceInstanceParams): Promise<NodeReg
     publicIp,
     eipAllocationId,
     agentVersion: p.agentVersion,
-    agentType: "ts",
+    agentType: DEFAULT_AGENT_TYPE,
     state: "ready",
   };
 

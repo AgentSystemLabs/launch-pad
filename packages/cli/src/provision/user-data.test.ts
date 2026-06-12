@@ -2,19 +2,21 @@ import { describe, expect, it } from "vitest";
 import { renderSystemdUnit } from "./systemd-unit";
 import { type AgentConfig, renderUserData } from "./user-data";
 
-const agent: AgentConfig = {
+const edgeAgent: AgentConfig = {
   nodeId: "node-prod-1",
   agentId: "agent-node-prod-1",
   bucket: "launch-pad-state-123-us-east-1",
   region: "us-east-1",
   clusterId: "default",
-  role: "both",
+  role: "edge",
 };
 
-const bundleUrl = "https://example.s3.amazonaws.com/nodes/node-prod-1/agent.cjs?sig=abc";
+const appAgent: AgentConfig = { ...edgeAgent, role: "app" };
 
-describe("renderUserData", () => {
-  const script = renderUserData({ agent, bundleUrl });
+const agentBinaryUrl = "https://example.s3.amazonaws.com/nodes/node-prod-1/agent?sig=abc";
+
+describe("renderUserData (edge)", () => {
+  const script = renderUserData({ agent: edgeAgent, agentBinaryUrl });
 
   it("is a bash script", () => {
     expect(script.startsWith("#!/bin/bash")).toBe(true);
@@ -24,73 +26,99 @@ describe("renderUserData", () => {
     expect(script).toContain('"nodeId": "node-prod-1"');
     expect(script).toContain('"bucket": "launch-pad-state-123-us-east-1"');
     expect(script).toContain('"clusterId": "default"');
-    expect(script).toContain('"role": "both"');
+    expect(script).toContain('"role": "edge"');
   });
 
-  it("installs docker + node", () => {
-    expect(script).toContain("dnf install -y docker");
-    expect(script).toContain("nodejs");
+  it("never installs Docker or Node.js on an edge node", () => {
+    expect(script).not.toContain("dnf install -y docker");
+    expect(script).not.toContain("systemctl enable --now docker");
+    expect(script).not.toContain("nodejs");
+    expect(script).not.toContain("rpm.nodesource.com");
   });
 
-  it("downloads the agent bundle and starts it", () => {
-    expect(script).toContain("agent.cjs?sig=abc");
-    expect(script).toContain("/opt/launch-pad/agent.cjs");
+  it("downloads the agent binary, makes it executable, and starts it", () => {
+    expect(script).toContain("agent?sig=abc");
+    expect(script).toContain("-o /opt/launch-pad/agent");
+    expect(script).toContain("chmod +x /opt/launch-pad/agent");
     expect(script).toContain("systemctl enable --now launch-pad-agent");
   });
 
-  it("runs Caddy on an edge/both node", () => {
+  it("runs Caddy on an edge node", () => {
     expect(script).toContain("caddy run --config /etc/launch-pad/caddy-init.json");
     expect(script).toContain("systemctl enable --now caddy");
-  });
-
-  it("omits Caddy on an app node", () => {
-    const appScript = renderUserData({ agent: { ...agent, role: "app" }, bundleUrl });
-    expect(appScript).not.toContain("systemctl enable --now caddy");
-    expect(appScript).not.toContain("caddyserver.com");
-    // but the agent still installs
-    expect(appScript).toContain("systemctl enable --now launch-pad-agent");
   });
 
   it("installs the CloudWatch Agent with the node's system base config", () => {
     expect(script).toContain("dnf install -y amazon-cloudwatch-agent");
     expect(script).toContain("/opt/aws/amazon-cloudwatch-agent/etc/launch-pad-base.json");
     expect(script).toContain("amazon-cloudwatch-agent-ctl -a fetch-config");
-    expect(script).toContain("/etc/launch-pad/cw-agent-containers.json");
     // base config targets this node's system log group
     expect(script).toContain('"/launch-pad/default/system/node-prod-1"');
-    // edge/both ship caddy too
+    // the edge ships caddy too
     expect(script).toContain("launch-pad-logforward-caddy.service");
     expect(script).toContain("launch-pad-logforward-agent.service");
   });
+});
 
-  it("ships only the agent forwarder on an app node (no caddy)", () => {
-    const appScript = renderUserData({ agent: { ...agent, role: "app" }, bundleUrl });
-    expect(appScript).toContain("dnf install -y amazon-cloudwatch-agent");
-    expect(appScript).toContain("launch-pad-logforward-agent.service");
-    expect(appScript).not.toContain("launch-pad-logforward-caddy.service");
+describe("renderUserData (app)", () => {
+  const script = renderUserData({ agent: appAgent, agentBinaryUrl });
+
+  it("installs Docker but never Caddy or Node.js", () => {
+    expect(script).toContain("dnf install -y docker");
+    expect(script).toContain("systemctl enable --now docker");
+    expect(script).not.toContain("caddyserver.com");
+    expect(script).not.toContain("systemctl enable --now caddy");
+    expect(script).not.toContain("nodejs");
+    expect(script).not.toContain("rpm.nodesource.com");
+    expect(script).toContain("systemctl enable --now launch-pad-agent");
   });
 
-  it("uses the baked TypeScript agent on a golden AMI without dependency installs or S3 download", () => {
-    const golden = renderUserData({ agent, bootstrapMode: "golden" });
-    expect(golden).toContain("systemctl enable --now docker");
-    expect(golden).toContain("node --version");
-    expect(golden).toContain("test -f /opt/launch-pad/agent.cjs");
-    expect(golden).toContain("TypeScript agent bundle is baked into the launch-pad golden AMI");
+  it("ships only the agent forwarder (no caddy)", () => {
+    expect(script).toContain("launch-pad-logforward-agent.service");
+    expect(script).not.toContain("launch-pad-logforward-caddy.service");
+  });
+});
+
+describe("renderUserData (golden AMI)", () => {
+  it("verifies the baked agent binary on an edge without installs or S3 download", () => {
+    const golden = renderUserData({ agent: edgeAgent, bootstrapMode: "golden" });
+    expect(golden).toContain("test -x /opt/launch-pad/agent");
     expect(golden).toContain("test -x /usr/local/bin/caddy");
     expect(golden).toContain("test -x /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl");
+    expect(golden).not.toContain("dnf install");
+    expect(golden).not.toContain("agent?sig=abc");
+    expect(golden).not.toContain("docker");
+  });
+
+  it("enables preinstalled docker on a golden app node", () => {
+    const golden = renderUserData({ agent: appAgent, bootstrapMode: "golden" });
+    expect(golden).toContain("systemctl enable --now docker");
     expect(golden).not.toContain("dnf install -y docker");
-    expect(golden).not.toContain("dnf install -y amazon-cloudwatch-agent");
-    expect(golden).not.toContain("rpm.nodesource.com");
-    expect(golden).not.toContain("caddyserver.com");
-    expect(golden).not.toContain("agent.cjs?sig=abc");
+    expect(golden).toContain("test -x /opt/launch-pad/agent");
+    expect(golden).not.toContain("caddy run");
+  });
+
+  it("requires the binary URL only for full bootstrap", () => {
+    expect(() => renderUserData({ agent: appAgent, bootstrapMode: "full" })).toThrow(
+      /agentBinaryUrl is required/,
+    );
+    expect(() => renderUserData({ agent: appAgent, bootstrapMode: "golden" })).not.toThrow();
   });
 });
 
 describe("renderSystemdUnit", () => {
-  it("restarts always, waits for docker, and runs the bundle via node", () => {
-    const unit = renderSystemdUnit();
+  it("app unit restarts always, waits for docker, and runs the binary", () => {
+    const unit = renderSystemdUnit("app");
     expect(unit).toContain("Restart=always");
     expect(unit).toContain("After=docker.service");
-    expect(unit).toContain("ExecStart=/usr/bin/env node /opt/launch-pad/agent.cjs");
+    expect(unit).toContain("ExecStart=/opt/launch-pad/agent");
+    expect(unit).not.toContain("node ");
+  });
+
+  it("edge unit does not depend on docker", () => {
+    const unit = renderSystemdUnit("edge");
+    expect(unit).not.toContain("docker.service");
+    expect(unit).toContain("After=network-online.target");
+    expect(unit).toContain("ExecStart=/opt/launch-pad/agent");
   });
 });

@@ -128,7 +128,7 @@ export async function ensureSecurityGroup(
   const created = await ec2.send(
     new CreateSecurityGroupCommand({
       GroupName: name,
-      Description: `launch-pad ${opts.role} node ingress`,
+      Description: `launchpad ${opts.role} node ingress`,
       VpcId: vpcId,
     }),
   );
@@ -137,7 +137,7 @@ export async function ensureSecurityGroup(
   await ensureSecurityGroupTags(ec2, sgId, tags);
 
   const perms: IpPermission[] = [];
-  if (opts.role === "edge" || opts.role === "both") {
+  if (opts.role === "edge") {
     // Public HTTP/HTTPS — this node terminates TLS.
     perms.push(
       { IpProtocol: "tcp", FromPort: 80, ToPort: 80, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "http" }] },
@@ -191,9 +191,9 @@ export async function runNode(ec2: EC2Client, p: RunNodeParams): Promise<string>
     role: p.role,
   }).map((t) => ({ Key: t.Key, Value: t.Value }));
 
-  // Both roles get a public IPv4 from the default subnet. For edge/both it's the
+  // Both roles get a public IPv4 from the default subnet. For the edge it's the
   // ingress address (soon replaced by a stable Elastic IP); for app nodes it is
-  // EGRESS-ONLY — launch-pad provisions no NAT gateway / VPC endpoints, so an app
+  // EGRESS-ONLY — launchpad provisions no NAT gateway / VPC endpoints, so an app
   // node needs outbound internet to pull from ECR and read S3 to bootstrap. App
   // nodes stay private at the INBOUND edge: their security group admits only the
   // edge's security group, so nothing on the internet can reach their services.

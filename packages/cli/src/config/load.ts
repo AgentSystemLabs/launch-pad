@@ -41,7 +41,7 @@ export function loadConfig(startDir: string = process.cwd()): LoadedConfig {
   const path = findConfigPath(startDir);
   if (!path) {
     throw new CliError(`no ${CONFIG_FILENAME} found in ${startDir} or any parent directory`, {
-      hint: "run `launch-pad init` to create one",
+      hint: "run `launchpad init` to create one",
     });
   }
 

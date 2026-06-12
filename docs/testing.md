@@ -39,7 +39,7 @@ LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e
 | ---------- | ------- |
 | `LAUNCHPAD_E2E=1` | Required opt-in |
 | `LAUNCHPAD_E2E_REGION` | AWS region (default `us-east-1`) |
-| `LAUNCHPAD_E2E_DOMAIN` | Test subdomain — must live under a **Route53 hosted zone you own** |
+| `LAUNCHPAD_E2E_DOMAIN` | Test subdomain — must resolve to the edge for the cert step (the full-lifecycle harness points it via a hosted zone you own; every other e2e needs no DNS at all) |
 | `--keep` / `LAUNCHPAD_E2E_KEEP=1` | Leave the cluster running for inspection |
 
 What it verifies, in order: isolated cluster provisioning with a stable Elastic IP; the app
@@ -51,20 +51,25 @@ IP; destroy removes all S3 state. Teardown runs automatically; if interrupted, t
 cleanup command is printed.
 
 Two focused, **worker-only** harnesses (no domain/cert/DNS/secrets, so they're fast,
-agent-agnostic, and need no Route53 zone) guard the post-deploy mutation paths:
+agent-agnostic, and need no DNS zone) guard the post-deploy mutation paths:
 
 ```bash
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:scale         # scale replicas/cpu/memory + config set
-LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:undeploy      # undeploy a service / footprint + config-lock relief
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:destroy        # destroy a service / footprint + config-lock relief
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-changed # monorepo deploy --changed + co-located sibling preservation
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-image  # deploy --image rollback to an existing tag
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rollback      # rollback auto-picks the previous build (+ --to)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:remote-build  # deploy --remote-build builds on CodeBuild (local docker shimmed to fail)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:history       # deploy history events (who/when/image/converged)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:node-iam      # node destroy deletes the per-node IAM role/profile (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:operator-iam  # the generated operator IAM policy is sufficient (and scoped)
-LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rebalance     # rebalance + node evacuate move cluster-placed replicas
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rebalance     # rebalance + node evacuate move replicas across the app pool
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:destroy-evacuate # node destroy --evacuate auto-drains then tears down
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:resize-evacuate # node resize --evacuate drains, retypes, rebalances back
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:volumes       # persistent volume data survives a container replace
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:cron          # scheduled (cron) worker fires per minute, exit codes recorded
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:autoscale     # reactive autoscaling: live-CPU scale-out, drain-first scale-in
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:destroy-env    # named envs: deploy --env --ttl, --list-envs, TTL prune, --env destroy (zero DNS writes)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:idle          # cost flags an idle (paused) node (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:alerts        # alerts check fires on a dead node (heartbeat-stale) + webhook
 ```
@@ -74,19 +79,35 @@ the EC2 instance out-of-band** so the registry still says the node is up while t
 heartbeating — then asserts `alerts check` fires `heartbeat-stale`, POSTs a local webhook
 receiver, and exits non-zero.
 
-`e2e:volumes` provisions one `both` node, deploys a
-worker pinned to it with a `/data` volume that appends a boot line on every container start, then
-`deploy --restart`s to replace the container and asserts (via `launch-pad logs`) the boot count
+`e2e:volumes` deploys a
+worker with a `/data` volume that appends a boot line on every container start, then
+`deploy --restart`s to replace the container and asserts (via `launchpad logs`) the boot count
 went 1 → 2 — the same volume was re-mounted, so the data survived the replace. It also confirms
 the config lock refuses a post-deploy volume-path change.
 
-`e2e:rebalance` provisions two `both` nodes, deploys a cluster-placed worker at `replicas = 3`
-(even → 2+1), evacuates one node (replicas consolidate onto the other), `rebalance`s back (they
-spread again), proves a second rebalance is a no-op, then evacuates + `node destroy`s a node
-(which succeeds because nothing is scheduled there) and checks a **pinned** service can't be
-evacuated.
+`e2e:cron` deploys a `cron = "* * * * *"` worker
+(`examples/cron-task` — prints a line and exits 0). It asserts the deploy converges even
+though a cron service keeps **zero** long-running replicas, that the first fire is recorded in
+the status `cron` rollup (`lastRunAt` set, `lastExitCode` 0, `nextRunAt` scheduled), that a
+**second** fire advances `lastRunAt` (periodic, not one-shot), that the config lock refuses a
+post-deploy cron-expression change, and that `destroy` removes the job from the node.
 
-`e2e:destroy-evacuate` provisions the same two-`both`-node / 3-replica-worker layout, then proves
+`e2e:autoscale` deploys a BURN-toggled worker (its env flips it between idling and holding
+~1.3 GB of memory — `env` is operationally mutable, so `config set` re-rolls it; memory rather
+than CPU drives the trigger because a fresh t3 in standard credit mode throttles a busy loop
+to its ~20%/vCPU baseline) and drives the whole policy lifecycle against **live host
+metrics**: a no-op while idle, a real scale-out once the hot sample crosses the threshold (the new `app-2` is provisioned and later proven to
+run replicas via `scale replicas 2`), a hold at `maxNodes`, then a scale-in that drains `app-2`
+— asserting both replicas are running on `app-1` **after** the command returns (the drain waited
+before terminating) — and a final hold at `minNodes`.
+
+`e2e:rebalance` provisions one edge + two app nodes, deploys an auto-placed worker at
+`replicas = 3` (2+1), evacuates one node (replicas consolidate onto the other), `rebalance`s
+back (they spread again), proves a second rebalance is a no-op, then evacuates +
+`node destroy`s a node (which succeeds because nothing is scheduled there) and checks a
+**volume-bearing** service's node can't be evacuated (sticky placement).
+
+`e2e:destroy-evacuate` provisions the same edge + two-app-node / 3-replica-worker layout, then proves
 the one-shot `node destroy --evacuate`: it first asserts a plain `node destroy` **refuses** to
 orphan the replica, then `node destroy <b> --evacuate` moves that replica onto the surviving node,
 **waits** for it to be running there (so the node already shows all 3 when the command returns),
@@ -94,20 +115,34 @@ and tears `<b>` down — confirming its registry entry is gone. Finally it asser
 --evacuate` **refuses** when `<a>` is the last app node (nowhere to move the replicas), leaving it
 intact.
 
-`e2e:deploy-changed` deploys a 2-service monorepo (api + worker co-located on one `both` node),
+`e2e:resize-evacuate` provisions the same edge + two-app-node / 3-replica-worker layout, then proves
+the non-disruptive vertical scale: `node resize <b> --instance-type t3.medium --evacuate` first
+drains `<b>`'s replica onto `<a>` and waits (the harness polls **while the command is in
+flight** and observes all 3 replicas running on `<a>` before `<b>`'s instance stops), retypes
+the emptied instance, then rebalances back — the even 2+1 spread and the new instance
+type/capacity are asserted when the command returns. It also checks the `--evacuate --dry-run`
+plan changes nothing and that `--evacuate` **refuses** a paused node.
+
+`e2e:deploy-changed` deploys a 2-service monorepo (api + worker co-located on one app node),
 then (1) runs a partial `scale worker` deploy and asserts the co-located `api` container is
 **preserved byte-for-byte** — the regression guard for the subset-merge that used to drop a
 sibling — then (2) edits only `apps/worker`, runs `deploy --changed <v1>`, and asserts only
 `worker` rebuilds/rolls while `api`'s container and published image are untouched, and finally
 (3) asserts `deploy --changed HEAD` with nothing changed is a clean no-op that rolls nothing.
 
-`e2e:undeploy` deploys two workers, removes one with `undeploy --service`, proves a redeploy of
+`e2e:destroy` deploys two workers, removes one with `destroy --service`, proves a redeploy of
 the trimmed `launch-pad.toml` passes the config lock, then removes the whole footprint and
 re-deploys it fresh. `e2e:deploy-image` deploys v1, changes content and deploys v2, then
 `deploy --image <v1-uri>` rolls back to v1 **without rebuilding** (and a repeat is a no-op).
+`e2e:remote-build` proves `deploy --remote-build` end-to-end with **local docker shimmed to a
+failing stub on PATH** for every CLI invocation: the v1 deploy builds + pushes on CodeBuild and
+converges, the per-cluster CodeBuild project exists with privileged docker + `NO_SOURCE`, an
+unchanged re-deploy skips the build (image already in ECR, no container churn), a content
+change builds a new immutable image remotely and rolls the container, and `cluster destroy`
+removes the CodeBuild project + service role along with everything else.
 `e2e:operator-iam` is the strongest proof the `setup iam-policy` output is correct: it mints a
 temporary IAM user with **only** the generated policy, then runs a full provision → deploy →
-undeploy → destroy under that user's credentials (so a missing permission fails the matching
+destroy under that user's credentials (so a missing permission fails the matching
 step), plus negative checks that the policy can't act outside its scope or region and an IAM
 Access Analyzer `validate-policy` pass. The admin identity is fully stripped from the scoped
 subprocess (`makeCli({ clearAwsEnv: true })`) so the assertions can't silently run under admin
@@ -117,11 +152,18 @@ power. See [e2e/README.md](../e2e/README.md) for the full matrix.
 
 Playwright e2e against a fake CLI — see [dashboard.md](dashboard.md#testing).
 
+## Agent (Rust) tests
+
+`pnpm test:agent` (= `cargo test` in `packages/agent-rust`) runs the agent's unit suite —
+the pure planners (reconcile, cron, fingerprints with golden hashes, Caddy config +
+restart detection) ported from the retired TypeScript agent's Vitest suite. `pnpm test`
+stays TS-only so contributors without a Rust toolchain aren't blocked.
+
 ## Golden AMI build
 
-`pnpm build:golden-ami` cross-compiles the Rust agent and bakes a new AMI with Packer,
-updating the committed manifest the CLI reads. Run it when the agent or baked dependencies
-change. Details: [golden-ami.md](golden-ami.md).
+`pnpm build:golden-ami` cross-compiles the Rust agent binaries and bakes BOTH role-specific
+AMIs (edge + app) with Packer, updating the committed manifest the CLI reads. Run it when
+the agent or baked dependencies change. Details: [golden-ami.md](golden-ami.md).
 
 ## CI status
 
@@ -134,6 +176,6 @@ as manually-triggered jobs (they need real AWS credentials and spend).
 
 - **No linter/formatter is configured** — match existing style by hand. tsconfig is
   `strict` + `noUncheckedIndexedAccess` + `verbatimModuleSyntax`.
-- [`examples/both-node-web-worker`](../examples/both-node-web-worker) is the end-to-end
+- [`examples/web-worker`](../examples/web-worker) is the end-to-end
   fixture every feature is validated against (a tiny Express app that handles `SIGTERM` for
   graceful drain).

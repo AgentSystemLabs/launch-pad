@@ -1,0 +1,14 @@
+{
+  "name": "@agentsystemlabs/launch-pad-agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Launch Pad node agent — Rust edge/app binaries. `pnpm build:agent` (repo root) cross-compiles linux/amd64 binaries into dist/.",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node -e \"console.log('agent binaries are built separately: pnpm build:agent (requires the Rust toolchain)')\"",
+    "build:binaries": "bash ../../scripts/build-agent-binaries.sh",
+    "test:cargo": "cargo test"
+  }
+}

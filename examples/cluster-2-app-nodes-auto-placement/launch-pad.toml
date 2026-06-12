@@ -1,14 +1,15 @@
-# A "lower" cluster: app nodes that share ONE edge router, in one AWS account.
+# A "lower" cluster: two app nodes behind ONE edge router, in one AWS account.
 #
-# Unlike examples/edge-2-app-nodes-rolling-replicas (which pins explicit `nodes` + `edge` names), this
-# config omits placement. Pass --cluster on deploy; the CLI picks the cluster's app nodes and routes
-# the domain through the cluster's default edge — so the app config never mentions infrastructure names.
+# Placement is fully automatic — the scheduler bin-packs replicas across the
+# cluster's app nodes and routes the domain through the cluster's edge, so the
+# app config never mentions infrastructure names.
 #
-# Set the cluster up once (the first edge/both node becomes the default edge):
+# Set the cluster up once (or skip this — a first `deploy` auto-provisions
+# edge-1 + app-1 when the cluster is empty):
 #   launch-pad cluster create lower --region us-east-1
 #   launch-pad node create edge-lower --cluster lower --role edge
-#   launch-pad node create app-a      --cluster lower --role app
-#   launch-pad node create app-b      --cluster lower --role app
+#   launch-pad node create app-a      --cluster lower --edge edge-lower
+#   launch-pad node create app-b      --cluster lower --edge edge-lower
 #
 # Then deploy into it:
 #   launch-pad deploy --cluster lower      # or add --cluster to your CI invocation
@@ -16,13 +17,12 @@ project = "example-clusters"
 
 [[service]]
 name = "web"
-# no node/nodes — placement comes from `deploy --cluster lower`.
-# Implicit defaults: schedule = "even" (round-robin across the cluster's app/both
-# nodes) and topology = "auto" (route through the cluster's default edge). See
-# examples/cluster-capacity-split for schedule = "capacity" / topology = "split"
-# and examples/cluster-co-located-single-node for topology = "co-located".
-dockerfile = "../both-node-web-worker/Dockerfile"
-context = "../both-node-web-worker"
+# No placement fields exist — the scheduler bin-packs replicas by free
+# CPU/memory across the cluster's app nodes (spreading across empty nodes
+# when possible; stacking only when necessary) and fronts the domain with
+# the cluster's edge node.
+dockerfile = "../web-worker/Dockerfile"
+context = "../web-worker"
 cpu = 256
 memory = 256
 replicas = 4               # …e.g. 2 on app-a + 2 on app-b

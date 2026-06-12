@@ -14,37 +14,16 @@ Completed work lives in [DONE.md](DONE.md). Longer-horizon ideas live in [IDEAS.
 
 ### DNS & HTTPS
 
-- [ ] **Cloudflare one-click A record** — `launch-pad dns setup` (or deploy flag): OAuth/API token → create/update **DNS-only** A record to edge/both EIP; link out to Cloudflare dashboard for token setup. _(Route53 + `dns verify` + post-deploy panel already ship; `dns verify` detects the orange-cloud footgun.)_
-- [ ] **Cloudflare-proxied / DNS-01 TLS** — support orange-cloud domains (Caddy DNS challenge or Cloudflare origin cert path). Today proxied DNS is a detected footgun, not yet a product path.
-
-### Capacity & node autoscaling
-
-- [ ] **Reactive autoscaling policy** — declarative min/max app nodes and/or max replicas based on CPU/memory headroom or schedule (even simple “maintain N app nodes” would help).
-- [ ] **Non-disruptive vertical scale** — `node resize` today stops the instance; explore rolling evacuate → replace → rebalance.
-
-### CI/CD
-
-- [ ] **Remote build** — deploy without local Docker (CodeBuild / ECR build pipeline / pre-built image deploy) for slim CI runners.
+- [ ] **Optional DNS provider integrations** — a DNS-write command: provider API token → create/update an A record to the edge EIP. _(`dns verify` + post-deploy panel already ship. Route53 auto-DNS was removed — DNS is user-managed by design (one wildcard covers everything), so weigh whether any write integration is still worth it.)_
+- [ ] **DNS-01 TLS for proxied domains** — support domains fronted by a proxy/CDN (Caddy DNS challenge or origin-cert path). Today a proxied record simply fails `dns verify` as `wrong-ip`, not yet a product path.
 
 ### Data & stateful apps
 
 - [ ] **Managed data plane helpers** — optional **RDS Postgres** and **Redis** (ElastiCache) provisioning or “attach existing” wizard; wire connection strings into service `env` / `secrets`.
 
-### Developer experience
-
-- [ ] **Preview environments** — `deploy --env pr-123` with automatic DNS pattern + TTL teardown (env flag exists; full PR lifecycle automation does not).
-
-### Workers
-
-- [ ] **Worker scheduling (cron)** — an agent should run a container periodically; cron / periodic jobs as a first-class service type (not just long-running workers).
-
 ---
 
 ## Suggested implementation order
 
-1. **Cloudflare one-click A record + DNS-01 TLS** — unblocks HTTPS for the common indie stack (Cloudflare DNS + EIP). Route53 + verify + post-deploy panel already ship.
-2. **Reactive autoscaling + non-disruptive resize** — closes the gap between manual `scale` and hands-off node pool management.
-3. **Remote build** — slim CI runners without local Docker.
-4. **Managed data plane helpers** — RDS Postgres + Redis for stateful indie apps (the two most common day-one dependencies).
-5. **Preview environments** — team/PR workflows on top of the happy path. (Monorepo "deploy changed services only" shipped as `deploy --changed <ref>`.)
-6. **Worker scheduling (cron)** — periodic jobs (cleanup, digests, billing runs) without a separate cron host.
+1. **DNS provider integrations + DNS-01 TLS** — unblocks HTTPS for stacks fronted by a managed DNS/CDN provider. `dns verify` + post-deploy panel already ship; DNS writes are user-managed by design since the Route53 removal.
+2. **Managed data plane helpers** — RDS Postgres + Redis for stateful indie apps (the two most common day-one dependencies). (Named environments shipped as `deploy --env --ttl` + `launchpad destroy --env/--list-envs/--prune-expired`; monorepo "deploy changed services only" shipped as `deploy --changed <ref>`; worker scheduling shipped as `[[service]].cron`. Reactive autoscaling shipped as `launch-pad autoscale`. Remote builds shipped as `deploy --remote-build`.)

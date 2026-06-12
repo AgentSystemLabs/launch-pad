@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import {
-  envProject,
+  footprintOwner,
   LABEL_REGEX,
   SECRET_KEY_REGEX,
   secretParameterPath,
@@ -87,7 +87,7 @@ async function resolveSecretContext(opts: SecretOptions, requireService: boolean
   }
 
   const aws = await prepareAws(opts);
-  const ownerProject = envProject(config.project, opts.env);
+  const ownerProject = footprintOwner(config, opts.env);
   const prefix = secretParameterPrefix({
     clusterId: aws.clusterId,
     ownerProject,
@@ -159,13 +159,13 @@ async function runSet(key: string, opts: SecretOptions): Promise<void> {
   log.success(`set secret ${color.cyan(key)} for service ${color.cyan(ctx.service)}`);
   log.dim(`  ${path}`);
   if (registered) {
-    log.dim(`  registered in launch-pad.toml — run ${color.cyan("launch-pad deploy")} to apply`);
+    log.dim(`  registered in launch-pad.toml — run ${color.cyan("launchpad deploy")} to apply`);
   } else if (opts.noRegister) {
     log.dim("  not registered in launch-pad.toml (--no-register)");
   } else {
-    log.dim(`  already registered — run ${color.cyan("launch-pad deploy")} to apply`);
+    log.dim(`  already registered — run ${color.cyan("launchpad deploy")} to apply`);
   }
-  log.dim(`  rotate with ${color.cyan(`launch-pad deploy --restart --service ${ctx.service}`)}`);
+  log.dim(`  rotate with ${color.cyan(`launchpad deploy --restart --service ${ctx.service}`)}`);
 }
 
 async function runList(opts: SecretOptions): Promise<void> {
@@ -191,7 +191,7 @@ async function runList(opts: SecretOptions): Promise<void> {
   log.plain(`  ${color.cyan(ctx.service)}  ${color.dim(ctx.prefix)}`);
   if (listed.length === 0) {
     log.dim("  no secrets in SSM yet");
-    log.dim(`  set one with: ${color.cyan(`launch-pad secret set DATABASE_URL --service ${ctx.service}`)}`);
+    log.dim(`  set one with: ${color.cyan(`launchpad secret set DATABASE_URL --service ${ctx.service}`)}`);
   } else {
     for (const s of listed) {
       const reg = registered.has(s.name) ? color.green("registered") : color.yellow("not in toml");

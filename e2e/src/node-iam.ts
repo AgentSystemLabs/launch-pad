@@ -1,5 +1,5 @@
 /**
- * launch-pad real-AWS regression for single-node IAM cleanup — `node destroy` must delete the
+ * launchpad real-AWS regression for single-node IAM cleanup — `node destroy` must delete the
  * node's per-node IAM role + instance profile (previously only `cluster destroy` did, leaving
  * orphan roles/profiles accumulating in the account).
  *
@@ -50,7 +50,7 @@ async function main(): Promise<boolean> {
   const region = process.env.LAUNCHPAD_E2E_REGION ?? "us-east-1";
   const runId = randomBytes(3).toString("hex");
   const cluster = `e2e-iam-${runId}`;
-  const node = "iam-both";
+  const node = "iam-edge";
 
   const home = mkdtempSync(join(tmpdir(), "launch-pad-home-"));
   const cli = makeCli({ home, region });
@@ -73,9 +73,9 @@ async function main(): Promise<boolean> {
   };
 
   try {
-    await step("create cluster + a both node (provisions per-node IAM)", async () => {
+    await step("create cluster + an edge node (provisions per-node IAM)", async () => {
       await cli.run(["cluster", "create", cluster, "--region", region]);
-      await cli.run(["node", "create", node, "--role", "both", "--cluster", cluster, "--yes"]);
+      await cli.run(["node", "create", node, "--role", "edge", "--cluster", cluster, "--yes"]);
     });
 
     await step("the per-node IAM role + instance profile exist after create", async () => {
@@ -97,7 +97,7 @@ async function main(): Promise<boolean> {
   } finally {
     if (keep) {
       note(`--keep set — leaving cluster "${cluster}". Tear it down later with:`);
-      note(`  LAUNCHPAD_HOME=${home} launch-pad cluster destroy ${cluster} --yes`);
+      note(`  LAUNCHPAD_HOME=${home} launchpad cluster destroy ${cluster} --yes`);
     } else {
       await teardown();
     }

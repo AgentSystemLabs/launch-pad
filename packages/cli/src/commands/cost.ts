@@ -190,10 +190,10 @@ export function registerCost(program: Command): void {
         "it in CI / a scheduled check to catch a cluster that grew past its threshold.",
         "",
         "Examples:",
-        "  $ launch-pad cost",
-        "  $ launch-pad cost --cluster prod --budget 100",
-        "  $ launch-pad cost --idle-days 3",
-        "  $ launch-pad cost --json --budget 100",
+        "  $ launchpad cost",
+        "  $ launchpad cost --cluster prod --budget 100",
+        "  $ launchpad cost --idle-days 3",
+        "  $ launchpad cost --json --budget 100",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {

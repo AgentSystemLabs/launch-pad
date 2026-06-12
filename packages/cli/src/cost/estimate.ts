@@ -308,6 +308,19 @@ export function budgetVerdict(totalUsd: number | null, budgetUsd: number): Budge
   return { budgetUsd, totalUsd, over, overByUsd: over ? roundUsd(totalUsd - budgetUsd) : 0 };
 }
 
+/** Per-node monthly estimate for a provisioning plan line (EC2 when billing + agent S3). */
+export function formatNodeMonthlyCost(input: NodeCostInput): string {
+  const s3 = estimateAgentS3Monthly(input.role);
+  if (input.billsEc2 === false) {
+    return color.dim(`· ~${formatUsd(s3.totalUsd)}/mo`);
+  }
+  const ec2 = estimateEc2Monthly(input.instanceType);
+  if (ec2 === null) {
+    return color.dim("· cost unknown");
+  }
+  return color.dim(`· ~${formatUsd(ec2 + s3.totalUsd)}/mo`);
+}
+
 /** Short summary for a yes/no confirmation prompt. */
 export function formatProvisionCostSummary(estimate: ProvisionCostEstimate): string {
   if (estimate.totalUsd === null) {

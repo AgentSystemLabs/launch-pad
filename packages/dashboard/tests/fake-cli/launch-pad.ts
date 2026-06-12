@@ -291,11 +291,24 @@ switch (`${c0} ${c1}`) {
   }
   case "cluster show": {
     const name = c2 ?? cluster;
+    const nodes = nodesIn(name);
+    const workloads = nodes.map((n) => ({
+      nodeId: n.nodeId,
+      services: (state.services[n.nodeId] ?? []).map((s) => ({
+        project: s.project,
+        service: s.service,
+        replicas: s.replicas,
+        image: s.image,
+        domain: null as string | null,
+      })),
+    }));
     out({
-      cluster: { clusterId: name, defaultEdge: nodesIn(name).find((n) => n.role !== "app")?.nodeId ?? null },
+      cluster: { clusterId: name, defaultEdge: nodes.find((n) => n.role !== "app")?.nodeId ?? null },
       account: "111122223333",
       region: "us-east-1",
-      nodes: nodesIn(name),
+      nodes,
+      workloads,
+      scheduledServices: workloads.reduce((sum, w) => sum + w.services.length, 0),
     });
     break;
   }

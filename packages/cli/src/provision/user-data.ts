@@ -13,13 +13,13 @@ export interface AgentConfig {
 
 export interface UserDataParams {
   agent: AgentConfig;
-  /** Presigned S3 URL the node curls to fetch the agent bundle (full bootstrap only). */
-  bundleUrl?: string;
-  /** Golden AMIs already include host dependencies and the agent bundle. */
+  /** Presigned S3 URL the node curls to fetch the agent binary (full bootstrap only). */
+  agentBinaryUrl?: string;
+  /** Golden AMIs already include host dependencies and the role's agent binary. */
   bootstrapMode?: "full" | "golden";
 }
 
-/** Caddy install + permissive-admin systemd service (only for edge/both nodes). */
+/** Caddy install + permissive-admin systemd service (only for the edge node). */
 function caddyBlock(installBinary: boolean): string {
   const unit = `[Unit]
 Description=Caddy
@@ -64,59 +64,60 @@ systemctl enable --now caddy
 }
 
 /**
- * The cloud-init script a node runs on first boot: install Docker + Node (+ Caddy on
- * edge/both nodes), write the agent config + systemd unit, download the agent bundle
- * from a presigned S3 URL, then start it under systemd.
+ * The cloud-init script a node runs on first boot — strictly role-specific:
+ *
+ *   - edge: Caddy + CloudWatch + the edge agent binary. No Docker, no Node.js.
+ *   - app:  Docker + CloudWatch + the app agent binary. No Caddy, no Node.js.
+ *
+ * On a golden AMI everything is pre-baked and first boot only writes node-specific
+ * config; a full bootstrap installs the role's stack and curls the agent binary from
+ * a presigned S3 URL.
  */
 export function renderUserData(params: UserDataParams): string {
   const bootstrapMode = params.bootstrapMode ?? "full";
+  const role = params.agent.role;
   const agentJson = JSON.stringify(params.agent, null, 2);
-  const unit = renderSystemdUnit();
-  const caddy = params.agent.role === "app" ? "" : `\n${caddyBlock(bootstrapMode === "full")}`;
+  const unit = renderSystemdUnit(role === "app" ? "app" : "edge");
+  const caddy = role === "app" ? "" : `\n${caddyBlock(bootstrapMode === "full")}`;
   const cloudwatch = renderCloudWatchInstall({
     clusterId: params.agent.clusterId,
     nodeId: params.agent.nodeId,
-    role: params.agent.role,
+    role,
     installPackage: bootstrapMode === "full",
   });
 
-  const runtimeBlock =
-    bootstrapMode === "golden"
-      ? `# --- runtime already installed by launch-pad golden AMI ---
-node --version
-test -f /opt/launch-pad/agent.cjs`
-      : `# --- Node.js 22 ---
-curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-dnf install -y nodejs`;
-
-  if (bootstrapMode === "full" && !params.bundleUrl) {
-    throw new Error("bundleUrl is required for full bootstrap");
+  if (bootstrapMode === "full" && !params.agentBinaryUrl) {
+    throw new Error("agentBinaryUrl is required for full bootstrap");
   }
 
   const fetchAgent =
     bootstrapMode === "golden"
-      ? "# TypeScript agent bundle is baked into the launch-pad golden AMI."
-      : `curl -fsSL "${params.bundleUrl}" -o /opt/launch-pad/agent.cjs`;
+      ? `# --- agent binary baked into the launchpad golden AMI ---
+test -x /opt/launch-pad/agent`
+      : `# --- launchpad agent binary (role: ${role}) ---
+curl -fsSL "${params.agentBinaryUrl}" -o /opt/launch-pad/agent
+chmod +x /opt/launch-pad/agent`;
 
   const dockerBlock =
-    bootstrapMode === "full"
-      ? `# --- Docker ---
+    role === "app"
+      ? bootstrapMode === "full"
+        ? `# --- Docker ---
 dnf install -y docker
-systemctl enable --now docker`
-      : `# --- Docker (preinstalled by launch-pad golden AMI) ---
-systemctl enable --now docker`;
+systemctl enable --now docker
+`
+        : `# --- Docker (preinstalled by launchpad golden AMI) ---
+systemctl enable --now docker
+`
+      : "";
 
   return `#!/bin/bash
 set -euxo pipefail
 
-# --- launch-pad dirs ---
+# --- launchpad dirs ---
 mkdir -p /etc/launch-pad /var/lib/launch-pad /opt/launch-pad
 
-${dockerBlock}
-
-${runtimeBlock}
-${caddy}
-# --- launch-pad agent ---
+${dockerBlock}${caddy}
+# --- launchpad agent ---
 cat > /etc/launch-pad/agent.json <<'AGENTCONF'
 ${agentJson}
 AGENTCONF

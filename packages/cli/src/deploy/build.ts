@@ -3,14 +3,45 @@ import { type EcrAuth, registryHost } from "../aws/ecr";
 import { CliError } from "../errors";
 
 const BUILDER_NAME = "launchpad-builder";
+const DOCKER_PROBE_TIMEOUT_MS = 15_000;
+const DOCKER_LOGIN_TIMEOUT_MS = 30_000;
+
+function isTimedOut(error: unknown): boolean {
+  return (error as { timedOut?: boolean }).timedOut === true;
+}
+
+function errorDetail(error: unknown): string {
+  const stderr = (error as { stderr?: string }).stderr?.trim();
+  if (stderr) return stderr;
+  return (error as Error).message || "unknown error";
+}
+
+function dockerDaemonTimeoutError(action: string): CliError {
+  return new CliError(`Docker did not respond while ${action}`, {
+    hint: [
+      "Docker Desktop appears to be running but its daemon is not answering CLI requests.",
+      "Restart Docker Desktop, then verify `docker info` returns before retrying deploy.",
+      "You can avoid local Docker with `launchpad deploy --remote-build --yes`.",
+    ].join("\n"),
+  });
+}
 
 /** Verify docker + buildx are available before we rely on them. */
 export async function checkDocker(): Promise<void> {
   try {
-    await execa("docker", ["buildx", "version"]);
-  } catch {
+    await execa("docker", ["buildx", "version"], { timeout: DOCKER_PROBE_TIMEOUT_MS });
+  } catch (error) {
+    if (isTimedOut(error)) throw dockerDaemonTimeoutError("checking buildx");
     throw new CliError("docker with buildx is required but was not found", {
       hint: "install Docker Desktop (or docker + buildx) and make sure the daemon is running",
+    });
+  }
+  try {
+    await execa("docker", ["info"], { timeout: DOCKER_PROBE_TIMEOUT_MS });
+  } catch (error) {
+    if (isTimedOut(error)) throw dockerDaemonTimeoutError("checking the Docker daemon");
+    throw new CliError("Docker daemon is not available", {
+      hint: errorDetail(error),
     });
   }
 }
@@ -34,16 +65,28 @@ export async function computeImageTag(contextDir: string): Promise<string> {
 /** Ensure a docker-container buildx builder exists (needed for cross-arch --push). */
 export async function ensureBuilder(): Promise<void> {
   try {
-    await execa("docker", ["buildx", "inspect", BUILDER_NAME]);
-  } catch {
-    await execa("docker", [
-      "buildx",
-      "create",
-      "--name",
-      BUILDER_NAME,
-      "--driver",
-      "docker-container",
-    ]);
+    await execa("docker", ["buildx", "inspect", BUILDER_NAME], { timeout: DOCKER_PROBE_TIMEOUT_MS });
+  } catch (error) {
+    if (isTimedOut(error)) throw dockerDaemonTimeoutError(`inspecting buildx builder "${BUILDER_NAME}"`);
+    try {
+      await execa(
+        "docker",
+        [
+          "buildx",
+          "create",
+          "--name",
+          BUILDER_NAME,
+          "--driver",
+          "docker-container",
+        ],
+        { timeout: DOCKER_PROBE_TIMEOUT_MS },
+      );
+    } catch (createError) {
+      if (isTimedOut(createError)) throw dockerDaemonTimeoutError(`creating buildx builder "${BUILDER_NAME}"`);
+      throw new CliError(`could not create buildx builder "${BUILDER_NAME}"`, {
+        hint: errorDetail(createError),
+      });
+    }
   }
 }
 
@@ -52,10 +95,11 @@ export async function dockerLoginEcr(auth: EcrAuth): Promise<void> {
     await execa(
       "docker",
       ["login", "--username", auth.username, "--password-stdin", registryHost(auth.endpoint)],
-      { input: auth.password },
+      { input: auth.password, timeout: DOCKER_LOGIN_TIMEOUT_MS },
     );
   } catch (error) {
-    throw new CliError(`docker login to ECR failed: ${(error as Error).message}`);
+    if (isTimedOut(error)) throw dockerDaemonTimeoutError("logging in to ECR");
+    throw new CliError(`docker login to ECR failed: ${errorDetail(error)}`);
   }
 }
 
@@ -85,10 +129,8 @@ export async function buildAndPush(args: BuildArgs): Promise<void> {
   try {
     await execa("docker", cmd, { stdio: args.verbose ? "inherit" : "pipe" });
   } catch (error) {
-    const detail =
-      (error as { stderr?: string }).stderr || (error as Error).message || "unknown error";
     throw new CliError(`docker build/push failed for ${args.imageUri}`, {
-      hint: detail.split("\n").slice(-6).join("\n"),
+      hint: errorDetail(error).split("\n").slice(-6).join("\n"),
     });
   }
 }

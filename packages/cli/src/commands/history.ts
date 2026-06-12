@@ -2,7 +2,7 @@ import { Command } from "commander";
 import {
   type DeployEvent,
   deployEventsPrefix,
-  envProject,
+  footprintOwner,
   LABEL_REGEX,
   parseDeployEvent,
 } from "@agentsystemlabs/launch-pad-shared";
@@ -76,7 +76,7 @@ export async function runHistory(opts: HistoryOptions): Promise<void> {
       hint: "use lowercase letters, numbers and hyphens (a valid DNS label)",
     });
   }
-  const ownerProject = envProject(config.project, env);
+  const ownerProject = footprintOwner(config, env);
   const limit = parseLimit(opts.limit);
   if (opts.service !== undefined && !config.service.some((s) => s.name === opts.service)) {
     throw new CliError(`no service named "${opts.service}" in launch-pad.toml`, {
@@ -115,7 +115,7 @@ export async function runHistory(opts: HistoryOptions): Promise<void> {
         ? `no deploy history for ${color.cyan(opts.service)} in ${color.cyan(ownerProject)}`
         : `no deploy history for ${color.cyan(ownerProject)} yet`,
     );
-    log.dim("  history is recorded from each `launch-pad deploy` onward");
+    log.dim("  history is recorded from each `launchpad deploy` onward");
     return;
   }
 
@@ -147,9 +147,9 @@ export function registerHistory(program: Command): void {
         "an audit trail and a hint for `rollback` — and is never read by the node agents.",
         "",
         "Examples:",
-        "  $ launch-pad history",
-        "  $ launch-pad history --service web --limit 20",
-        "  $ launch-pad history --env staging",
+        "  $ launchpad history",
+        "  $ launchpad history --service web --limit 20",
+        "  $ launchpad history --env staging",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {

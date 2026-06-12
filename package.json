@@ -3,22 +3,32 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "launchpad": "./packages/cli/scripts/run-source.mjs",
+    "launch-pad": "./packages/cli/scripts/run-source.mjs",
+    "lpd": "./packages/cli/scripts/run-source.mjs"
+  },
   "packageManager": "pnpm@11.1.2",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
+    "link": "npm link",
+    "link:dist": "pnpm --filter @agentsystemlabs/launch-pad build && npm link -C packages/cli",
     "build": "pnpm -r run build",
+    "build:agent": "bash scripts/build-agent-binaries.sh",
     "build:golden-ami": "bash scripts/build-golden-ami.sh",
     "dev": "pnpm -r --parallel run dev",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
+    "test:agent": "cargo test --manifest-path packages/agent-rust/Cargo.toml",
     "e2e": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e",
     "e2e:scale": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:scale",
-    "e2e:undeploy": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:undeploy",
+    "e2e:destroy": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:destroy",
     "e2e:deploy-changed": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:deploy-changed",
     "e2e:deploy-image": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:deploy-image",
     "e2e:rollback": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:rollback",
+    "e2e:remote-build": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:remote-build",
     "e2e:dns": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:dns",
     "e2e:empty-cluster": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:empty-cluster",
     "e2e:auto-add": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:auto-add",
@@ -33,6 +43,11 @@
     "e2e:operator-iam": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:operator-iam",
     "e2e:rebalance": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:rebalance",
     "e2e:destroy-evacuate": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:destroy-evacuate",
+    "e2e:resize-evacuate": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:resize-evacuate",
+    "e2e:cron": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:cron",
+    "e2e:autoscale": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:autoscale",
+    "e2e:destroy-env": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:destroy-env",
+    "e2e:components": "pnpm -r run build && pnpm --filter @agentsystemlabs/launch-pad-e2e run e2e:components",
     "clean": "pnpm -r exec rm -rf dist .turbo *.tsbuildinfo"
   },
   "devDependencies": {

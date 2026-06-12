@@ -1,5 +1,5 @@
 /**
- * Result types + pure aggregation for `launch-pad doctor`. The check RUNNERS live
+ * Result types + pure aggregation for `launchpad doctor`. The check RUNNERS live
  * in the command (they touch Docker + AWS); this module is the pure, testable core —
  * how a set of results rolls up to an overall pass/fail and a summary.
  */

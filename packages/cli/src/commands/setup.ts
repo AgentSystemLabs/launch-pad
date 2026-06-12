@@ -81,7 +81,7 @@ async function runIamPolicy(opts: SetupOptions): Promise<void> {
     `       aws iam attach-user-policy --user-name <you> \\\n` +
       `         --policy-arn arn:aws:iam::${accountId}:policy/launch-pad-operator`,
   );
-  log.dim("  Tip: `launch-pad setup iam-policy --json > policy.json` for just the document.");
+  log.dim("  Tip: `launchpad setup iam-policy --json > policy.json` for just the document.");
   log.plain();
   // The policy document itself goes to stdout so `> policy.json` captures only it.
   process.stdout.write(operatorPolicyJson({ accountId, region }));
@@ -140,13 +140,13 @@ async function runGithubOidc(opts: GithubOidcOptions): Promise<void> {
     `       aws iam create-role --role-name ${roleName} \\\n` +
       `         --assume-role-policy-document file://launch-pad-oidc-trust.json`,
   );
-  log.plain("  3. Attach the operator policy (launch-pad setup iam-policy) to it:");
+  log.plain("  3. Attach the operator policy (launchpad setup iam-policy) to it:");
   log.plain(
     `       aws iam attach-role-policy --role-name ${roleName} \\\n` +
       `         --policy-arn arn:aws:iam::${accountId}:policy/launch-pad-operator`,
   );
   log.plain("  4. Commit the workflow below as .github/workflows/deploy.yml");
-  log.dim("  Tip: `launch-pad setup github-oidc --repo … --json` emits both as one JSON object.");
+  log.dim("  Tip: `launchpad setup github-oidc --repo … --json` emits both as one JSON object.");
 
   log.plain();
   log.step("Trust policy → launch-pad-oidc-trust.json");
@@ -187,7 +187,7 @@ async function resolveSetupRegion(opts: SetupWizardOptions): Promise<string> {
 }
 
 /**
- * First-run bootstrap (`launch-pad setup` with no subcommand): pick a region, confirm the
+ * First-run bootstrap (`launchpad setup` with no subcommand): pick a region, confirm the
  * AWS account, create the state bucket, and — for a named cluster — save the local target.
  * The implicit `default` cluster runs on ambient creds, so it only ensures the bucket +
  * prints next steps. Interactive when run on a TTY without flags; fully scriptable with
@@ -253,12 +253,12 @@ async function runWizard(opts: SetupWizardOptions): Promise<void> {
   }
   log.plain();
   log.step("Next steps:");
-  log.plain("  1. launch-pad doctor          # preflight Docker + AWS before any spend");
-  log.plain("  2. launch-pad init            # scaffold launch-pad.toml in your app");
+  log.plain("  1. launchpad doctor          # preflight Docker + AWS before any spend");
+  log.plain("  2. launchpad init            # scaffold launch-pad.toml in your app");
   log.plain(
-    `  3. launch-pad deploy --yes${plan.isDefaultCluster ? "" : ` --cluster ${cluster}`}   # build, push, auto-provision + run`,
+    `  3. launchpad deploy --yes${plan.isDefaultCluster ? "" : ` --cluster ${cluster}`}   # build, push, auto-provision + run`,
   );
-  log.dim("  Tip: `launch-pad setup iam-policy` / `setup github-oidc` for least-privilege + CI.");
+  log.dim("  Tip: `launchpad setup iam-policy` / `setup github-oidc` for least-privilege + CI.");
 }
 
 export function registerSetup(program: Command): void {
@@ -275,9 +275,9 @@ export function registerSetup(program: Command): void {
         "Interactive on a TTY; fully scriptable with --region / --cluster / --yes.",
         "",
         "Examples:",
-        "  $ launch-pad setup                       # guided default-cluster bootstrap",
-        "  $ launch-pad setup --region us-west-2 --yes",
-        "  $ launch-pad setup --cluster prod --region us-east-1 --yes",
+        "  $ launchpad setup                       # guided default-cluster bootstrap",
+        "  $ launchpad setup --region us-west-2 --yes",
+        "  $ launchpad setup --cluster prod --region us-east-1 --yes",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {
@@ -294,13 +294,13 @@ export function registerSetup(program: Command): void {
       [
         "",
         "Emits the exact set of permissions deploy/provision/manage needs — scoped to the",
-        "launch-pad state bucket, ECR repos, the launch-pad-node-* IAM roles, /launch-pad/*",
+        "launchpad state bucket, ECR repos, the launch-pad-node-* IAM roles, /launch-pad/*",
         "secrets, and a single region. Use it instead of attaching AdministratorAccess.",
         "",
         "Examples:",
-        "  $ launch-pad setup iam-policy",
-        "  $ launch-pad setup iam-policy --json > policy.json",
-        "  $ launch-pad setup iam-policy --account 111122223333 --region us-west-2",
+        "  $ launchpad setup iam-policy",
+        "  $ launchpad setup iam-policy --json > policy.json",
+        "  $ launchpad setup iam-policy --account 111122223333 --region us-west-2",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {
@@ -322,11 +322,11 @@ export function registerSetup(program: Command): void {
         "",
         "Generates everything for keyless GitHub Actions deploys: the IAM role trust policy",
         "(federating GitHub's OIDC provider, pinned to your repo/branch) and a ready-to-commit",
-        "deploy workflow. Pair the role with `launch-pad setup iam-policy` for its permissions.",
+        "deploy workflow. Pair the role with `launchpad setup iam-policy` for its permissions.",
         "",
         "Examples:",
-        "  $ launch-pad setup github-oidc --repo acme/widgets",
-        "  $ launch-pad setup github-oidc --repo acme/widgets --branch release --json",
+        "  $ launchpad setup github-oidc --repo acme/widgets",
+        "  $ launchpad setup github-oidc --repo acme/widgets --branch release --json",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {

@@ -114,9 +114,9 @@ export function registerAlerts(program: Command): void {
         "check (cron / GitHub Action) and POST to Slack/Discord with --webhook.",
         "",
         "Examples:",
-        "  $ launch-pad alerts check",
-        "  $ launch-pad alerts check --cluster prod --webhook https://hooks.slack.com/services/…",
-        "  $ launch-pad alerts check --json",
+        "  $ launchpad alerts check",
+        "  $ launchpad alerts check --cluster prod --webhook https://hooks.slack.com/services/…",
+        "  $ launchpad alerts check --json",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {

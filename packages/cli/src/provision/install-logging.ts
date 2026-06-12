@@ -31,14 +31,14 @@ function requireRunningInstance(obs: Ec2Observation, nodeId: string): void {
         ? `instance is ${obs.state}`
         : "instance is gone";
   throw new CliError(`can't install logging on "${nodeId}" — ${detail}`, {
-    hint: "start it with `launch-pad node resume` or reconcile drift first",
+    hint: "start it with `launchpad node resume` or reconcile drift first",
   });
 }
 
 /**
  * Bring CloudWatch log shipping to an existing node: update its per-node IAM policy
  * (adds CloudWatch Logs write) and install + start the Amazon CloudWatch Agent over
- * SSM. Idempotent — safe to run repeatedly. The launch-pad agent picks up dynamic
+ * SSM. Idempotent — safe to run repeatedly. The launchpad agent picks up dynamic
  * per-container config on its next tick, so no agent restart is needed.
  */
 export async function installLoggingOnNode(p: InstallLoggingParams): Promise<InstallLoggingResult> {
@@ -48,7 +48,7 @@ export async function installLoggingOnNode(p: InstallLoggingParams): Promise<Ins
 
   if (!entry.instanceId) {
     throw new CliError(`node "${nodeId}" has no EC2 instance yet`, {
-      hint: "provision it with `launch-pad node create` or deploy with auto-create",
+      hint: "provision it with `launchpad node create` or deploy with auto-create",
     });
   }
 

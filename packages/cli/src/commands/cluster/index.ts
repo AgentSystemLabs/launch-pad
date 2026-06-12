@@ -5,6 +5,7 @@ import {
   DEFAULT_CLUSTER,
   LABEL_REGEX,
   type NodeRegistryEntry,
+  nodeFrontsIngress,
   nodeRegistryKey,
   nodeUsesElasticIp,
   parseNodeRegistryEntry,
@@ -12,12 +13,20 @@ import {
 import { type AwsEnv, prepareAws } from "../../aws/context";
 import { awsErrorName } from "../../aws/errors";
 import { deletePrefix, getJson, listClusterIds, listNodeIds, putJson } from "../../aws/s3-state";
+import { loadNodeDesiredStates } from "../../deploy/deployed-footprint";
+import { loadEnvMarkers } from "../../preview/markers";
+import {
+  buildEnvFootprintSummaries,
+  describeEnvMarker,
+  type FootprintServiceSummary,
+} from "../../project/footprint-view";
 import {
   deleteSecurityGroup,
   releaseEip,
   stopInstance,
   terminateInstance,
 } from "../../aws/ec2";
+import { createCodeBuildClient, deleteRemoteBuildInfra } from "../../aws/codebuild";
 import { deleteNodeIam } from "../../aws/iam";
 import { getClusterConfig, putClusterConfig } from "../../cluster/store";
 import {
@@ -90,6 +99,7 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
         region: aws.region,
         createdAt: nowIso(),
         createdBy: aws.callerArn,
+        autoscale: null,
       };
   await putClusterConfig(aws, config);
 
@@ -104,8 +114,8 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
       ["default edge", config.defaultEdge ?? color.dim("none yet")],
     ]),
     "",
-    color.dim("add nodes with `launch-pad node create <name> --cluster " + name + "`"),
-    color.dim("the first edge/both node created in this cluster becomes its default edge."),
+    color.dim("add nodes with `launchpad node create <name> --cluster " + name + "`"),
+    color.dim("the first edge node created in this cluster becomes its default edge."),
   ]);
 }
 
@@ -161,7 +171,7 @@ async function runList(opts: GlobalOpts): Promise<void> {
   if (names.length === 0) {
     log.info("no clusters configured");
     log.dim("  everything lives in the implicit `default` cluster");
-    log.dim("  create one with `launch-pad cluster create <name> --region <region>`");
+    log.dim("  create one with `launchpad cluster create <name> --region <region>`");
     return;
   }
   log.plain();
@@ -184,33 +194,113 @@ async function runList(opts: GlobalOpts): Promise<void> {
 
 // ── show ───────────────────────────────────────────────────────────────────────
 
+/** Compact view of one scheduled service from a node's desired.json. */
+export interface ClusterServiceSummary {
+  project: string;
+  service: string;
+  replicas: number;
+  image: string;
+  domain: string | null;
+  cron?: string;
+}
+
+export interface ClusterNodeWorkload {
+  nodeId: string;
+  services: ClusterServiceSummary[];
+}
+
+/** Map raw desired services to the stable summary `cluster show` prints. Pure. */
+export function summarizeClusterServices(
+  services: Array<{
+    project: string;
+    service: string;
+    replicas: number;
+    image: string;
+    ingress: { domain: string } | null;
+    cron?: string;
+  }>,
+): ClusterServiceSummary[] {
+  return services
+    .map((s) => ({
+      project: s.project,
+      service: s.service,
+      replicas: s.replicas,
+      image: s.image,
+      domain: s.ingress?.domain ?? null,
+      ...(s.cron !== undefined ? { cron: s.cron } : {}),
+    }))
+    .sort((a, b) =>
+      `${a.project}/${a.service}`.localeCompare(`${b.project}/${b.service}`),
+    );
+}
+
+function formatServiceLine(s: ClusterServiceSummary): string {
+  const tag = s.image.split(":").pop() ?? s.image;
+  const replicas = s.replicas > 1 ? `  ${color.dim(`×${s.replicas}`)}` : "";
+  const domain = s.domain ? `  ${color.dim(s.domain)}` : "";
+  const cron = s.cron ? `  ${color.dim(`cron ${s.cron}`)}` : "";
+  return `    ${color.cyan(`${s.project}/${s.service}`)}${replicas}  ${color.dim(tag)}${domain}${cron}`;
+}
+
+function formatEnvServiceLine(s: FootprintServiceSummary): string {
+  const tag = s.image.split(":").pop() ?? s.image;
+  const replicas = s.replicas > 1 ? `  ${color.dim(`×${s.replicas}`)}` : "";
+  const domain = s.domain ? `  ${color.dim(s.domain)}` : "";
+  const cron = s.cron ? `  ${color.dim(`cron ${s.cron}`)}` : "";
+  const nodes = s.nodeIds.map((id) => color.cyan(id)).join(", ");
+  return `    ${color.cyan(s.service)}${replicas}  ${color.dim(tag)}${domain}${cron}  ${color.dim("→")} ${nodes}`;
+}
+
 async function runShow(name: string, opts: GlobalOpts): Promise<void> {
   const aws = await prepareAws({ ...opts, cluster: name });
   const config = await getClusterConfig(aws, name);
-  const ids = await listNodeIds(aws.s3, aws.bucket, name);
+  const ids = [...(await listNodeIds(aws.s3, aws.bucket, name))].sort();
 
   // The cluster must exist somewhere: a local target, a cluster.json, or member
   // nodes in S3. (The implicit `default` cluster always exists and has no cluster.json.)
   if (name !== DEFAULT_CLUSTER && !config && ids.length === 0 && !resolveClusterTarget(name)) {
     throw new CliError(`cluster "${name}" not found`, {
-      hint: `nothing in S3 or local config — create it: launch-pad cluster create ${name} --region <region>`,
+      hint: `nothing in S3 or local config — create it: launchpad cluster create ${name} --region <region>`,
     });
   }
 
-  const nodes: NodeRegistryEntry[] = [];
+  const registryById = new Map<string, NodeRegistryEntry>();
   for (const id of ids) {
     const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(name, id));
     if (obj) {
       try {
-        nodes.push(parseNodeRegistryEntry(obj.raw));
+        registryById.set(id, parseNodeRegistryEntry(obj.raw));
       } catch {
         /* skip malformed */
       }
     }
   }
+  const nodes = [...registryById.values()].sort((a, b) => a.nodeId.localeCompare(b.nodeId));
+
+  const nodeDesiredStates = await loadNodeDesiredStates(aws.s3, aws.bucket, name);
+  const desiredById = new Map(nodeDesiredStates.map((s) => [s.nodeId, s.services]));
+  const workloads: ClusterNodeWorkload[] = ids.map((nodeId) => ({
+    nodeId,
+    services: summarizeClusterServices(desiredById.get(nodeId) ?? []),
+  }));
+  const scheduledServices = workloads.reduce((n, w) => n + w.services.length, 0);
+  const nowMs = Date.now();
+  const envSummaries = buildEnvFootprintSummaries(await loadEnvMarkers(aws), nodeDesiredStates, nowMs);
 
   if (isJsonMode()) {
-    printJson({ cluster: config, account: aws.accountId, region: aws.region, nodes });
+    printJson({
+      cluster: config,
+      account: aws.accountId,
+      region: aws.region,
+      nodes,
+      workloads,
+      scheduledServices,
+      environments: envSummaries.map(({ marker, expired, services }) => ({
+        ...marker,
+        expired,
+        services,
+      })),
+    });
     return;
   }
   panel(`Cluster ${name}`, [
@@ -218,14 +308,43 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
       ["account / region", `${aws.accountId} ${color.dim(aws.region)}`],
       ["state bucket", aws.bucket],
       ["default edge", config?.defaultEdge ?? color.dim("none")],
-      ["nodes", String(nodes.length)],
+      ["nodes", String(ids.length)],
+      ["scheduled services", String(scheduledServices)],
+      ["environments", String(envSummaries.length)],
     ]),
   ]);
-  if (nodes.length > 0) {
-    panel(
-      "Nodes",
-      nodes.map((n) => `${color.cyan(n.nodeId)} ${color.dim(`${n.role} · ${n.instanceType}`)}`),
-    );
+  if (ids.length > 0) {
+    const lines: string[] = [];
+    for (const nodeId of ids) {
+      const entry = registryById.get(nodeId);
+      const meta = entry
+        ? `${color.cyan(nodeId)}  ${color.dim(`${entry.role} · ${entry.instanceType}`)}`
+        : `${color.cyan(nodeId)}  ${color.yellow("no registry entry")}`;
+      lines.push(meta);
+      const services = workloads.find((w) => w.nodeId === nodeId)?.services ?? [];
+      if (services.length === 0) {
+        lines.push(color.dim("    no services scheduled"));
+      } else {
+        for (const s of services) lines.push(formatServiceLine(s));
+      }
+    }
+    panel("Nodes & services", lines);
+  }
+  if (envSummaries.length > 0) {
+    const envLines: string[] = [];
+    for (const env of envSummaries) {
+      const header = describeEnvMarker(env.marker, nowMs);
+      const domains =
+        env.marker.domains.length > 0 ? `  ${color.dim(env.marker.domains.join(", "))}` : "";
+      envLines.push((env.expired ? color.yellow(header) : header) + domains);
+      if (env.services.length === 0) {
+        envLines.push(color.dim("    nothing scheduled"));
+      } else {
+        for (const s of env.services) envLines.push(formatEnvServiceLine(s));
+      }
+    }
+    panel("Environments", envLines);
+    log.dim("  destroy one: launchpad destroy --env <name> · list only: launchpad destroy --list-envs");
   }
 }
 
@@ -234,13 +353,15 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
 async function runSetEdge(name: string, nodeId: string, opts: GlobalOpts): Promise<void> {
   assertValidNodeId(nodeId);
   if (name === DEFAULT_CLUSTER) {
-    throw new CliError("the default cluster has no cluster.json — set a per-service `edge` instead");
+    throw new CliError("the default cluster has no cluster.json to record a default edge", {
+      hint: "the default cluster resolves its edge from the registry's single edge-role node — create one with `launchpad node create <name> --role edge`",
+    });
   }
   const aws = await prepareAws({ ...opts, cluster: name });
   const config = await getClusterConfig(aws, name);
   if (!config) {
     throw new CliError(`cluster "${name}" has no cluster.json`, {
-      hint: `create it: launch-pad cluster create ${name} --region <region>`,
+      hint: `create it: launchpad cluster create ${name} --region <region>`,
     });
   }
   const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(name, nodeId));
@@ -248,7 +369,7 @@ async function runSetEdge(name: string, nodeId: string, opts: GlobalOpts): Promi
     throw new CliError(`node "${nodeId}" does not exist in cluster "${name}"`);
   }
   const entry = parseNodeRegistryEntry(obj.raw);
-  if (entry.role !== "edge" && entry.role !== "both") {
+  if (!nodeFrontsIngress(entry.role)) {
     throw new CliError(`node "${nodeId}" is not an edge (role=${entry.role})`);
   }
 
@@ -274,7 +395,7 @@ export function applyClusterUse(name: string): { defaultCluster: string | null }
   }
   if (!resolveClusterTarget(name)) {
     throw new CliError(`cluster "${name}" is not configured locally`, {
-      hint: `create it: launch-pad cluster create ${name} --region <region>`,
+      hint: `create it: launchpad cluster create ${name} --region <region>`,
     });
   }
   setDefaultCluster(name);
@@ -375,7 +496,7 @@ async function runCurrent(opts: GlobalOpts): Promise<void> {
   } else if (eff.isImplicitDefault) {
     log.dim(`  no default set — using the implicit ${color.cyan(DEFAULT_CLUSTER)} cluster (ambient creds, legacy S3 keys)`);
   } else {
-    log.dim(`  this is your persistent default — change it with ${color.cyan("launch-pad cluster use <name>")}`);
+    log.dim(`  this is your persistent default — change it with ${color.cyan("launchpad cluster use <name>")}`);
   }
 }
 
@@ -396,7 +517,7 @@ async function prepareClusterAws(name: string, opts: GlobalOpts): Promise<AwsEnv
   const config = await getClusterConfig(aws, name);
   if (config || (await listNodeIds(aws.s3, aws.bucket, name)).length > 0) return aws;
   throw new CliError(`cluster "${name}" not found`, {
-    hint: `nothing in S3 or local config — create it: launch-pad cluster create ${name} --region <region>`,
+    hint: `nothing in S3 or local config — create it: launchpad cluster create ${name} --region <region>`,
   });
 }
 
@@ -416,14 +537,23 @@ async function loadClusterNodes(aws: AwsEnv, name: string): Promise<NodeRegistry
   return nodes;
 }
 
-/** App nodes first (drain replicas while the edge keeps routing). */
-function appsFirst(nodes: NodeRegistryEntry[]): NodeRegistryEntry[] {
-  return [...nodes].sort((a, b) => (a.role === "app" ? 0 : 1) - (b.role === "app" ? 0 : 1));
+async function pauseClusterNode(
+  aws: AwsEnv,
+  clusterName: string,
+  node: NodeRegistryEntry,
+): Promise<string> {
+  await stopInstance(aws.ec2, node.instanceId!);
+  await putJson(aws.s3, aws.bucket, nodeRegistryKey(clusterName, node.nodeId), { ...node, state: "stopped" });
+  return node.nodeId;
 }
 
-/** Edge/both first (bring ingress up before apps register). */
-function ingressFirst(nodes: NodeRegistryEntry[]): NodeRegistryEntry[] {
-  return [...nodes].sort((a, b) => (a.role === "app" ? 1 : 0) - (b.role === "app" ? 1 : 0));
+async function resumeClusterNode(
+  aws: AwsEnv,
+  node: NodeRegistryEntry,
+): Promise<{ nodeId: string; address: string | null }> {
+  const updated = await resumeNode(aws, node);
+  const addr = (nodeUsesElasticIp(updated.role) ? updated.publicIp : updated.privateIp) ?? null;
+  return { nodeId: node.nodeId, address: addr };
 }
 
 async function runPause(name: string, opts: GroupOptions): Promise<void> {
@@ -440,23 +570,35 @@ async function runPause(name: string, opts: GroupOptions): Promise<void> {
     if (!ok) throw new CliError("aborted", { hint: "re-run with --yes to skip this prompt" });
   }
 
-  const paused: string[] = [];
-  for (const node of appsFirst(pausable)) {
+  let paused: string[];
+  if (pausable.length === 1) {
+    const node = pausable[0]!;
     const spin = spinner(`pausing ${node.nodeId} (stopping ${node.instanceId})…`).start();
     try {
-      await stopInstance(aws.ec2, node.instanceId!);
-      await putJson(aws.s3, aws.bucket, nodeRegistryKey(name, node.nodeId), { ...node, state: "stopped" });
-      paused.push(node.nodeId);
+      paused = [await pauseClusterNode(aws, name, node)];
       spin.succeed(`paused node ${color.cyan(node.nodeId)}`);
     } catch (error) {
       if (spin.isSpinning) spin.fail(`pause failed for ${node.nodeId}`);
+      throw error;
+    }
+  } else {
+    const spin = spinner(`pausing ${pausable.length} nodes…`).start();
+    try {
+      paused = await Promise.all(pausable.map((node) => pauseClusterNode(aws, name, node)));
+      if (spin.isSpinning) {
+        spin.succeed(
+          `paused ${paused.length} nodes: ${paused.map((id) => color.cyan(id)).join(", ")}`,
+        );
+      }
+    } catch (error) {
+      if (spin.isSpinning) spin.fail("pause failed");
       throw error;
     }
   }
 
   if (isJsonMode()) return printJson({ cluster: name, paused });
   log.dim("  compute billing stops; EBS volumes (and any Elastic IP) still incur a small charge");
-  log.dim(`  resume with: ${color.cyan(`launch-pad cluster resume ${name}`)}`);
+  log.dim(`  resume with: ${color.cyan(`launchpad cluster resume ${name}`)}`);
 }
 
 async function runResume(name: string, opts: GroupOptions): Promise<void> {
@@ -473,17 +615,30 @@ async function runResume(name: string, opts: GroupOptions): Promise<void> {
     if (!ok) throw new CliError("aborted", { hint: "re-run with --yes to skip this prompt" });
   }
 
-  const resumed: Array<{ nodeId: string; address: string | null }> = [];
-  for (const node of ingressFirst(resumable)) {
+  let resumed: Array<{ nodeId: string; address: string | null }>;
+  if (resumable.length === 1) {
+    const node = resumable[0]!;
     const spin = spinner(`resuming ${node.nodeId} (starting ${node.instanceId})…`).start();
     try {
-      const updated = await resumeNode(aws, node);
-      const addr = (updated.role === "app" ? updated.privateIp : updated.publicIp) ?? null;
-      const label = updated.role === "app" ? "private ip" : "public ip";
-      resumed.push({ nodeId: node.nodeId, address: addr });
-      spin.succeed(`resumed node ${color.cyan(node.nodeId)} at ${label} ${addr ?? "?"}`);
+      resumed = [await resumeClusterNode(aws, node)];
+      const { address } = resumed[0]!;
+      const label = nodeUsesElasticIp(node.role) ? "public ip" : "private ip";
+      spin.succeed(`resumed node ${color.cyan(node.nodeId)} at ${label} ${address ?? "?"}`);
     } catch (error) {
       if (spin.isSpinning) spin.fail(`resume failed for ${node.nodeId}`);
+      throw error;
+    }
+  } else {
+    const spin = spinner(`resuming ${resumable.length} nodes…`).start();
+    try {
+      resumed = await Promise.all(resumable.map((node) => resumeClusterNode(aws, node)));
+      if (spin.isSpinning) {
+        spin.succeed(
+          `resumed ${resumed.length} nodes: ${resumed.map((r) => color.cyan(r.nodeId)).join(", ")}`,
+        );
+      }
+    } catch (error) {
+      if (spin.isSpinning) spin.fail("resume failed");
       throw error;
     }
   }
@@ -497,7 +652,7 @@ async function runResume(name: string, opts: GroupOptions): Promise<void> {
 async function runDestroy(name: string, opts: GroupOptions): Promise<void> {
   if (name === DEFAULT_CLUSTER) {
     throw new CliError("the implicit `default` cluster can't be destroyed as a group", {
-      hint: "destroy its nodes individually with `launch-pad node destroy <name>`",
+      hint: "destroy its nodes individually with `launchpad node destroy <name>`",
     });
   }
   const aws = await prepareClusterAws(name, opts);
@@ -560,6 +715,15 @@ async function runDestroy(name: string, opts: GroupOptions): Promise<void> {
   }
   iamSpin.succeed("deleted IAM roles");
 
+  // Remote-build infra (`deploy --remote-build`) is per-cluster too — drop the
+  // CodeBuild project and its service role. Best-effort and a no-op when the
+  // cluster never used remote builds.
+  try {
+    await deleteRemoteBuildInfra(createCodeBuildClient(aws.region), aws.iam, aws.logs, name);
+  } catch (error) {
+    warnings.push(`delete remote-build infra: ${(error as Error).message}`);
+  }
+
   // Sweep the WHOLE cluster prefix in one shot — node states, cluster.json, and
   // any orphans (e.g. an agent bundle from a half-finished provision that never
   // wrote a registry entry, so the per-node loop above wouldn't know about it).
@@ -609,7 +773,7 @@ export function registerCluster(program: Command): void {
 
   const show = cluster
     .command("show <name>")
-    .description("Show a cluster's config, account, and member nodes")
+    .description("Show a cluster's config, account, member nodes, scheduled services, and preview environments")
     .action(async (name: string, _opts, command: Command) => {
       await runShow(name, mergedOpts(command));
     });
@@ -643,7 +807,7 @@ export function registerCluster(program: Command): void {
 
   const pause = cluster
     .command("pause <name>")
-    .description("Stop every node in a cluster to save money (edge/both keep their Elastic IP + disk)")
+    .description("Stop every node in a cluster to save money (the edge keeps its Elastic IP + disk)")
     .option("--yes", "skip confirmation prompts")
     .action(async (name: string, _opts, command: Command) => {
       await runPause(name, mergedOpts<GroupOptions>(command));
@@ -652,7 +816,7 @@ export function registerCluster(program: Command): void {
 
   const resume = cluster
     .command("resume <name>")
-    .description("Start every paused node in a cluster back up (edge first, then app nodes)")
+    .description("Start every paused node in a cluster back up")
     .option("--yes", "skip confirmation prompts")
     .action(async (name: string, _opts, command: Command) => {
       await runResume(name, mergedOpts<GroupOptions>(command));

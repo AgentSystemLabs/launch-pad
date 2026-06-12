@@ -11,6 +11,10 @@ import {
   edgeUpstreamPrefix,
   nodePrefix,
   nodeRegistryKey,
+  previewMarkerKey,
+  projectsPrefix,
+  remoteBuildContextKey,
+  remoteBuildContextPrefix,
   stateBucketName,
   statusKey,
 } from "./s3-keys";
@@ -58,6 +62,27 @@ describe("s3 key derivation", () => {
     expect(deployEventKey("default", "shop", "2026-06-10T12:00:00.000Z", "ab12")).toBe(
       "projects/shop/events/2026-06-10T12:00:00.000Z-ab12.json",
     );
+  });
+
+  it("derives remote-build context keys under the footprint's project prefix", () => {
+    expect(remoteBuildContextPrefix("default", "shop")).toBe("projects/shop/builds/");
+    expect(remoteBuildContextKey("default", "shop", "web", "abc123def456")).toBe(
+      "projects/shop/builds/web/abc123def456.tar.gz",
+    );
+    // Named clusters live under clusters/<id>/ so `cluster destroy`'s prefix sweep
+    // removes uploaded build contexts along with the rest of the cluster state.
+    expect(remoteBuildContextKey("lower", "shop-staging", "web", "abc123def456")).toBe(
+      "clusters/lower/projects/shop-staging/builds/web/abc123def456.tar.gz",
+    );
+  });
+
+  it("derives the per-footprint preview marker key and the projects listing prefix", () => {
+    expect(previewMarkerKey("default", "shop-pr-1")).toBe("projects/shop-pr-1/preview.json");
+    expect(previewMarkerKey("lower", "shop-pr-1")).toBe(
+      "clusters/lower/projects/shop-pr-1/preview.json",
+    );
+    expect(projectsPrefix("default")).toBe("projects/");
+    expect(projectsPrefix("lower")).toBe("clusters/lower/projects/");
   });
 
   it("derives edge upstream shard keys under the edge node prefix", () => {

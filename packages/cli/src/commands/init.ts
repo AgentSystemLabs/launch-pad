@@ -8,7 +8,6 @@ import { LABEL_REGEX, parseLaunchPadConfig } from "@agentsystemlabs/launch-pad-s
 import { CONFIG_FILENAME, formatZodError } from "../config/load";
 import { projectHints } from "../init/detect";
 import { CliError } from "../errors";
-import { assertValidNodeId } from "../validate-node-id";
 import { applyGlobalOptions, type GlobalOpts } from "../globals";
 import { panel } from "../ui/box";
 import { isJsonMode, log, printJson } from "../ui/log";
@@ -16,7 +15,6 @@ import { color } from "../ui/theme";
 
 interface InitOptions extends GlobalOpts {
   name?: string;
-  node?: string;
   domain?: string;
   port?: number;
   dockerfile?: string;
@@ -27,7 +25,6 @@ interface InitOptions extends GlobalOpts {
 
 export interface ServiceValues {
   name: string;
-  node: string;
   dockerfile: string;
   cpu: number;
   memory: number;
@@ -35,7 +32,6 @@ export interface ServiceValues {
   port?: number;
 }
 
-const DEFAULT_NODE = "node-dev-1";
 const DEFAULT_CPU = 512;
 const DEFAULT_MEMORY = 512;
 const DEFAULT_PORT = 3000;
@@ -81,7 +77,6 @@ export function renderToml(project: string, svc: ServiceValues): string {
     "",
     "[[service]]",
     `name = ${q(svc.name)}`,
-    `node = ${q(svc.node)}`,
     `dockerfile = ${q(svc.dockerfile)}`,
     `cpu = ${svc.cpu}      # vCPU shares (1024 = 1 vCPU)`,
     `memory = ${svc.memory}   # MB`,
@@ -102,7 +97,7 @@ export function renderToml(project: string, svc: ServiceValues): string {
   lines.push('env = { NODE_ENV = "production" }');
   lines.push(
     "# Sensitive values (API keys, DB URLs) belong in SSM — not here:",
-    "#   launch-pad secret set DATABASE_URL --service <name>",
+    "#   launchpad secret set DATABASE_URL --service <name>",
   );
 
   // Web services require a health check: a surged replica must pass it before
@@ -151,11 +146,6 @@ async function gatherValues(opts: InitOptions, cwd: string): Promise<{ project: 
   }
   name = toLabel(name);
 
-  let node = opts.node;
-  if (node === undefined) {
-    node = interactive ? await ask("Target node id", DEFAULT_NODE) : DEFAULT_NODE;
-  }
-
   let dockerfile = opts.dockerfile;
   if (dockerfile === undefined) {
     dockerfile = interactive ? await ask("Path to the service Dockerfile", "./Dockerfile") : "./Dockerfile";
@@ -181,11 +171,8 @@ async function gatherValues(opts: InitOptions, cwd: string): Promise<{ project: 
     }
   }
 
-  assertValidNodeId(node);
-
   const svc: ServiceValues = {
     name,
-    node,
     dockerfile,
     cpu: opts.cpu ?? DEFAULT_CPU,
     memory: opts.memory ?? DEFAULT_MEMORY,
@@ -240,9 +227,8 @@ async function runInit(opts: InitOptions): Promise<void> {
 
   const kind = svc.domain ? "web service" : "worker";
   panel("Next steps", [
-    `${color.dim("1.")} review ${color.cyan(CONFIG_FILENAME)} ${color.dim(`(${kind} on ${svc.node})`)}`,
-    `${color.dim("2.")} create the node:  ${color.cyan(`launch-pad node create ${svc.node}`)}`,
-    `${color.dim("3.")} deploy:           ${color.cyan("launch-pad deploy")}`,
+    `${color.dim("1.")} review ${color.cyan(CONFIG_FILENAME)} ${color.dim(`(${kind})`)}`,
+    `${color.dim("2.")} deploy: ${color.cyan("launchpad deploy")} ${color.dim("(nodes are provisioned automatically)")}`,
   ]);
 }
 
@@ -251,7 +237,6 @@ export function registerInit(program: Command): void {
     .command("init")
     .description("Create a launch-pad.toml in the current directory")
     .option("--name <name>", "project + service name")
-    .option("--node <nodeId>", "target node id")
     .option("--domain <domain>", "public domain (makes this a web service)")
     .option("--port <port>", "container port the app listens on", positiveInt)
     .option("--dockerfile <path>", "path to the service Dockerfile")
@@ -263,9 +248,9 @@ export function registerInit(program: Command): void {
       [
         "",
         "Examples:",
-        "  $ launch-pad init",
-        "  $ launch-pad init --name blog --node node-prod-1 --domain blog.me.com --port 3000",
-        "  $ launch-pad init --name worker --node node-prod-1   # no domain → worker",
+        "  $ launchpad init",
+        "  $ launchpad init --name blog --domain blog.me.com --port 3000",
+        "  $ launchpad init --name worker   # no domain → worker",
       ].join("\n"),
     )
     .action(async (opts: InitOptions) => {

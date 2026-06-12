@@ -134,7 +134,6 @@ describe("schema integration", () => {
       service: [
         {
           name: "api",
-          node: "node-1",
           cpu: 512,
           memory: 512,
           domain: "app.example.com",
@@ -149,7 +148,7 @@ describe("schema integration", () => {
 
   it("parses secretRefs in desired.json with defaults", () => {
     const state = parseDesiredState({
-      version: 1,
+      version: 2,
       nodeId: "n1",
       updatedAt: "now",
       services: [

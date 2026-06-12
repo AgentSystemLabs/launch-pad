@@ -27,8 +27,12 @@ export const DeployEventSchema = z
     /** The footprint (`<project>` or `<project>-<env>`). */
     project: z.string().min(1),
     env: z.string().nullable().default(null),
-    /** How the deploy ran: a fresh build, a `--restart`, or a `--image`/`rollback`. */
-    kind: z.enum(["build", "restart", "image"]).default("build"),
+    /**
+     * How the deploy ran: a fresh build, a `--restart`, an `--image`/`rollback`,
+     * or a placement migration (node/nodes/edge change applied by a full deploy).
+     * Older CLIs reading history skip events whose kind they can't parse.
+     */
+    kind: z.enum(["build", "restart", "image", "migrate"]).default("build"),
     services: z.array(DeployEventServiceSchema).min(1),
     /** Convergence result, or null for a `--no-wait` deploy that didn't observe it. */
     converged: z.boolean().nullable(),

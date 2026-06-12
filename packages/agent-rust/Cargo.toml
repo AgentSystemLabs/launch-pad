@@ -1,0 +1,55 @@
+[package]
+name = "launch-pad-agent"
+version = "0.0.0"
+edition = "2021"
+description = "Launch Pad node agent (Rust) — edge + app binaries, parity port of the retired TypeScript agent"
+publish = false
+
+[lib]
+name = "launch_pad_agent"
+path = "src/lib.rs"
+
+# Role-specific binaries: the edge build compiles out Docker/ECR/SSM/reconcile paths
+# (and their aws-sdk deps) entirely; the app build compiles out Caddy routing.
+# `default = both` so `cargo test` covers every module in one run.
+[features]
+default = ["app", "edge"]
+app = ["dep:aws-sdk-ecr", "dep:aws-sdk-ssm", "dep:base64"]
+edge = []
+
+[[bin]]
+name = "launchpad-agent-app"
+path = "src/bin/agent-app.rs"
+required-features = ["app"]
+
+[[bin]]
+name = "launchpad-agent-edge"
+path = "src/bin/agent-edge.rs"
+required-features = ["edge"]
+
+[dependencies]
+aws-config = "1.8.18"
+aws-sdk-ecr = { version = "1.119.0", optional = true }
+aws-sdk-s3 = "1.135.0"
+aws-sdk-ssm = { version = "1", optional = true }
+base64 = { version = "0.22.1", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+# Default features: serde_json::Map is BTreeMap-backed, so object keys serialize
+# sorted — this reproduces the TS `canonical()` key-sort used for fingerprints.
+serde_json = "1"
+sha2 = "0.10"
+signal-hook = "0.3"
+tokio = { version = "1", features = ["full"] }
+ureq = "2"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+# Skip debuginfo for dependencies: the aws-sdk tree alone is ~2 GB of debug
+# artifacts otherwise, and the agent is debugged via logs, not a debugger.
+[profile.dev.package."*"]
+debug = false

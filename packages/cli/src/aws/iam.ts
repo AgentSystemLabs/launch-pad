@@ -215,7 +215,7 @@ export function buildAppPolicy(
   });
 }
 
-/** Read launch-pad secrets scoped to this cluster (app/both agents resolve at container start). */
+/** Read launchpad secrets scoped to this cluster (app/both agents resolve at container start). */
 function ssmReadStatements(region: string, accountId: string, clusterId: string): Array<Record<string, unknown>> {
   return [
     {
@@ -270,25 +270,7 @@ function buildNodePolicy(params: EnsureNodeIamParams): string {
   if (role === "app") {
     return buildAppPolicy(bucket, clusterId, nodeId, region, accountId);
   }
-  if (role === "edge") {
-    return buildEdgePolicy(bucket, clusterId, nodeId, region, accountId);
-  }
-  // both: merge app + edge statements, deduping by Sid (ECR lives only on app; the
-  // shared WriteStatus + CloudWatchLogs statements collapse to one).
-  const app = JSON.parse(buildAppPolicy(bucket, clusterId, nodeId, region, accountId)) as {
-    Statement: Array<{ Sid?: string }>;
-  };
-  const edge = JSON.parse(buildEdgePolicy(bucket, clusterId, nodeId, region, accountId)) as {
-    Statement: Array<{ Sid?: string }>;
-  };
-  const seen = new Set<string>();
-  const merged = [...app.Statement, ...edge.Statement].filter((s) => {
-    if (!s.Sid) return true;
-    if (seen.has(s.Sid)) return false;
-    seen.add(s.Sid);
-    return true;
-  });
-  return JSON.stringify({ Version: "2012-10-17", Statement: merged });
+  return buildEdgePolicy(bucket, clusterId, nodeId, region, accountId);
 }
 
 /**
@@ -320,7 +302,7 @@ export async function ensureNodeIam(
       new CreateRoleCommand({
         RoleName: roleName,
         AssumeRolePolicyDocument: JSON.stringify(TRUST_POLICY),
-        Description: `launch-pad node ${params.nodeId} (${params.role})`,
+        Description: `launchpad node ${params.nodeId} (${params.role})`,
       }),
     );
   } catch (error) {
@@ -384,7 +366,7 @@ export async function resolveNodeIamRoleName(
   const roleName = profile.InstanceProfile?.Roles?.[0]?.RoleName;
   if (!roleName) {
     throw new CliError(`instance profile "${profileName}" has no IAM role`, {
-      hint: "recreate the node's IAM resources with `launch-pad node destroy` then `node create`",
+      hint: "recreate the node's IAM resources with `launchpad node destroy` then `node create`",
     });
   }
   return roleName;

@@ -49,7 +49,7 @@ function reportEdit(edit: EnvVarEdit, service: string, opts: ConfigOptions): voi
   const verb = edit.next === undefined ? "unset" : "set";
   log.success(`${verb} ${color.cyan(`${service}.env.${edit.key}`)}`);
   if (opts.deploy === false) {
-    log.dim(`  --no-deploy: edited launch-pad.toml only — run ${color.cyan("launch-pad deploy")} to apply`);
+    log.dim(`  --no-deploy: edited launch-pad.toml only — run ${color.cyan("launchpad deploy")} to apply`);
   }
 }
 
@@ -119,7 +119,7 @@ function withEditDeployFlags(cmd: Command): Command {
 export function registerConfig(program: Command): void {
   const config = program
     .command("config")
-    .description("Edit non-secret env vars in launch-pad.toml (then deploy) — secrets live in `launch-pad secret`");
+    .description("Edit non-secret env vars in launch-pad.toml (then deploy) — secrets live in `launchpad secret`");
 
   const set = withEditDeployFlags(
     config
@@ -146,12 +146,12 @@ export function registerConfig(program: Command): void {
       "`config` edits the `env` table of a [[service]] — the non-secret configuration the",
       "config lock allows to change after the first deploy. It writes launch-pad.toml then",
       "runs `deploy --service <name>` (health-gated, zero-downtime). For replicas/cpu/memory",
-      "use `launch-pad scale`; for secrets use `launch-pad secret`.",
+      "use `launchpad scale`; for secrets use `launchpad secret`.",
       "",
       "Examples:",
-      "  $ launch-pad config set web FEATURE_FLAGS=beta",
-      "  $ launch-pad config set web LOG_LEVEL=debug --yes",
-      "  $ launch-pad config unset web FEATURE_FLAGS --no-deploy",
+      "  $ launchpad config set web FEATURE_FLAGS=beta",
+      "  $ launchpad config set web LOG_LEVEL=debug --yes",
+      "  $ launchpad config unset web FEATURE_FLAGS --no-deploy",
     ].join("\n"),
   );
 }

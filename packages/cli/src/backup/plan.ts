@@ -1,5 +1,5 @@
 /**
- * Pure planning for `launch-pad backup` / `restore`. Backup mirrors a cluster's S3 state
+ * Pure planning for `launchpad backup` / `restore`. Backup mirrors a cluster's S3 state
  * (the authoritative registry — `cluster.json`, per-node `node`/`desired`/`status.json`,
  * config baselines, deploy events) into a local directory keyed by the S3 key, plus a
  * manifest. Restore re-uploads it. Kept pure so the prefix selection + the path-safety guards

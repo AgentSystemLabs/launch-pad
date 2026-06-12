@@ -157,7 +157,6 @@ describe("removeServicesFromBaseline", () => {
       service: [
         {
           name: "web",
-          node: "node-a",
           dockerfile: "./Dockerfile",
           context: ".",
           cpu: 256,
@@ -166,7 +165,7 @@ describe("removeServicesFromBaseline", () => {
           port: 3000,
           healthCheck: { path: "/healthz" },
         },
-        { name: "worker", node: "node-a", dockerfile: "./Dockerfile", context: ".", cpu: 256, memory: 256 },
+        { name: "worker", dockerfile: "./Dockerfile", context: ".", cpu: 256, memory: 256 },
       ],
     });
 

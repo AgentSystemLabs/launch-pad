@@ -1,5 +1,5 @@
 /**
- * launch-pad real-AWS regression for `launch-pad backup` / `restore`.
+ * launchpad real-AWS regression for `launchpad backup` / `restore`.
  *
  * Fast (no EC2, no Docker): set up a named cluster (writes cluster.json), plant a synthetic
  * desired.json under its prefix, `backup` it to a local dir, DELETE both objects from S3
@@ -137,7 +137,7 @@ async function main(): Promise<boolean> {
   } finally {
     if (keep) {
       note(`--keep set — leaving cluster "${cluster}" + backup dir ${backupDir}`);
-      note(`  LAUNCHPAD_HOME=${home} launch-pad cluster destroy ${cluster} --yes`);
+      note(`  LAUNCHPAD_HOME=${home} launchpad cluster destroy ${cluster} --yes`);
     } else {
       await teardown();
     }

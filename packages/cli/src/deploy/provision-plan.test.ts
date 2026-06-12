@@ -1,20 +1,16 @@
-import type { NodeRegistryEntry, NodeState } from "@agentsystemlabs/launch-pad-shared";
+import type { NodeRegistryEntry, NodeRole, NodeState } from "@agentsystemlabs/launch-pad-shared";
 import { describe, expect, it } from "vitest";
-import { buildProvisionPlan, inferNodeRole, type NodeDemand } from "./provision-plan";
+import { buildProvisionPlan, type NodeDemand, planEdgeAction } from "./provision-plan";
 
 function demand(over: Partial<NodeDemand> & { nodeId: string }): NodeDemand {
   return {
-    isEdgeRef: false,
-    isAppTarget: true,
-    coLocatedWeb: false,
-    frontingEdges: [],
     cpu: 0,
     memory: 0,
     ...over,
   };
 }
 
-function fakeEntry(nodeId: string, state: NodeState): NodeRegistryEntry {
+function fakeEntry(nodeId: string, state: NodeState, role: NodeRole = "app"): NodeRegistryEntry {
   return {
     nodeId,
     clusterId: "default",
@@ -22,7 +18,7 @@ function fakeEntry(nodeId: string, state: NodeState): NodeRegistryEntry {
     instanceType: "t3.small",
     region: "us-east-1",
     availabilityZone: null,
-    role: "both",
+    role,
     privateIp: null,
     totalCpu: 2048,
     totalMemory: 2048,
@@ -41,38 +37,48 @@ function fakeEntry(nodeId: string, state: NodeState): NodeRegistryEntry {
   };
 }
 
-describe("inferNodeRole", () => {
-  it("a node referenced only as an edge → edge", () => {
-    expect(inferNodeRole(demand({ nodeId: "e", isEdgeRef: true, isAppTarget: false }))).toEqual({
+const EDGE = "edge-1";
+
+describe("planEdgeAction", () => {
+  it("classifies an existing running edge node as ready", async () => {
+    const entry = fakeEntry(EDGE, "ready", "edge");
+    const action = await planEdgeAction({ edgeNodeId: EDGE, load: async () => entry, allowCreate: true });
+    expect(action).toEqual({ kind: "ready", nodeId: EDGE, entry });
+  });
+
+  it("classifies a paused edge node as resume", async () => {
+    const entry = fakeEntry(EDGE, "stopped", "edge");
+    const action = await planEdgeAction({ edgeNodeId: EDGE, load: async () => entry, allowCreate: true });
+    expect(action).toEqual({ kind: "resume", nodeId: EDGE, entry });
+  });
+
+  it("classifies a legacy both-role node as ready when it fronts ingress", async () => {
+    const entry = fakeEntry(EDGE, "ready", "both");
+    const action = await planEdgeAction({ edgeNodeId: EDGE, load: async () => entry, allowCreate: true });
+    expect(action).toEqual({ kind: "ready", nodeId: EDGE, entry });
+  });
+
+  it("throws when the named edge node exists with a non-edge role", async () => {
+    const entry = fakeEntry(EDGE, "ready", "app");
+    await expect(
+      planEdgeAction({ edgeNodeId: EDGE, load: async () => entry, allowCreate: true }),
+    ).rejects.toThrow(/is the cluster's edge but has role "app"/);
+  });
+
+  it("throws for a missing edge node when allowCreate is false", async () => {
+    await expect(
+      planEdgeAction({ edgeNodeId: EDGE, load: async () => null, allowCreate: false }),
+    ).rejects.toThrow(/edge node "edge-1" does not exist/);
+  });
+
+  it("creates a missing edge node with role edge on the default edge instance type", async () => {
+    const action = await planEdgeAction({ edgeNodeId: EDGE, load: async () => null, allowCreate: true });
+    expect(action).toMatchObject({
+      kind: "create",
+      nodeId: EDGE,
       role: "edge",
+      instanceType: "t3.micro",
     });
-  });
-
-  it("a node that is both an edge and an app target → both", () => {
-    expect(inferNodeRole(demand({ nodeId: "x", isEdgeRef: true, isAppTarget: true }))).toEqual({
-      role: "both",
-    });
-  });
-
-  it("an app target serving a co-located web service → both (needs Caddy)", () => {
-    expect(inferNodeRole(demand({ nodeId: "n", coLocatedWeb: true }))).toEqual({ role: "both" });
-  });
-
-  it("an app target fronted by exactly one edge → app + that edge", () => {
-    expect(inferNodeRole(demand({ nodeId: "n", frontingEdges: ["edge-1"] }))).toEqual({
-      role: "app",
-      edgeNodeId: "edge-1",
-    });
-  });
-
-  it("an app target fronted by multiple edges → both (can't pin one edge SG)", () => {
-    expect(inferNodeRole(demand({ nodeId: "n", frontingEdges: ["e1", "e2"] }))).toEqual({
-      role: "both",
-    });
-  });
-
-  it("a worker-only node (no edge, no co-located web) → both", () => {
-    expect(inferNodeRole(demand({ nodeId: "w" }))).toEqual({ role: "both" });
   });
 });
 
@@ -82,6 +88,7 @@ describe("buildProvisionPlan", () => {
   it("classifies existing running nodes as ready", async () => {
     const plan = await buildProvisionPlan({
       demands: [demand({ nodeId: "a" })],
+      edgeNodeId: EDGE,
       load: async (id) => ready(id),
       allowCreate: true,
     });
@@ -91,22 +98,25 @@ describe("buildProvisionPlan", () => {
   it("classifies a paused node as resume", async () => {
     const plan = await buildProvisionPlan({
       demands: [demand({ nodeId: "a" })],
+      edgeNodeId: EDGE,
       load: async (id) => fakeEntry(id, "stopped"),
       allowCreate: true,
     });
     expect(plan[0]?.kind).toBe("resume");
   });
 
-  it("auto-sizes + role-infers a missing node into a create action", async () => {
+  it("auto-sizes a missing node into an app-role create fronted by the cluster edge", async () => {
     const plan = await buildProvisionPlan({
-      demands: [demand({ nodeId: "web", cpu: 1024, memory: 2048, coLocatedWeb: true })],
+      demands: [demand({ nodeId: "web", cpu: 1024, memory: 2048 })],
+      edgeNodeId: EDGE,
       load: async () => null,
       allowCreate: true,
     });
     expect(plan[0]).toMatchObject({
       kind: "create",
       nodeId: "web",
-      role: "both",
+      role: "app",
+      edgeNodeId: EDGE,
       instanceType: "t3.medium", // 2048 MB demand needs totalMem ≥ 2560 → the 4 GB tier
     });
   });
@@ -115,6 +125,7 @@ describe("buildProvisionPlan", () => {
     // 1024 MB steady fits t3.small (allocatable 1536)…
     const steadyOnly = await buildProvisionPlan({
       demands: [demand({ nodeId: "n", cpu: 512, memory: 1024 })],
+      edgeNodeId: EDGE,
       load: async () => null,
       allowCreate: true,
     });
@@ -123,25 +134,18 @@ describe("buildProvisionPlan", () => {
     // …but +1024 MB surge → 2048 peak needs the 4 GB tier.
     const withSurge = await buildProvisionPlan({
       demands: [demand({ nodeId: "n", cpu: 512, memory: 1024, surgeMemory: 1024 })],
+      edgeNodeId: EDGE,
       load: async () => null,
       allowCreate: true,
     });
     expect(withSurge[0]).toMatchObject({ instanceType: "t3.medium" });
   });
 
-  it("creates a missing app node fronted by an edge, with its edge attached", async () => {
-    const plan = await buildProvisionPlan({
-      demands: [demand({ nodeId: "app-1", frontingEdges: ["edge-1"], cpu: 256, memory: 256 })],
-      load: async () => null,
-      allowCreate: true,
-    });
-    expect(plan[0]).toMatchObject({ kind: "create", role: "app", edgeNodeId: "edge-1" });
-  });
-
   it("throws for a missing node when allowCreate is false (strict mode)", async () => {
     await expect(
       buildProvisionPlan({
         demands: [demand({ nodeId: "ghost" })],
+        edgeNodeId: EDGE,
         load: async () => null,
         allowCreate: false,
       }),
@@ -152,6 +156,7 @@ describe("buildProvisionPlan", () => {
     await expect(
       buildProvisionPlan({
         demands: [demand({ nodeId: "huge", cpu: 999_999, memory: 0 })],
+        edgeNodeId: EDGE,
         load: async () => null,
         allowCreate: true,
       }),

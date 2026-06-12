@@ -4,10 +4,10 @@ import { type IdleNodeInput, recommendIdleNodes } from "./idle";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.parse("2026-06-10T00:00:00.000Z");
 
-/** Build an idle input with sensible defaults (a fresh, busy, ready both-node). */
+/** Build an idle input with sensible defaults (a fresh, busy, ready app node). */
 function node(over: Partial<IdleNodeInput> & Pick<IdleNodeInput, "nodeId">): IdleNodeInput {
   return {
-    role: "both",
+    role: "app",
     instanceType: "t3.small",
     state: "ready",
     createdAt: new Date(NOW).toISOString(),

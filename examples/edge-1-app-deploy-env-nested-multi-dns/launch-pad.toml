@@ -3,7 +3,8 @@
 #   launch-pad deploy              → multi.agentsystem.dev, api.multi.agentsystem.dev
 #   launch-pad deploy --env <name> → ui-<name>.multi…, api-<name>.multi…
 #
-# Dedicated edge (node-edge) + all footprints on node-app.
+# Placement is automatic: the cluster's edge node fronts every environment;
+# all footprints land on the cluster's app node(s).
 project = "multi"
 
 # API: fold env into the first label (api-<name>.multi.agentsystem.dev).
@@ -11,10 +12,8 @@ domainPattern = "{service}-{env}.multi.agentsystem.dev"
 
 [[service]]
 name = "api"
-node = "node-app"
-edge = "node-edge"
-dockerfile = "../both-node-web-worker/Dockerfile"
-context = "../both-node-web-worker"
+dockerfile = "../web-worker/Dockerfile"
+context = "../web-worker"
 cpu = 256
 memory = 256
 domain = "api.multi.agentsystem.dev"
@@ -27,10 +26,8 @@ env = { NODE_ENV = "production" }
 
 [[service]]
 name = "ui"
-node = "node-app"
-edge = "node-edge"
-dockerfile = "../both-node-web-worker/Dockerfile"
-context = "../both-node-web-worker"
+dockerfile = "../web-worker/Dockerfile"
+context = "../web-worker"
 cpu = 256
 memory = 256
 domain = "multi.agentsystem.dev"

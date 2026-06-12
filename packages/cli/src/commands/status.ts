@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { Command } from "commander";
 import {
-  envProject,
+  footprintOwner,
   HEARTBEAT_STALE_MS,
   isHeartbeatStale,
   LABEL_REGEX,
@@ -9,8 +9,6 @@ import {
   parseNodeStatus,
   type ServiceState,
   statusKey,
-  targetNodes,
-  usesClusterPlacement,
 } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import { getJson, listNodeIds } from "../aws/s3-state";
@@ -104,19 +102,16 @@ function render(views: NodeView[], filterProject?: string): void {
 async function resolveNodeIds(opts: StatusOptions, aws: AwsEnv): Promise<string[]> {
   if (opts.node) return [opts.node];
   const { config } = loadConfig();
-  const services = config.service;
-  const ids = new Set<string>(services.flatMap((s) => targetNodes(s)));
-  if (services.some((s) => usesClusterPlacement(s))) {
-    // Scope cluster-placed services to the nodes this footprint actually occupies
-    // (per published desired.json); fall back to every cluster node only when
-    // nothing is published yet (e.g. status before the first deploy).
-    const owner = envProject(config.project, opts.env);
-    const placement = await loadDeployedPlacement(aws.s3, aws.bucket, aws.clusterId, owner);
-    if (placement.occupiedNodeIds.length > 0) {
-      for (const id of placement.occupiedNodeIds) ids.add(id);
-    } else {
-      for (const id of await listNodeIds(aws.s3, aws.bucket, aws.clusterId)) ids.add(id);
-    }
+  const ids = new Set<string>();
+  // Scope to the nodes this footprint actually occupies (per published
+  // desired.json); fall back to every cluster node only when nothing is
+  // published yet (e.g. status before the first deploy).
+  const owner = footprintOwner(config, opts.env);
+  const placement = await loadDeployedPlacement(aws.s3, aws.bucket, aws.clusterId, owner);
+  if (placement.occupiedNodeIds.length > 0) {
+    for (const id of placement.occupiedNodeIds) ids.add(id);
+  } else {
+    for (const id of await listNodeIds(aws.s3, aws.bucket, aws.clusterId)) ids.add(id);
   }
   return [...ids];
 }
@@ -141,7 +136,7 @@ async function runStatus(opts: StatusOptions): Promise<void> {
         hint: "run from a project directory, or drop --env",
       });
     }
-    filterProject = envProject(loadConfig().config.project, opts.env);
+    filterProject = footprintOwner(loadConfig().config, opts.env);
   }
 
   const aws = await prepareAws(opts);

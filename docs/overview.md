@@ -15,7 +15,7 @@ A developer runs **one command** in their app directory and, with no further wor
 5. and **future pushes update the running app** automatically.
 
 ```bash
-npx launch-pad deploy
+launchpad deploy
 ```
 
 That's the whole product. Everything below exists to make that command real and to
@@ -67,18 +67,19 @@ of the system — features land inside or between these.
 
 What the user runs locally. This is the entire UX of the product.
 
-- Reads the app's `launchpad.yaml`.
+- Reads the app's `launch-pad.toml`.
 - Builds the Docker image and tags it with an **immutable, content-addressed tag**
   (git SHA / content hash — never `:latest`), so the agent can tell exactly which
   build it's been asked to run.
 - Pushes the image to ECR.
-- Writes `desired.json` to S3 for the target node.
+- Writes `desired.json` to S3 for each node the scheduler placed services on.
 - Polls `status.json` until the agent confirms the new image is running (or reports
   an error / times out).
-- **Auto-provisions** any node a service references but that doesn't exist yet, and
+- **Auto-provisions** any node the deploy needs but that doesn't exist yet — the
+  cluster's dedicated edge plus the app nodes the scheduler places onto — and
   **resumes** any paused node, before publishing — so the very first deploy works from
-  nothing (see *Auto-provisioning on deploy*). Roles are inferred and instance types
-  auto-sized from the config; provisioning is spend-gated (`--yes` / `--no-create`).
+  nothing (see *Auto-provisioning on deploy*). Instance types are auto-sized from the
+  config; provisioning is spend-gated (`--yes` / `--no-create`).
 
 Commands: `init` · `deploy` · `status` · `node` · `cluster`.
 
@@ -103,7 +104,7 @@ disruption.
 The single source of truth for every shape that crosses the CLI ↔ agent boundary,
 validated with **Zod**. Both sides import it so they can never drift. Holds
 `DesiredState`, `NodeStatus`, `ServiceConfig`, `DeploymentStatus`, and the
-`launchpad.yaml` schema. Drift becomes a parse error instead of a silent hung deploy.
+`launch-pad.toml` schema. Drift becomes a parse error instead of a silent hung deploy.
 
 ### 4. State store — S3 (the contract at rest)
 
@@ -118,7 +119,7 @@ s3://launchpad-state/
   projects/
     <footprint>/
       config-baseline.json   # frozen config for the post-deploy config lock
-      events/                # append-only deploy history (`launch-pad history`)
+      events/                # append-only deploy history (`launchpad history`)
 ```
 
 State lives under `nodes/`, not `agents/`, because the machine is the durable
@@ -151,9 +152,9 @@ the CLI must be able to stand up the infra the first time. The pieces it provisi
 - **DNS** — points the service `domain` at the node so Caddy can issue a real cert.
 
 For the MVP this can start as "generate the bootstrap + create one node mostly by
-hand," then graduate into fully automated `launch-pad provision`.
+hand," then graduate into fully automated `launchpad provision`.
 
-### 6. Example app (`examples/both-node-web-worker`)
+### 6. Example app (`examples/web-worker`)
 
 A tiny Express app whose only job is to prove every link of the pipeline end to end:
 build → ECR push → agent deploy → Caddy routes to it → live HTTPS URL. It's the
@@ -166,7 +167,7 @@ fixture every feature is validated against.
 ```
 CLI                                   S3                         Agent (on the node)
 ──────────────────────────────────────────────────────────────────────────────────────
-read launchpad.yaml
+read launch-pad.toml
 docker build  (immutable tag)
 docker push (ECR)
 write desired.json  ───────────▶  nodes/<id>/desired.json  ───▶  poll: new desired state
@@ -194,7 +195,7 @@ This is a first-class goal, and it falls out of the architecture almost for free
 - `status.json` flips to the new image; the watcher reports success.
 
 So "update on new pushes" = the same deploy path, triggered by CI instead of a human.
-A small GitHub Action (or equivalent) that runs `launch-pad deploy` on push is the
+A small GitHub Action (or equivalent) that runs `launchpad deploy` on push is the
 intended integration. No special update protocol — just a new desired state.
 
 ---
@@ -205,13 +206,13 @@ intended integration. No special update protocol — just a new desired state.
 
 ```json
 {
-  "version": 1,
-  "nodeId": "node-prod-1",
+  "version": 2,
+  "nodeId": "app-1",
   "services": [
     {
       "serviceId": "my-app",
       "image": "123456789.dkr.ecr.us-east-1.amazonaws.com/my-app:abc123",
-      "domain": "my-app.example.com",
+      "ingress": { "domain": "my-app.example.com", "edge": "edge-1" },
       "containerPort": 8080,
       "env": {}
     }
@@ -219,12 +220,16 @@ intended integration. No special update protocol — just a new desired state.
 }
 ```
 
+`ingress` has exactly two states: `null` for a background worker, or an object whose
+`edge` is the **required node id** of the dedicated edge that fronts the domain (Caddy
+never co-locates with app containers, so `edge` is always a remote node).
+
 ### `status.json` (agent → CLI)
 
 ```json
 {
-  "nodeId": "node-prod-1",
-  "agentId": "agent-node-prod-1",
+  "nodeId": "app-1",
+  "agentId": "agent-app-1",
   "lastSeen": "2026-06-03T20:30:00Z",
   "services": [
     {
@@ -237,15 +242,21 @@ intended integration. No special update protocol — just a new desired state.
 }
 ```
 
-### `launchpad.yaml` (human-authored, read by the CLI)
+### `launch-pad.toml` (human-authored, read by the CLI)
 
-The CLI derives `desired.json` from this plus the image it just built/pushed.
+The CLI derives `desired.json` from this plus the image it just built/pushed and the
+placement the scheduler picked (no node names in the config — placement is automatic):
 
-```yaml
-name: test-app           # becomes serviceId
-nodeId: node-dev-1
-domain: test.yourdomain.com
-containerPort: 3000
+```toml
+project = "test-app"
+
+[[service]]
+name = "web"
+domain = "test.yourdomain.com"
+port = 3000
+
+  [service.healthCheck]
+  path = "/healthz"
 ```
 
 ---
@@ -266,7 +277,7 @@ launch-pad/
     installer/            # node bootstrap + AWS provisioning
   examples/
     README.md             # matrix of runnable configs & edge cases
-    both-node-web-worker/     # the fixture that proves the whole pipeline
+    web-worker/           # the fixture that proves the whole pipeline
 ```
 
 The clean boundary: **CLI publishes desired state · Agent reconciles the node ·
@@ -279,9 +290,9 @@ provisions/uses one node, runs one service, serves it on a real domain over HTTP
 auto-updates on new pushes.
 
 **Shipped since this MVP framing** (originally listed out of scope, now built): the
-multi-node **cluster scheduler** (auto-placement by `schedule`/`topology`),
+multi-node **cluster scheduler** (automatic bin-packing placement by free CPU/memory),
 **health-check-gated zero-downtime rollouts** (described below), the **secrets manager**
-(SSM SecureString + `launch-pad secret`), node-local **persistent volumes**
+(SSM SecureString + `launchpad secret`), node-local **persistent volumes**
 (`[[service.volumes]]` — data survives a container replace), and an experimental local
 **dashboard** (`packages/dashboard`).
 
@@ -297,64 +308,60 @@ flow is solid.
 
 ## Scaling: replicas, rolling updates & the edge router
 
-> The MVP above (one service, one node, co-located Caddy) shipped. This section
-> documents the horizontal-scaling layer built on top of it. Config is TOML
-> (`launch-pad.toml`); every field here is optional and backward-compatible.
+> The MVP above (one service, one node) shipped. This section documents the
+> horizontal-scaling layer built on top of it. Config is TOML (`launch-pad.toml`);
+> every field here is optional and backward-compatible.
 
 ### Node roles
 
-Each node has a **role** (`launch-pad node create <name> --role …`):
+Each node has a **role** (`launchpad node create [name] --role …` — the name is generated when omitted):
 
 | Role | Runs containers | Runs Caddy | Public ports |
 | ---- | --------------- | ---------- | ------------ |
-| `both` (default) | yes | yes (co-located) | 80/443 |
-| `edge` | no | yes (router) | 80/443 |
-| `app` | yes | no | none public — host-port range reachable only by its edge's security group |
+| `edge` | no | yes (router) | 80/443 + Elastic IP |
+| `app` (default) | yes | no | none public — host-port range reachable only by its edge's security group |
 
-`both` is exactly the original co-located behavior. An `edge` node is a dedicated
-Caddy router; `app` nodes run only containers and are private (the edge reaches them
-over the VPC at `<privateIp>:<hostPort>`).
+Every cluster has exactly **one dedicated edge node** — Caddy with automatic HTTPS on
+its own machine, auto-provisioned as `edge-1` on the first deploy (default
+`t3.micro`), or chosen via the cluster's `defaultEdge` / `cluster set-edge`. `app`
+nodes run only containers and are private (the edge reaches them over the VPC at
+`<privateIp>:<hostPort>`). Every deploy therefore needs at least **2 nodes**: the
+edge + ≥1 app node.
 
 ### Auto-provisioning on deploy
 
-`launch-pad deploy` makes the cluster real *before* it publishes: any node a service
-references — a `node`/`nodes` target, or the `edge` that fronts a web service
-(including a cluster's `defaultEdge`) — that doesn't exist yet is **created**, and any
-node that's **paused** is **resumed**. Then the normal build → push → publish runs. So
-you can clone a repo and `launch-pad deploy` straight onto a shared cluster (or onto
-nothing) with no separate node-creation step.
+`launchpad deploy` makes the cluster real *before* it publishes: the cluster's
+dedicated edge and the app nodes the scheduler places onto are **created** if missing,
+and any node that's **paused** is **resumed**. Then the normal build → push → publish
+runs. So you can clone a repo and `launchpad deploy` straight onto a shared cluster
+(or onto nothing) with no separate node-creation step.
 
-- **Roles are inferred** from the config, never restated: a node named as an `edge` →
-  `edge`; a node fronted by an edge → private `app`; a node serving a co-located web
-  service (no edge) → `both`. A node used as both an edge and an app target → `both`.
 - **Instances are auto-sized** to the smallest type that fits the services placed on
   that node (summed cpu/memory × replicas, plus reserved headroom), floor `t3.small`.
-  A dedicated edge carries no app load → the floor.
-- **Edges are created before app nodes**, because an app node's security group
-  references its edge's security group.
+  The dedicated edge carries no app load → `t3.micro`.
+- **The edge is created before app nodes**, because an app node's security group
+  references the edge's security group.
 - **Spend is gated.** Nodes are billed EC2 on *your* account, so deploy prints the plan
   (create/resume · role · instance type) and asks before provisioning. `--yes` skips
   the prompt and is **required in CI / non-TTY** (where deploy otherwise aborts rather
   than spend silently); `--no-create` keeps the strict behavior (a missing node is an
   error); `--dry-run` prints the plan and provisions nothing.
 
-DNS stays yours to set — point each web domain's A record at its node's (or its edge's)
-Elastic IP so Caddy can issue a certificate. A service that targets a whole `cluster`
-with **no** app nodes yet still errors: there's no node *name* to create, so name the
-node (or pre-create one) to bootstrap an empty cluster.
+DNS stays yours to set — point each web domain (or a wildcard like `*.example.com`,
+which also covers every `deploy --env` subdomain) as a DNS-only A record at the edge's
+Elastic IP so Caddy can issue a certificate. Deploy prints the exact targets; verify
+with `launchpad dns verify <domain>`.
 
 ### Replicas + load balancing
 
-A service declares `replicas` and a placement — a single `node` or a list of `nodes`
-(replicas distributed round-robin). Caddy load-balances (round-robin) across all
-replicas with **active health checks**, so it never routes to an unhealthy backend.
+A service declares `replicas`; the scheduler distributes them across the cluster's app
+nodes. Caddy on the edge load-balances (round-robin) across all replicas with **active
+health checks**, so it never routes to an unhealthy backend.
 
 ```toml
 [[service]]
 name = "web"
-nodes = ["app-1", "app-2"]   # 4 replicas → 2 per node
-edge  = "edge-1"             # Caddy on edge-1 fronts the domain
-replicas = 4
+replicas = 4                 # the scheduler spreads these across the app pool
 domain = "shop.com"
 port = 3000
   [service.healthCheck]
@@ -364,8 +371,6 @@ port = 3000
   drainTimeout = "20s"       # stop routing, then let in-flight requests finish
   stopGrace = "30s"          # docker stop --time grace (SIGTERM → grace → SIGKILL)
 ```
-
-Omit `edge` with a single `node` to keep Caddy co-located (the default).
 
 ### Health-gated rolling updates
 
@@ -404,8 +409,8 @@ can write only its own shard into its edge's prefix, and an edge can read only i
 `upstream/*` — never another agent's `desired.json`, `status.json`, or registry. No
 control-plane server, and no node holds account-wide `nodes/*` read access.
 
-See `examples/README.md` for the full set. Highlights: `both-node-rolling-replicas` (single node,
-co-located), `edge-2-app-nodes-rolling-replicas` (edge + replicas across **two** app nodes),
+See `examples/README.md` for the full set. Highlights: `web-worker` (the end-to-end
+fixture), `edge-2-app-nodes-rolling-replicas` (edge + replicas across **two** app nodes),
 `edge-1-app-deploy-env-flat-domains` (edge + named envs on **one** app node via `--env`),
 `edge-1-app-deploy-env-shop-domains` (flat multi-env DNS), `edge-1-app-deploy-env-nested-multi-dns`
 (nested `ui-<name>.multi…` + `*.multi` records),
@@ -451,14 +456,14 @@ holds its **default edge** — so web services route through it automatically.
 ### Commands
 
 ```bash
-launch-pad cluster create lower --region us-east-1      # configure target + write cluster.json
-launch-pad node create edge-lower --cluster lower --role edge   # first edge → cluster default edge
-launch-pad node create app-a      --cluster lower --role app    # --edge defaults to the cluster's edge
-launch-pad cluster set-edge lower <node-id>             # change the default edge
-launch-pad cluster show lower                           # account, edge, member nodes
-launch-pad cluster use lower                            # make `lower` the default for this machine
-launch-pad cluster current                             # which cluster am I targeting? (account/region)
-launch-pad cluster use default                          # revert to the implicit `default` cluster
+launchpad cluster create lower --region us-east-1      # configure target + write cluster.json
+launchpad node create edge-lower --cluster lower --role edge   # first edge → cluster default edge
+launchpad node create app-a      --cluster lower --role app    # --edge defaults to the cluster's edge
+launchpad cluster set-edge lower <node-id>             # change the default edge
+launchpad cluster show lower                           # account, edge, nodes, scheduled services, envs
+launchpad cluster use lower                            # make `lower` the default for this machine
+launchpad cluster current                             # which cluster am I targeting? (account/region)
+launchpad cluster use default                          # revert to the implicit `default` cluster
 ```
 
 `cluster use <name>` persists a local `defaultCluster` so `deploy`/`status`/`node …`
@@ -467,13 +472,12 @@ commands then print a `cluster: lower (us-east-1)` line in the banner so you alw
 your target. `cluster current` shows the effective cluster — a per-command `--cluster`
 still wins, for that invocation only.
 
-Deploy with `--cluster` instead of pinning node names in TOML; the CLI distributes
-replicas across the cluster's app nodes and routes the domain through its edge:
+Deploy with `--cluster`; the TOML names no nodes — the scheduler distributes replicas
+across the cluster's app nodes and routes the domain through its edge:
 
 ```toml
 [[service]]
 name = "web"
-# omit node/nodes — placement comes from deploy --cluster lower
 replicas = 4
 domain = "app.example.com"
 port = 3000
@@ -482,33 +486,16 @@ port = 3000
 ```
 
 ```bash
-launch-pad deploy --cluster lower
+launchpad deploy --cluster lower
 ```
 
-Two optional fields steer auto-placement (both only valid when `node`/`nodes` are
-omitted, and both locked after the first deploy like every other placement field):
-
-```toml
-[[service]]
-name = "web"
-schedule = "capacity"   # even (default): round-robin · capacity: bin-pack by free CPU/memory
-topology = "split"      # auto (default) · split: app nodes behind an edge · co-located: one both-node, local Caddy
-replicas = 4
-domain = "app.example.com"
-port = 3000
-  [service.healthCheck]
-  path = "/healthz"
-```
-
-- `schedule = "even"` is the legacy behavior: round-robin across the cluster's
-  app/both nodes. `"capacity"` places each replica on the node with the most free
-  CPU/memory (using deploy's own admission math, including rollout-surge headroom)
-  and fails with a per-node capacity breakdown when nothing fits.
-- `topology = "split"` requires a resolvable edge (`edge = …` or the cluster
-  default) even for one node; `"co-located"` puts ALL replicas on a single
-  both-role node served by its local Caddy and deliberately ignores the cluster's
-  default edge (`edge = …` alongside it is a config error). Workers have no
-  ingress: they may use `"co-located"` (one node) but not `"split"`.
+- The scheduler **bin-packs by free CPU/memory** (using deploy's own admission math,
+  including rollout-surge headroom): it spreads a multi-service deploy across empty
+  nodes when possible, stacks replicas only when necessary, and auto-adds an
+  app node (generated `<noun>-<verb>-<adverb>` name) when nothing fits.
+- A service with `[[service.volumes]]` is placed **whole onto one node** and stays
+  there (**sticky** — its data lives on that node's disk; if the node lacks capacity
+  it's a hard error, since the data can't move).
 - Every deploy prints the resolved placement map (and `placementPlan` under
   `--json`). When a re-plan moves a service off a node, deploy cleans that node's
   desired state; `deploy --restart` always re-rolls in place.
@@ -516,14 +503,13 @@ port = 3000
 `deploy`, `status`, and the `node` subcommands all take `--cluster` (defaulting to
 your local `defaultCluster`, else `default`). Cross-account clusters — a `roleArn`
 target assumed per cluster — are the next step (Phase 2); the `default` cluster and
-all existing nodes are unaffected. See `examples/cluster-2-app-nodes-auto-placement`,
-`examples/cluster-capacity-split`, and `examples/cluster-co-located-single-node` for
-runnable configs.
+all existing nodes are unaffected. See `examples/cluster-2-app-nodes-auto-placement`
+and `examples/cluster-capacity-split` for runnable configs.
 
 ## Logging: application logs in CloudWatch
 
 > Every node ships its containers' stdout/stderr — and its own agent/Caddy logs — to
-> **CloudWatch Logs**, so `launch-pad logs <service>` is the primary way to read them.
+> **CloudWatch Logs**, so `launchpad logs <service>` is the primary way to read them.
 > This is true **Option A** (agent-based shipping): containers keep Docker's `json-file`
 > driver on disk, and the on-box **Amazon CloudWatch Agent** tails those files. The CLI
 > never reads logs by node — it reads by *service footprint*.
@@ -536,7 +522,7 @@ The naming scheme is **service-first** — one log group per service footprint
 ```
 /launch-pad/<cluster>/<project>/<service>     # one app log group per service footprint
     └── <nodeId>/<replicaIndex>               # one stream per replica (across all nodes)
-/launch-pad/<cluster>/system/<nodeId>         # this node's agent (+ caddy on edge/both)
+/launch-pad/<cluster>/system/<nodeId>         # this node's agent (+ caddy on the edge)
     └── agent | caddy
 ```
 
@@ -548,7 +534,7 @@ The naming scheme is **service-first** — one log group per service footprint
   on display.
 
 How it flows: node provisioning installs + starts the CloudWatch Agent with a **base
-config** (system logs). On each reconcile, the launch-pad agent renders a **combined
+config** (system logs). On each reconcile, the launchpad agent renders a **combined
 config** mapping every running managed container to its `…-json.log` file and reloads
 the CloudWatch Agent. Log shipping is **degraded-safe** — if the CloudWatch Agent is
 missing or misconfigured, Docker/Caddy reconcile is unaffected.
@@ -556,12 +542,12 @@ missing or misconfigured, Docker/Caddy reconcile is unaffected.
 ### Reading logs
 
 ```bash
-launch-pad logs api                       # service from launch-pad.toml in cwd
-launch-pad logs api --env staging         # the my-app-staging footprint
-launch-pad logs api --since 1h --tail 200 # window + last N lines
-launch-pad logs api --follow              # stream new lines (Ctrl+C to stop)
-launch-pad logs api --filter "error"      # CloudWatch filter pattern
-launch-pad logs api --json                # structured output for scripting
+launchpad logs api                       # service from launch-pad.toml in cwd
+launchpad logs api --env staging         # the my-app-staging footprint
+launchpad logs api --since 1h --tail 200 # window + last N lines
+launchpad logs api --follow              # stream new lines (Ctrl+C to stop)
+launchpad logs api --filter "error"      # CloudWatch filter pattern
+launchpad logs api --json                # structured output for scripting
 ```
 
 `logs` reads one group and merges every replica on every node — no `--node` needed.
@@ -598,8 +584,8 @@ existed need a one-time, idempotent bootstrap — it updates the node's IAM poli
 installs the CloudWatch Agent over SSM:
 
 ```bash
-launch-pad node install-logging <node>     # one node
-launch-pad node install-logging            # every node in the cluster
+launchpad node install-logging <node>     # one node
+launchpad node install-logging            # every node in the cluster
 ```
 
 ## Monitoring: resource usage over time
@@ -607,14 +593,14 @@ launch-pad node install-logging            # every node in the cluster
 > Logs are application output; **monitoring is resource utilization**. Each agent
 > samples host + per-container **CPU and memory** every ~60s and emits one
 > `launchpad.stats` JSON line to its own stderr, which rides the **existing system-log
-> pipeline** to CloudWatch. `launch-pad node monitor <node>` reads those samples back as
+> pipeline** to CloudWatch. `launchpad node monitor <node>` reads those samples back as
 > sparkline graphs. This is separate from `status.json` (deploy convergence) — no
 > `status.json` change and no `PROTOCOL_VERSION` bump.
 
 ### What gets sampled
 
 Each `launchpad.stats` line carries the host (`cpuPercent`, `memoryUsedMb`,
-`memoryTotalMb`) and, for `app`/`both` nodes, one entry per running managed container
+`memoryTotalMb`) and, for `app` nodes, one entry per running managed container
 (`project`, `service`, `replica`, `cpuPercent` as a % of the container's `--cpus` limit,
 `memoryUsedMb`, `memoryLimitMb`). `edge` nodes sample host only. Sampling is
 **degraded-safe**: a Docker or `/proc` failure can never break a reconcile tick — host
@@ -624,17 +610,17 @@ stats still ship, and the per-service array degrades to empty. Two env knobs on 
 - `LAUNCHPAD_STATS_SERVICES=0` — host-only (drop the per-service array on tiny nodes).
 
 Lines land in the node's **system** log group (`/launch-pad/<cluster>/system/<nodeId>`,
-stream `agent`) — they do **not** pollute `launch-pad logs <service>`, which reads the
+stream `agent`) — they do **not** pollute `launchpad logs <service>`, which reads the
 per-service app groups.
 
 ### Reading usage
 
 ```bash
-launch-pad node monitor node-prod-1 --since 1h        # historic graph from CloudWatch
-launch-pad node monitor node-prod-1 --watch           # live graph via SSM (Ctrl+C to stop)
-launch-pad node monitor node-prod-1 --watch --service api   # one service (needs launch-pad.toml)
-launch-pad node monitor node-prod-1 --since 1h --watch      # seed history, then go live
-launch-pad node monitor node-prod-1 --since 1h --json # { samples: [...] } for scripting
+launchpad node monitor node-prod-1 --since 1h        # historic graph from CloudWatch
+launchpad node monitor node-prod-1 --watch           # live graph via SSM (Ctrl+C to stop)
+launchpad node monitor node-prod-1 --watch --service api   # one service (needs launch-pad.toml)
+launchpad node monitor node-prod-1 --since 1h --watch      # seed history, then go live
+launchpad node monitor node-prod-1 --since 1h --json # { samples: [...] } for scripting
 ```
 
 - **Historic** (`--since`, default `1h`) reads `launchpad.stats` lines from the system log
@@ -648,12 +634,12 @@ launch-pad node monitor node-prod-1 --since 1h --json # { samples: [...] } for s
 
 | Need | Command | Source |
 | ---- | ------- | ------ |
-| App logs for one service | `launch-pad logs <service>` | CW `/launch-pad/.../<project>/<service>` |
-| Node CPU/mem history | `launch-pad node monitor <node> --since 1h` | CW system group, `launchpad.stats` lines |
-| Node CPU/mem live graph | `launch-pad node monitor <node> --watch` | SSM + local ring buffer |
+| App logs for one service | `launchpad logs <service>` | CW `/launch-pad/.../<project>/<service>` |
+| Node CPU/mem history | `launchpad node monitor <node> --since 1h` | CW system group, `launchpad.stats` lines |
+| Node CPU/mem live graph | `launchpad node monitor <node> --watch` | SSM + local ring buffer |
 | Per-service usage | add `--service <name>` | `services[]` in the stats line |
-| Deploy health / replicas | `launch-pad status` | S3 `status.json` |
-| Allocated vs capacity | `launch-pad node list` | S3 `desired.json` + registry |
+| Deploy health / replicas | `launchpad status` | S3 `status.json` |
+| Allocated vs capacity | `launchpad node list` | S3 `desired.json` + registry |
 
 The agent reconciles **containers on a live node**; EC2 drift repair (`node reconcile`,
 deploy preflight) is a **CLI** concern.

@@ -8,14 +8,14 @@ import { putJson } from "../aws/s3-state";
 import { CliError } from "../errors";
 import { uploadAndPresignAgent } from "./agent-bundle";
 import {
+  AGENT_INSTALL_PATH,
   AGENT_SYSTEMD_UNIT,
   renderRemoteUpgradeScript,
   ssmRunBashScript,
-  TS_AGENT_INSTALL_PATH,
 } from "./agent-upgrade";
 
 /**
- * Lifetime of the presigned agent-bundle URL used during an upgrade. Short on
+ * Lifetime of the presigned agent-binary URL used during an upgrade. Short on
  * purpose — it only needs to outlive the SSM install (or a human copy-paste of
  * the manual fallback). `manualUpgradeHint` derives its "valid for N min" text
  * from this, so the displayed expiry can't drift from the real one.
@@ -56,7 +56,7 @@ function requireRunningInstance(obs: Ec2Observation, nodeId: string): void {
           ? "instance is gone"
           : "instance is not running";
   throw new CliError(`can't upgrade agent on "${nodeId}" — ${detail}`, {
-    hint: "start it with `launch-pad node resume` or reconcile drift first",
+    hint: "start it with `launchpad node resume` or reconcile drift first",
   });
 }
 
@@ -68,7 +68,7 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
 
   if (!entry.instanceId) {
     throw new CliError(`node "${nodeId}" has no EC2 instance yet`, {
-      hint: "provision it with `launch-pad node create` or deploy with auto-create",
+      hint: "provision it with `launchpad node create` or deploy with auto-create",
     });
   }
 
@@ -76,24 +76,28 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
   const obs = obsMap.get(entry.instanceId) ?? { kind: "missing" as const };
   requireRunningInstance(obs, nodeId);
 
-  report(`uploading agent bundle for ${nodeId}`);
+  // The binary must match the node's role: edge nodes get the Caddy-routing edge
+  // agent, app nodes the Docker-reconciling app agent.
+  const role = entry.role === "app" ? ("app" as const) : ("edge" as const);
+  report(`uploading ${role} agent binary for ${nodeId}`);
   const bundleUrl = await uploadAndPresignAgent(
     aws.s3,
     aws.bucket,
     clusterId,
     nodeId,
+    role,
     UPGRADE_PRESIGN_TTL_SECONDS,
   );
 
   if (p.uploadOnly) {
     await updateRegistryAgentVersion(aws, entry, agentVersion);
-    return { nodeId, instanceId: entry.instanceId, agentType: "ts", delivery: "upload-only", bundleUrl };
+    return { nodeId, instanceId: entry.instanceId, agentType: "rust", delivery: "upload-only", bundleUrl };
   }
 
   report(`installing on ${entry.instanceId} via SSM`);
   await ensureSsmManagedPolicyForNode(aws.iam, entry);
 
-  const script = renderRemoteUpgradeScript(bundleUrl);
+  const script = renderRemoteUpgradeScript(bundleUrl, role);
   try {
     const outcomes = await runShellScriptOnInstances(
       aws.ssm,
@@ -121,7 +125,7 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
   }
 
   await updateRegistryAgentVersion(aws, entry, agentVersion);
-  return { nodeId, instanceId: entry.instanceId, agentType: "ts", delivery: "ssm" };
+  return { nodeId, instanceId: entry.instanceId, agentType: "rust", delivery: "ssm" };
 }
 
 async function updateRegistryAgentVersion(
@@ -129,7 +133,7 @@ async function updateRegistryAgentVersion(
   entry: NodeRegistryEntry,
   agentVersion: string,
 ): Promise<void> {
-  const updated: NodeRegistryEntry = { ...entry, agentVersion, agentType: "ts" };
+  const updated: NodeRegistryEntry = { ...entry, agentVersion, agentType: "rust" };
   await putJson(aws.s3, aws.bucket, nodeRegistryKey(entry.clusterId, entry.nodeId), updated);
 }
 
@@ -145,9 +149,11 @@ export function manualUpgradeHint(
   // constant used to sign the URL, so it can't claim a wrong expiry.
   return [
     `  ${nodeId}:`,
-    `    curl -fsSL '${bundleUrl}' -o /tmp/launch-pad-agent.cjs`,
-    `    sudo install -m 755 /tmp/launch-pad-agent.cjs ${TS_AGENT_INSTALL_PATH}`,
+    `    f="$(mktemp)" && curl -fsSL '${bundleUrl}' -o "$f"`,
+    `    sudo install -m 755 "$f" ${AGENT_INSTALL_PATH} && rm -f "$f"`,
     `    sudo systemctl restart ${AGENT_SYSTEMD_UNIT}`,
+    "    # if this node still runs the legacy TypeScript agent, also update the systemd",
+    "    # unit to `ExecStart=/opt/launch-pad/agent` (see docs/agent.md, migration) before restarting",
     "",
     "  Connect with EC2 Instance Connect (console) or SSH if the node has port 22 open.",
     `  (Presigned URL valid for ~${Math.round(ttlSeconds / 60)} min.)`,

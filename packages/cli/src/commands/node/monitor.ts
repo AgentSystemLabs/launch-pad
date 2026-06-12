@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { Command } from "commander";
 import {
-  envProject,
+  footprintOwner,
   hostMemoryPercent,
   LABEL_REGEX,
   type NodeRegistryEntry,
@@ -140,7 +140,7 @@ function renderView(
 
   if (samples.length === 0) {
     lines.push(color.dim("  no stats samples in this window — the agent emits one every ~60s"));
-    lines.push(color.dim("  ensure logging is installed (`launch-pad node install-logging`) and the node is running"));
+    lines.push(color.dim("  ensure logging is installed (`launchpad node install-logging`) and the node is running"));
     return lines;
   }
 
@@ -197,7 +197,7 @@ async function loadNodeEntry(aws: AwsEnv, nodeId: string): Promise<NodeRegistryE
   const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, nodeId));
   if (!obj) {
     throw new CliError(`node "${nodeId}" does not exist in cluster "${aws.clusterId}"`, {
-      hint: "list nodes with `launch-pad node list`",
+      hint: "list nodes with `launchpad node list`",
     });
   }
   return parseNodeRegistryEntry(obj.raw);
@@ -224,7 +224,7 @@ function resolveServiceFilter(
       hint: `available: ${config.service.map((s) => s.name).join(", ")}`,
     });
   }
-  return { project: envProject(config.project, opts.env), service: opts.service };
+  return { project: footprintOwner(config, opts.env), service: opts.service };
 }
 
 // ── historic mode ─────────────────────────────────────────────────────────────────────
@@ -274,7 +274,7 @@ async function runHistoric(
 function requireSsmTarget(entry: NodeRegistryEntry, obs: Ec2Observation): string {
   if (!entry.instanceId || obs.kind !== "running") {
     throw new CliError(`node "${entry.nodeId}" has no running instance to sample`, {
-      hint: "start it with `launch-pad node resume`, or use historic mode (--since) instead",
+      hint: "start it with `launchpad node resume`, or use historic mode (--since) instead",
     });
   }
   return entry.instanceId;
@@ -405,10 +405,10 @@ export function registerMonitor(node: Command): void {
         "directly over SSM every few seconds — the instance must be running and SSM-managed.",
         "",
         "Examples:",
-        "  $ launch-pad node monitor node-prod-1 --since 1h",
-        "  $ launch-pad node monitor node-prod-1 --watch",
-        "  $ launch-pad node monitor node-prod-1 --watch --service api",
-        "  $ launch-pad node monitor node-prod-1 --since 1h --watch   # seed history, then live",
+        "  $ launchpad node monitor node-prod-1 --since 1h",
+        "  $ launchpad node monitor node-prod-1 --watch",
+        "  $ launchpad node monitor node-prod-1 --watch --service api",
+        "  $ launchpad node monitor node-prod-1 --since 1h --watch   # seed history, then live",
       ].join("\n"),
     )
     .action(async (nodeId: string, _opts, command: Command) => {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AutoscalePolicySchema } from "./autoscale";
 
 /**
  * `cluster.json` at `clusters/<clusterId>/cluster.json` — the authoritative
@@ -15,6 +16,8 @@ export const ClusterConfigSchema = z
     region: z.string().min(1),
     createdAt: z.string(),
     createdBy: z.string(),
+    /** Reactive autoscaling policy for the app pool, or null when not configured. */
+    autoscale: AutoscalePolicySchema.nullable().default(null),
   })
   .strict();
 

@@ -117,7 +117,7 @@ describe("buildDeployWorkflow", () => {
   });
 
   it("runs a non-interactive deploy", () => {
-    expect(yaml).toContain("launch-pad deploy --yes");
+    expect(yaml).toContain("npx --yes @agentsystemlabs/launch-pad deploy --yes");
   });
 
   it("triggers on pushes to the configured branch", () => {

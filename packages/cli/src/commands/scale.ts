@@ -44,6 +44,12 @@ async function runScale(
     });
   }
 
+  if (field === "replicas" && decl.cron !== undefined) {
+    throw new CliError(`"${service}" is a scheduled (cron) service — it runs exactly one container per fire`, {
+      hint: "cron services can't scale horizontally; scale cpu/memory instead, or split the work into more services",
+    });
+  }
+
   const value = parseCount(rawValue);
   if (value === null) {
     throw new CliError(`invalid ${field} "${rawValue}"`, {
@@ -84,7 +90,7 @@ async function runScale(
     log.success(
       `set ${color.cyan(`${service}.${field}`)} = ${value}${UNIT[field]} ${color.dim(`(was ${edit.previous ?? effective})`)}`,
     );
-    log.dim(`  --no-deploy: edited launch-pad.toml only — run ${color.cyan("launch-pad deploy")} to apply`);
+    log.dim(`  --no-deploy: edited launch-pad.toml only — run ${color.cyan("launchpad deploy")} to apply`);
     return;
   }
 
@@ -136,9 +142,9 @@ export function registerScale(program: Command): void {
       "edit only, or --dry-run to preview.",
       "",
       "Examples:",
-      "  $ launch-pad scale replicas web 3",
-      "  $ launch-pad scale cpu web 512 --yes",
-      "  $ launch-pad scale memory worker 1024 --no-deploy",
+      "  $ launchpad scale replicas web 3",
+      "  $ launchpad scale cpu web 512 --yes",
+      "  $ launchpad scale memory worker 1024 --no-deploy",
     ].join("\n"),
   );
 }

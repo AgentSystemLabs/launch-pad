@@ -24,6 +24,27 @@ describe("parseClusterConfig", () => {
     expect(c.defaultEdge).toBe("edge-lower");
   });
 
+  it("defaults autoscale to null on pre-autoscale documents", () => {
+    const c = parseClusterConfig({
+      clusterId: "lower",
+      region: "us-east-1",
+      createdAt: "t",
+      createdBy: "x",
+    });
+    expect(c.autoscale).toBeNull();
+  });
+
+  it("parses an autoscale policy with defaults", () => {
+    const c = parseClusterConfig({
+      clusterId: "lower",
+      region: "us-east-1",
+      createdAt: "t",
+      createdBy: "x",
+      autoscale: { minNodes: 1, maxNodes: 3 },
+    });
+    expect(c.autoscale).toMatchObject({ minNodes: 1, maxNodes: 3, scaleOutPercent: 80, scaleInPercent: 30 });
+  });
+
   it("rejects unknown keys", () => {
     expect(() =>
       parseClusterConfig({ clusterId: "lower", region: "us-east-1", createdAt: "t", createdBy: "x", extra: 1 }),

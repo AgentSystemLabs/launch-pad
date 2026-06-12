@@ -1,0 +1,10 @@
+# A scheduled job: the agent runs one container per cron fire (UTC) and lets it
+# exit. No domain/port/healthCheck — a cron service is a worker; the run is judged
+# by its exit code (`cron.lastExitCode` in `launch-pad status`).
+project = "cron-task"
+
+[[service]]
+name = "tick"
+cron = "*/5 * * * *"
+cpu = 256
+memory = 256

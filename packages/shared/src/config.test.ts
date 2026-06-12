@@ -3,18 +3,17 @@ import { LAUNCH_PAD_ENVIRONMENT } from "./constants";
 import {
   NODE_ID_REGEX,
   nodeIdError,
+  componentOwner,
   containerEnvForDeploy,
   envProject,
+  footprintOwner,
   isWebService,
   parseLaunchPadConfig,
   resolveServiceDomain,
-  targetNodes,
-  usesClusterPlacement,
 } from "./config";
 
 const web = {
   name: "web",
-  node: "node-dev-1",
   cpu: 512,
   memory: 512,
   domain: "app.example.com",
@@ -24,7 +23,6 @@ const web = {
 
 const worker = {
   name: "worker",
-  node: "node-dev-1",
   cpu: 256,
   memory: 256,
 };
@@ -89,46 +87,88 @@ describe("parseLaunchPadConfig", () => {
   });
 });
 
-describe("replicas / placement / edge validation", () => {
-  const health = { healthCheck: { path: "/healthz" } };
-
-  it("defaults replicas to 1 and rollout to sane values", () => {
-    const cfg = parseLaunchPadConfig({ project: "my-app", service: [web] });
-    expect(cfg.service[0]?.replicas).toBe(1);
-    expect(cfg.service[0]?.rollout).toEqual({ maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" });
+describe("component (federated multi-repo deploys)", () => {
+  it("accepts an optional component label", () => {
+    const cfg = parseLaunchPadConfig({ project: "shop", component: "auth", service: [worker] });
+    expect(cfg.component).toBe("auth");
   });
 
-  it("rejects invalid node ids in service declarations", () => {
+  it("component stays undefined when omitted", () => {
+    const cfg = parseLaunchPadConfig({ project: "shop", service: [worker] });
+    expect(cfg.component).toBeUndefined();
+  });
+
+  it("rejects an invalid component label", () => {
     expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...worker, node: "bad node" }] }),
-    ).toThrow(/node must be letters, numbers, hyphens, or underscores/);
+      parseLaunchPadConfig({ project: "shop", component: "Auth_X", service: [worker] }),
+    ).toThrow();
+  });
+
+  it("rejects the reserved `--` separator inside project and component", () => {
+    expect(() => parseLaunchPadConfig({ project: "shop--x", service: [worker] })).toThrow(/--/);
     expect(() =>
-      parseLaunchPadConfig({
-        project: "p",
-        service: [{ ...web, node: undefined, nodes: ["ok_node", "-bad"], edge: "edge-1", ...health }],
-      }),
-    ).toThrow(/node must be letters, numbers, hyphens, or underscores/);
+      parseLaunchPadConfig({ project: "shop", component: "a--b", service: [worker] }),
+    ).toThrow(/--/);
+  });
+});
+
+describe("componentOwner / footprintOwner", () => {
+  it("componentOwner without a component is the project itself", () => {
+    expect(componentOwner("shop", undefined)).toBe("shop");
   });
 
-  it("rejects `node` and `nodes` together", () => {
-    expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...worker, nodes: ["a"] }] }),
-    ).toThrow(/set `node` or `nodes`, not both/);
+  it("componentOwner joins with the reserved separator", () => {
+    expect(componentOwner("shop", "auth")).toBe("shop--auth");
   });
 
-  it("allows omitting placement (resolved at deploy via --cluster)", () => {
-    const cfg = parseLaunchPadConfig({
-      project: "p",
-      service: [{ ...web, node: undefined, replicas: 2, ...health }],
-    });
-    expect(targetNodes(cfg.service[0]!)).toEqual([]);
-    expect(usesClusterPlacement(cfg.service[0]!)).toBe(true);
+  it("footprintOwner composes component and env", () => {
+    expect(footprintOwner({ project: "shop" }, undefined)).toBe("shop");
+    expect(footprintOwner({ project: "shop" }, "staging")).toBe("shop-staging");
+    expect(footprintOwner({ project: "shop", component: "auth" }, undefined)).toBe("shop--auth");
+    expect(footprintOwner({ project: "shop", component: "auth" }, "pr-7")).toBe("shop--auth-pr-7");
   });
+});
 
+describe("removed / unsupported service keys", () => {
   it("rejects deprecated `cluster` in a service with a migration hint", () => {
     expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...worker, node: undefined, cluster: "lower" }] }),
+      parseLaunchPadConfig({ project: "p", service: [{ ...worker, cluster: "lower" }] }),
     ).toThrow(/cluster.*not supported in launch-pad\.toml.*--cluster/);
+  });
+
+  it("rejects the removed `node` key with a migration hint", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...worker, node: "node-dev-1" }] }),
+    ).toThrow(/service\[0\]\.node: `node` was removed.*placement is automatic/);
+  });
+
+  it("rejects the removed `nodes` key with a migration hint", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...web, nodes: ["a", "b"] }] }),
+    ).toThrow(/`nodes` was removed.*placement is automatic/);
+  });
+
+  it("rejects the removed `edge` key with a migration hint", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...web, edge: "edge-1" }] }),
+    ).toThrow(/`edge` was removed.*dedicated edge node/);
+  });
+
+  it("rejects the removed `topology` key with a migration hint", () => {
+    for (const topology of ["split", "co-located", "auto"]) {
+      expect(() =>
+        parseLaunchPadConfig({ project: "p", service: [{ ...web, topology }] }),
+      ).toThrow(/`topology` was removed.*split-topology/);
+    }
+  });
+
+  it("rejects the removed `schedule` key with a migration hint", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...worker, schedule: "even" }] }),
+    ).toThrow(/`schedule` was removed/);
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...worker, schedule: "capacity" }] }),
+    ).toThrow(/`schedule` was removed/);
   });
 
   it("rejects unsupported service keys with a clear path", () => {
@@ -136,38 +176,13 @@ describe("replicas / placement / edge validation", () => {
       parseLaunchPadConfig({ project: "p", service: [{ ...worker, environment: "staging" }] }),
     ).toThrow(/service\[0\]\.environment: unsupported key/);
   });
+});
 
-  it("targetNodes returns the single node or the list", () => {
-    const single = parseLaunchPadConfig({ project: "p", service: [worker] });
-    expect(targetNodes(single.service[0]!)).toEqual(["node-dev-1"]);
-    expect(usesClusterPlacement(single.service[0]!)).toBe(false);
-    const multi = parseLaunchPadConfig({
-      project: "p",
-      service: [{ ...web, node: undefined, nodes: ["a", "b"], edge: "e", ...health }],
-    });
-    expect(targetNodes(multi.service[0]!)).toEqual(["a", "b"]);
-  });
-
-  it("rejects edge on a worker", () => {
-    expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...worker, edge: "e" }] }),
-    ).toThrow(/only web services/);
-  });
-
-  it("requires an edge when a web service spans multiple nodes", () => {
-    expect(() =>
-      parseLaunchPadConfig({
-        project: "p",
-        service: [{ ...web, node: undefined, nodes: ["a", "b"], ...health }],
-      }),
-    ).toThrow(/needs a dedicated `edge`/);
-    // with edge → ok
-    expect(() =>
-      parseLaunchPadConfig({
-        project: "p",
-        service: [{ ...web, node: undefined, nodes: ["a", "b"], edge: "e", ...health }],
-      }),
-    ).not.toThrow();
+describe("replicas / healthCheck validation", () => {
+  it("defaults replicas to 1 and rollout to sane values", () => {
+    const cfg = parseLaunchPadConfig({ project: "my-app", service: [web] });
+    expect(cfg.service[0]?.replicas).toBe(1);
+    expect(cfg.service[0]?.rollout).toEqual({ maxSurge: 1, drainTimeout: "20s", stopGrace: "30s" });
   });
 
   it("requires a healthCheck for every web service, even replicas = 1", () => {
@@ -189,85 +204,6 @@ describe("replicas / placement / edge validation", () => {
     expect(() =>
       parseLaunchPadConfig({ project: "p", service: [{ ...worker, replicas: 3 }] }),
     ).not.toThrow();
-  });
-});
-
-describe("schedule / topology validation", () => {
-  const health = { healthCheck: { path: "/healthz" } };
-  /** A cluster-placed web service (no node/nodes). */
-  const clusterWeb = { ...web, node: undefined, ...health };
-  const clusterWorker = { ...worker, node: undefined };
-
-  it("defaults to schedule = even and topology = auto when omitted", () => {
-    const cfg = parseLaunchPadConfig({ project: "p", service: [clusterWeb, clusterWorker] });
-    expect(cfg.service[0]?.schedule).toBe("even");
-    expect(cfg.service[0]?.topology).toBe("auto");
-    expect(cfg.service[1]?.schedule).toBe("even");
-    expect(cfg.service[1]?.topology).toBe("auto");
-  });
-
-  it("accepts capacity + each topology on a cluster-placed web service", () => {
-    for (const topology of ["split", "co-located", "auto"]) {
-      const cfg = parseLaunchPadConfig({
-        project: "p",
-        service: [{ ...clusterWeb, schedule: "capacity", topology }],
-      });
-      expect(cfg.service[0]?.schedule).toBe("capacity");
-      expect(cfg.service[0]?.topology).toBe(topology);
-    }
-  });
-
-  it("accepts co-located (and capacity) on a worker", () => {
-    expect(() =>
-      parseLaunchPadConfig({
-        project: "p",
-        service: [{ ...clusterWorker, schedule: "capacity", topology: "co-located" }],
-      }),
-    ).not.toThrow();
-  });
-
-  it("rejects an EXPLICIT schedule alongside node — even the default value", () => {
-    // The key matrix case: "even" matches the default, but writing it next to a
-    // pinned node is still a contradiction the user should hear about.
-    expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...worker, schedule: "even" }] }),
-    ).toThrow(/`schedule` only applies to cluster auto-placement/);
-    expect(() =>
-      parseLaunchPadConfig({
-        project: "p",
-        service: [{ ...web, node: undefined, nodes: ["a"], schedule: "capacity", ...health }],
-      }),
-    ).toThrow(/`schedule` only applies to cluster auto-placement/);
-  });
-
-  it("rejects topology alongside node/nodes", () => {
-    expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...worker, topology: "auto" }] }),
-    ).toThrow(/`topology` only applies to cluster auto-placement/);
-  });
-
-  it("rejects split on a worker", () => {
-    expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...clusterWorker, topology: "split" }] }),
-    ).toThrow(/a worker has no ingress to split/);
-  });
-
-  it("rejects co-located together with an explicit edge", () => {
-    expect(() =>
-      parseLaunchPadConfig({
-        project: "p",
-        service: [{ ...clusterWeb, topology: "co-located", edge: "edge-1" }],
-      }),
-    ).toThrow(/serves the domain from the service's own node — remove `edge`/);
-  });
-
-  it("rejects unknown enum values", () => {
-    expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...clusterWeb, schedule: "spread" }] }),
-    ).toThrow();
-    expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...clusterWeb, topology: "pinned" }] }),
-    ).toThrow();
   });
 });
 
@@ -347,7 +283,6 @@ describe("resolveServiceDomain", () => {
 describe("domainPattern validation", () => {
   const web = {
     name: "api",
-    node: "n1",
     cpu: 256,
     memory: 256,
     domain: "api.acme.com",
@@ -371,7 +306,7 @@ describe("domainPattern validation", () => {
     expect(() =>
       parseLaunchPadConfig({
         project: "p",
-        service: [{ name: "w", node: "n1", cpu: 256, memory: 256, domainPattern: "w-{env}.acme.com" }],
+        service: [{ name: "w", cpu: 256, memory: 256, domainPattern: "w-{env}.acme.com" }],
       }),
     ).toThrow(/only applies to a web service/);
   });
@@ -392,42 +327,23 @@ describe("persistent volumes", () => {
     name: "data",
     cpu: 256,
     memory: 256,
-    node: "node-dev-1",
     volumes: [{ name: "data", path: "/data" }],
     ...over,
   });
 
-  it("parses a pinned service with a volume and defaults volumes to []", () => {
+  it("parses a service with a volume and defaults volumes to []", () => {
     const cfg = parseLaunchPadConfig({ project: "p", service: [vol(), worker] });
     expect(cfg.service[0]?.volumes).toEqual([{ name: "data", path: "/data" }]);
     // a service without volumes gets the [] default
     expect(cfg.service[1]?.volumes).toEqual([]);
   });
 
-  it("allows a web service with a volume (single pinned node)", () => {
+  it("allows a web service with a volume", () => {
     const cfg = parseLaunchPadConfig({
       project: "p",
       service: [{ ...web, volumes: [{ name: "uploads", path: "/var/uploads" }] }],
     });
     expect(cfg.service[0]?.volumes).toEqual([{ name: "uploads", path: "/var/uploads" }]);
-  });
-
-  it("requires a pinned `node` — rejects volumes on a cluster-placed service", () => {
-    expect(() =>
-      parseLaunchPadConfig({
-        project: "p",
-        service: [{ name: "w", cpu: 256, memory: 256, volumes: [{ name: "data", path: "/data" }] }],
-      }),
-    ).toThrow(/must be pinned to a single `node`/);
-  });
-
-  it("rejects volumes combined with `nodes` (multi-node would split the data)", () => {
-    expect(() =>
-      parseLaunchPadConfig({
-        project: "p",
-        service: [{ name: "w", cpu: 256, memory: 256, nodes: ["a", "b"], volumes: [{ name: "data", path: "/data" }] }],
-      }),
-    ).toThrow(/can't be combined with `nodes`/);
   });
 
   it("rejects a relative or root volume path", () => {

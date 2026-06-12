@@ -6,10 +6,11 @@
  *
  * The scheme is **service-first**: one log group per service footprint (aggregating
  * every node + replica), with the node + replica encoded in the stream name. So
- * `launch-pad logs <service>` reads one group and sees all replicas across all nodes.
+ * `launchpad logs <service>` reads one group and sees all replicas across all nodes.
  */
 
 import type { NodeRole } from "./registry";
+import { nodeFrontsIngress } from "./node-role";
 
 /** Default CloudWatch Logs retention applied on first write. Not yet TOML-configurable. */
 export const LOG_RETENTION_DAYS = 7;
@@ -120,7 +121,7 @@ export function systemLogFilePath(component: SystemComponent): string {
  * `edge`/`both` nodes, so an `app` node ships agent logs only.
  */
 export function systemComponentsForRole(role: NodeRole): SystemComponent[] {
-  return role === "app" ? ["agent"] : ["agent", "caddy"];
+  return nodeFrontsIngress(role) ? ["agent", "caddy"] : ["agent"];
 }
 
 /** collect_list entries for a node's own system logs (agent, plus caddy on edge/both). */

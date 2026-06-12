@@ -3,8 +3,14 @@ import { stateBucketName } from "@agentsystemlabs/launch-pad-shared";
 /** AWS-managed policy the per-node role gets (for SSM Run Command / Session Manager). */
 const SSM_MANAGED_INSTANCE_CORE_ARN = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore";
 
-/** Every per-node IAM role/profile launch-pad creates shares this name prefix. */
+/** Every per-node IAM role/profile launchpad creates shares this name prefix. */
 const NODE_IAM_PREFIX = "launch-pad-node-";
+
+/** Per-cluster CodeBuild projects (`deploy --remote-build`) share this name prefix. */
+const CODEBUILD_PROJECT_PREFIX = "launch-pad-build-";
+
+/** Per-cluster CodeBuild service roles share this name prefix. */
+const CODEBUILD_ROLE_PREFIX = "launch-pad-codebuild-";
 
 export interface OperatorPolicyParams {
   accountId: string;
@@ -26,7 +32,7 @@ export interface IamPolicyDocument {
 
 /**
  * Least-privilege IAM policy for the **operator** principal — the human (or CI role)
- * that runs `launch-pad deploy` / `node` / `cluster`. It is the mirror of the per-node
+ * that runs `launchpad deploy` / `node` / `cluster`. It is the mirror of the per-node
  * policies in `aws/iam.ts`: that file scopes what a *node* may do; this scopes what the
  * *operator* may do to provision and manage nodes.
  *
@@ -43,7 +49,7 @@ export interface IamPolicyDocument {
  *   - SSM — secrets under `/launch-pad/*`, the public AMI parameter, and Run Command
  *     limited to `AWS-RunShellScript` on this account's instances.
  *   - KMS — only via SSM (so SecureString secrets encrypt/decrypt against `aws/ssm`).
- *   - CloudWatch Logs — read-only over the `/launch-pad/*` log groups (`launch-pad logs`).
+ *   - CloudWatch Logs — read-only over the `/launch-pad/*` log groups (`launchpad logs`).
  *
  * Keep this in lock-step with the AWS SDK calls in `packages/cli/src/aws/*` — a new
  * `new XxxCommand()` there usually means a new action here.
@@ -194,6 +200,53 @@ export function buildOperatorPolicy(params: OperatorPolicyParams): IamPolicyDocu
         Condition: { StringEquals: { "iam:PassedToService": "ec2.amazonaws.com" } },
       },
       {
+        // `deploy --remote-build` manages one CodeBuild project per cluster and runs
+        // builds in it. Scoped to the launch-pad-build-* name prefix only.
+        Sid: "CodeBuildRemoteBuilds",
+        Effect: "Allow",
+        Action: [
+          "codebuild:CreateProject",
+          "codebuild:UpdateProject",
+          "codebuild:DeleteProject",
+          "codebuild:StartBuild",
+          "codebuild:BatchGetBuilds",
+        ],
+        Resource: [`arn:aws:codebuild:${region}:${accountId}:project/${CODEBUILD_PROJECT_PREFIX}*`],
+      },
+      {
+        // The operator creates/deletes the per-cluster CodeBuild service role. Same
+        // trusted-operator caveat as IamNodeRole above.
+        Sid: "IamCodeBuildRole",
+        Effect: "Allow",
+        Action: [
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:TagRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+        ],
+        Resource: [`arn:aws:iam::${accountId}:role/${CODEBUILD_ROLE_PREFIX}*`],
+      },
+      {
+        // CreateProject passes the build service role to CodeBuild — and only there.
+        Sid: "IamPassCodeBuildRole",
+        Effect: "Allow",
+        Action: ["iam:PassRole"],
+        Resource: [`arn:aws:iam::${accountId}:role/${CODEBUILD_ROLE_PREFIX}*`],
+        Condition: { StringEquals: { "iam:PassedToService": "codebuild.amazonaws.com" } },
+      },
+      {
+        // On a failed remote build the CLI prints the build log tail; cluster
+        // destroy deletes the project's log group with the rest of its infra.
+        Sid: "CodeBuildLogs",
+        Effect: "Allow",
+        Action: ["logs:GetLogEvents", "logs:DeleteLogGroup"],
+        Resource: [
+          `arn:aws:logs:${region}:${accountId}:log-group:/aws/codebuild/${CODEBUILD_PROJECT_PREFIX}*`,
+          `arn:aws:logs:${region}:${accountId}:log-group:/aws/codebuild/${CODEBUILD_PROJECT_PREFIX}*:*`,
+        ],
+      },
+      {
         // Account-wide over /launch-pad/* (all clusters), so one operator manages every
         // cluster's secrets — broader than the per-node policy, which scopes to one
         // cluster. For a per-cluster CI role, tighten to /launch-pad/<cluster>/*.
@@ -217,7 +270,7 @@ export function buildOperatorPolicy(params: OperatorPolicyParams): IamPolicyDocu
         Resource: [`arn:aws:ssm:${region}::parameter/aws/service/*`],
       },
       {
-        // `node upgrade-agent` / live monitoring run a shell script on launch-pad nodes.
+        // `node upgrade-agent` / live monitoring run a shell script on launchpad nodes.
         Sid: "SsmRunCommand",
         Effect: "Allow",
         Action: ["ssm:SendCommand", "ssm:GetCommandInvocation"],
@@ -236,38 +289,13 @@ export function buildOperatorPolicy(params: OperatorPolicyParams): IamPolicyDocu
         Condition: { StringEquals: { "kms:ViaService": `ssm.${region}.amazonaws.com` } },
       },
       {
-        // `launch-pad logs` reads service log groups via FilterLogEvents only. The node's
+        // `launchpad logs` reads service log groups via FilterLogEvents only. The node's
         // CloudWatch agent (not the operator) is what creates/describes groups, so the
         // resource-scopeable FilterLogEvents is all the operator needs.
         Sid: "CloudWatchLogsRead",
         Effect: "Allow",
         Action: ["logs:FilterLogEvents"],
         Resource: [`arn:aws:logs:${region}:${accountId}:log-group:/launch-pad/*:*`],
-      },
-      {
-        // `launch-pad dns setup` writes DNS-only A records to a Route53 hosted zone.
-        // Route53 is a GLOBAL service (ARNs carry no region/account), so neither Route53
-        // statement carries an `aws:RequestedRegion` condition — that would reject every
-        // call. ListHostedZonesByName has NO resource-level scope, so it must be `*` in
-        // its own statement; scoping it to a hosted-zone ARN would deny the action.
-        Sid: "Route53List",
-        Effect: "Allow",
-        Action: ["route53:ListHostedZonesByName"],
-        Resource: ["*"],
-      },
-      {
-        // Record reads/changes scope to hosted zones; GetChange to the change resource.
-        // Granting this lets the operator change records in any zone the account owns —
-        // acceptable for the trusted operator/CI principal (DNS is opt-in via `dns setup`).
-        // Tighten to a specific `arn:aws:route53:::hostedzone/<id>` for a single-domain CI role.
-        Sid: "Route53Records",
-        Effect: "Allow",
-        Action: [
-          "route53:ListResourceRecordSets",
-          "route53:ChangeResourceRecordSets",
-          "route53:GetChange",
-        ],
-        Resource: ["arn:aws:route53:::hostedzone/*", "arn:aws:route53:::change/*"],
       },
     ],
   };

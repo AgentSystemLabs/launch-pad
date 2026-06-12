@@ -39,12 +39,24 @@ export interface ClusterListJson {
   }>;
 }
 
+/** One scheduled service from a node's desired.json (`cluster show`). */
+export interface ClusterServiceSummary {
+  project: string;
+  service: string;
+  replicas: number;
+  image: string;
+  domain: string | null;
+  cron?: string;
+}
+
 /** `cluster show <name> --json` */
 export interface ClusterShowJson {
   cluster: ClusterConfig | null;
   account: string;
   region: string;
   nodes: NodeRegistryEntry[];
+  workloads: Array<{ nodeId: string; services: ClusterServiceSummary[] }>;
+  scheduledServices: number;
 }
 
 /** `node list --json` — each registry entry annotated with live EC2 reality. */

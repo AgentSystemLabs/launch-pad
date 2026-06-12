@@ -11,14 +11,13 @@ import {
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 import { describe, expect, it } from "vitest";
 import type { AwsEnv } from "../aws/context";
-import { CliError } from "../errors";
 import type { NodeRegistryEntry } from "@agentsystemlabs/launch-pad-shared";
 import {
   assertSecretsPresent,
-  assertVolumesSupported,
   enforceConfigLock,
   loadOverrideImage,
   publishDesired,
+  resolveConfigLockOutcome,
   toServiceConfig,
 } from "./deploy";
 
@@ -34,8 +33,6 @@ function makeConfig(
     service: [
       {
         name: "web",
-        node: "node-app",
-        edge: "node-edge",
         dockerfile: "./Dockerfile",
         context: ".",
         cpu: 256,
@@ -117,46 +114,37 @@ function makeAws(options: MockS3Options): AwsEnv {
   return { clusterId: "default", bucket: "bucket", s3: { send } } as unknown as AwsEnv;
 }
 
-type Opts = Parameters<typeof enforceConfigLock>[3];
-const noOpts = {} as Opts;
-
 describe("enforceConfigLock — reconstructed from published desired state (no baseline file)", () => {
   const aws = () => makeAws({ desiredByNode: { "node-app": webDesired } });
 
   it("rejects a service rename before any build", async () => {
     await expect(
-      enforceConfigLock(aws(), makeConfig({ name: "webgg" }), OWNER, noOpts),
-    ).rejects.toThrow(/only cpu, memory, replicas, env, and secrets may change/);
+      enforceConfigLock(aws(), makeConfig({ name: "webgg" }), OWNER),
+    ).rejects.toThrow(/only cpu, memory, replicas, env, secrets, domain, and domainPattern may change/);
   });
 
-  it("rejects a domain change", async () => {
+  it("allows a domain change", async () => {
     await expect(
-      enforceConfigLock(aws(), makeConfig({ domain: "other.example.com" }), OWNER, noOpts),
-    ).rejects.toBeInstanceOf(CliError);
+      enforceConfigLock(aws(), makeConfig({ domain: "other.example.com" }), OWNER),
+    ).resolves.toBeUndefined();
   });
 
   it("allows a cpu/memory-only change", async () => {
     await expect(
-      enforceConfigLock(aws(), makeConfig({ cpu: 512, memory: 1024 }), OWNER, noOpts),
+      enforceConfigLock(aws(), makeConfig({ cpu: 512, memory: 1024 }), OWNER),
     ).resolves.toBeUndefined();
   });
 
   it("allows a replicas change (scaling)", async () => {
     await expect(
-      enforceConfigLock(aws(), makeConfig({ replicas: 3 }), OWNER, noOpts),
+      enforceConfigLock(aws(), makeConfig({ replicas: 3 }), OWNER),
     ).resolves.toBeUndefined();
   });
 
   it("allows an env change (non-secret config)", async () => {
     await expect(
-      enforceConfigLock(aws(), makeConfig({ env: { NODE_ENV: "staging" } }), OWNER, noOpts),
+      enforceConfigLock(aws(), makeConfig({ env: { NODE_ENV: "staging" } }), OWNER),
     ).resolves.toBeUndefined();
-  });
-
-  it("blocks --node after the initial deploy", async () => {
-    await expect(
-      enforceConfigLock(aws(), makeConfig(), OWNER, { node: "node-app-2" } as Opts),
-    ).rejects.toThrow(/--node cannot be used/);
   });
 });
 
@@ -166,19 +154,19 @@ describe("enforceConfigLock — authoritative S3 baseline file", () => {
 
   it("rejects a service rename", async () => {
     await expect(
-      enforceConfigLock(aws(), makeConfig({ name: "webgg" }), OWNER, noOpts),
-    ).rejects.toThrow(/only cpu, memory, replicas, env, and secrets may change/);
+      enforceConfigLock(aws(), makeConfig({ name: "webgg" }), OWNER),
+    ).rejects.toThrow(/only cpu, memory, replicas, env, secrets, domain, and domainPattern may change/);
   });
 
   it("allows a cpu/memory-only change", async () => {
     await expect(
-      enforceConfigLock(aws(), makeConfig({ cpu: 512, memory: 1024 }), OWNER, noOpts),
+      enforceConfigLock(aws(), makeConfig({ cpu: 512, memory: 1024 }), OWNER),
     ).resolves.toBeUndefined();
   });
 
   it("allows replicas and env changes", async () => {
     await expect(
-      enforceConfigLock(aws(), makeConfig({ replicas: 4, env: { NODE_ENV: "staging" } }), OWNER, noOpts),
+      enforceConfigLock(aws(), makeConfig({ replicas: 4, env: { NODE_ENV: "staging" } }), OWNER),
     ).resolves.toBeUndefined();
   });
 });
@@ -187,7 +175,7 @@ describe("enforceConfigLock — first deploy", () => {
   it("allows anything when nothing is deployed yet", async () => {
     const aws = makeAws({ desiredByNode: {} });
     await expect(
-      enforceConfigLock(aws, makeConfig({ name: "anything" }), OWNER, noOpts),
+      enforceConfigLock(aws, makeConfig({ name: "anything" }), OWNER),
     ).resolves.toBeUndefined();
   });
 });
@@ -200,15 +188,42 @@ describe("enforceConfigLock — fails loudly when deployed state can't be read",
     });
     const aws = makeAws({ baselineError: forbidden });
     await expect(
-      enforceConfigLock(aws, makeConfig({ name: "webgg" }), OWNER, noOpts),
+      enforceConfigLock(aws, makeConfig({ name: "webgg" }), OWNER),
     ).rejects.toThrow(/could not read the config baseline/);
   });
 
   it("does NOT treat a corrupt baseline with no remaining desired state as a first deploy", async () => {
     const aws = makeAws({ baseline: { not: "a valid baseline" }, desiredByNode: {} });
     await expect(
-      enforceConfigLock(aws, makeConfig({ name: "webgg" }), OWNER, noOpts),
+      enforceConfigLock(aws, makeConfig({ name: "webgg" }), OWNER),
     ).rejects.toThrow(/corrupt/);
+  });
+});
+
+describe("resolveConfigLockOutcome", () => {
+  const baseline = snapshotConfigBaseline(makeConfig(), "now");
+  const aws = () => makeAws({ baseline, desiredByNode: { "node-app": webDesired } });
+
+  it("returns first-deploy when nothing is deployed yet", async () => {
+    const outcome = await resolveConfigLockOutcome(makeAws({ desiredByNode: {} }), makeConfig(), OWNER);
+    expect(outcome).toEqual({ kind: "first-deploy" });
+  });
+
+  it("returns clean for a mutable-only change", async () => {
+    const outcome = await resolveConfigLockOutcome(aws(), makeConfig({ cpu: 512, replicas: 3 }), OWNER);
+    expect(outcome).toEqual({ kind: "clean" });
+  });
+
+  it("returns clean for a domain change", async () => {
+    const outcome = await resolveConfigLockOutcome(aws(), makeConfig({ domain: "other.example.com" }), OWNER);
+    expect(outcome).toEqual({ kind: "clean" });
+  });
+
+  it("rejects an identity change against a baseline reconstructed from desired.json", async () => {
+    const noBaseline = makeAws({ desiredByNode: { "node-app": webDesired } });
+    await expect(
+      resolveConfigLockOutcome(noBaseline, makeConfig({ name: "webgg" }), OWNER),
+    ).rejects.toThrow(/only cpu, memory, replicas, env, secrets, domain, and domainPattern may change/);
   });
 });
 
@@ -237,6 +252,22 @@ describe("deploy secrets", () => {
       },
     ]);
     expect(JSON.stringify(svc)).not.toContain("postgres://");
+  });
+
+  it("carries a service's cron expression into desired state", () => {
+    const config = makeConfig({});
+    const decl = { ...config.service[0]!, domain: undefined, port: undefined, healthCheck: undefined, cron: "*/5 * * * *" };
+    const svc = toServiceConfig(
+      { clusterId: "default" } as AwsEnv,
+      OWNER,
+      { decl, image: "123.dkr.ecr.us-east-1.amazonaws.com/repo:sha", domain: undefined },
+      1,
+      null,
+      undefined,
+      false,
+    );
+    expect(svc.cron).toBe("*/5 * * * *");
+    expect(svc.ingress).toBeNull();
   });
 
   it("sets restartAt without changing the image when restart mode publishes desired state", () => {
@@ -344,7 +375,7 @@ describe("toServiceConfig — persistent volumes", () => {
   it("threads declared volumes into the published ServiceConfig", () => {
     const decl = parseLaunchPadConfig({
       project: "p",
-      service: [{ name: "db", node: "n1", cpu: 256, memory: 256, volumes: [{ name: "data", path: "/data" }] }],
+      service: [{ name: "db", cpu: 256, memory: 256, volumes: [{ name: "data", path: "/data" }] }],
     }).service[0]!;
     const cfg = toServiceConfig(aws, "p", { decl, image: "img:abc" }, 1, null, undefined, false);
     expect(cfg.volumes).toEqual([{ name: "data", path: "/data" }]);
@@ -353,38 +384,41 @@ describe("toServiceConfig — persistent volumes", () => {
   it("publishes an empty volume list for a service without volumes", () => {
     const decl = parseLaunchPadConfig({
       project: "p",
-      service: [{ name: "w", node: "n1", cpu: 256, memory: 256 }],
+      service: [{ name: "w", cpu: 256, memory: 256 }],
     }).service[0]!;
     const cfg = toServiceConfig(aws, "p", { decl, image: "img:abc" }, 1, null, undefined, false);
     expect(cfg.volumes).toEqual([]);
   });
 });
 
-describe("assertVolumesSupported — rust-agent gate", () => {
-  const node = (agentType: "ts" | "rust"): NodeRegistryEntry => ({ nodeId: "n1", agentType } as NodeRegistryEntry);
-  const placed = (volumes: Array<{ name: string; path: string }>) => {
-    const decl = parseLaunchPadConfig({
-      project: "p",
-      service: [{ name: "db", node: "n1", cpu: 256, memory: 256, volumes }],
-    }).service[0]!;
-    return [{ built: { decl }, replicas: 1 }] as unknown as Parameters<typeof assertVolumesSupported>[2];
-  };
-
-  it("refuses a volume-bearing service on a rust-agent node, naming the service + remedy", () => {
-    expect(() => assertVolumesSupported("n1", node("rust"), placed([{ name: "data", path: "/data" }]))).toThrow(
-      /rust agent.*doesn't mount persistent volumes/,
-    );
-    expect(() => assertVolumesSupported("n1", node("rust"), placed([{ name: "data", path: "/data" }]))).toThrow(
-      /db/,
-    );
+describe("toServiceConfig — web services require the cluster edge", () => {
+  it("throws when a web service (domain+port) resolves no edge node", () => {
+    const config = makeConfig();
+    expect(() =>
+      toServiceConfig(
+        { clusterId: "default" } as AwsEnv,
+        OWNER,
+        { decl: config.service[0]!, image: "img:abc", domain: "app.agentsystem.dev" },
+        1,
+        null,
+        undefined,
+        false,
+      ),
+    ).toThrow(/serves a domain but resolved no edge node/);
   });
 
-  it("allows a volume-bearing service on a TypeScript-agent node", () => {
-    expect(() => assertVolumesSupported("n1", node("ts"), placed([{ name: "data", path: "/data" }]))).not.toThrow();
-  });
-
-  it("allows a volume-less service on any agent (including rust)", () => {
-    expect(() => assertVolumesSupported("n1", node("rust"), placed([]))).not.toThrow();
+  it("publishes string ingress.edge for a web service routed through the edge", () => {
+    const config = makeConfig();
+    const cfg = toServiceConfig(
+      { clusterId: "default" } as AwsEnv,
+      OWNER,
+      { decl: config.service[0]!, image: "img:abc", domain: "app.agentsystem.dev" },
+      1,
+      "node-edge",
+      undefined,
+      false,
+    );
+    expect(cfg.ingress).toEqual({ domain: "app.agentsystem.dev", port: 3000, edge: "node-edge" });
   });
 });
 

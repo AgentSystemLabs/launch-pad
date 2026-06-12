@@ -9,7 +9,7 @@ const base: NodeRegistryEntry = {
   instanceType: "t3.small",
   region: "us-east-1",
   availabilityZone: "us-east-1a",
-  role: "both",
+  role: "edge",
   privateIp: "10.0.0.1",
   totalCpu: 2048,
   totalMemory: 2048,
@@ -43,14 +43,14 @@ describe("planResizedEntry", () => {
     expect(out.totalMemory).toBe(8192);
   });
 
-  it("edge/both with an Elastic IP keeps its stable public IP and becomes ready", () => {
+  it("edge with an Elastic IP keeps its stable public IP and becomes ready", () => {
     const out = planResizedEntry({ node: base, instanceType: "t3.large", capacity, restarted: true, network: newNet });
     expect(out.publicIp).toBe("1.2.3.4"); // EIP survives the resize, not the ephemeral 9.9.9.9
     expect(out.privateIp).toBe("10.0.0.2");
     expect(out.state).toBe("ready");
   });
 
-  it("edge/both WITHOUT an Elastic IP picks up the fresh ephemeral public IP", () => {
+  it("edge WITHOUT an Elastic IP picks up the fresh ephemeral public IP", () => {
     const noEip: NodeRegistryEntry = { ...base, eipAllocationId: null };
     const out = planResizedEntry({ node: noEip, instanceType: "t3.large", capacity, restarted: true, network: newNet });
     expect(out.publicIp).toBe("9.9.9.9");

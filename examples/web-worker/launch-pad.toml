@@ -1,0 +1,33 @@
+# launch-pad project config. Run `npx @agentsystemlabs/launch-pad deploy` from
+# this directory. Each [[service]] is built into its own image and placed
+# automatically: the scheduler bin-packs services across the cluster's app
+# nodes (auto-provisioning an edge node + app node on the first deploy if
+# missing). A service with a `domain`+`port` is a web service (routed through
+# the cluster's edge with HTTPS); one without is a background worker.
+project = "example-express"
+
+[[service]]
+name = "web"
+dockerfile = "./Dockerfile"
+cpu = 256 # vCPU shares (1024 = 1 vCPU)
+memory = 256 # MB
+replicas = 2            # the edge load-balances across both; rolling updates are zero-downtime
+domain = "other.agentsystem.dev"
+port = 3000
+env = { NODE_ENV = "production" }
+# secrets = ["DATABASE_URL"]   # set values: launch-pad secret set DATABASE_URL --service web
+
+  [service.healthCheck]
+  path = "/healthz"     # a new replica must pass this before the old one is drained
+
+  [service.rollout]
+  maxSurge = 1
+  drainTimeout = "20s"
+  stopGrace = "30s"
+
+[[service]]
+name = "worker"
+dockerfile = "./worker.Dockerfile"
+cpu = 256
+memory = 256
+env = { NODE_ENV = "production" }

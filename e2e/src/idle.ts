@@ -1,7 +1,7 @@
 /**
- * launch-pad real-AWS regression for `launch-pad cost`'s idle-node recommendations.
+ * launchpad real-AWS regression for `launchpad cost`'s idle-node recommendations.
  *
- * Fast (one node, no deploy/Docker): provision a single `both` node, then assert the cost
+ * Fast (one node, no deploy/Docker): provision a single edge node, then assert the cost
  * report flags it correctly across its lifecycle:
  *   - while provisioning → never flagged (not yet idle),
  *   - after `node pause` → flagged `paused` (still paying for EBS + Elastic IP),
@@ -48,7 +48,7 @@ async function main(): Promise<boolean> {
   const region = process.env.LAUNCHPAD_E2E_REGION ?? "us-east-1";
   const runId = randomBytes(3).toString("hex");
   const cluster = `e2e-idle-${runId}`;
-  const node = "idle-both";
+  const node = "idle-edge";
 
   const home = mkdtempSync(join(tmpdir(), "launch-pad-home-"));
   const cli = makeCli({ home, region });
@@ -74,9 +74,9 @@ async function main(): Promise<boolean> {
   };
 
   try {
-    await step("create a cluster + provision one both node", async () => {
+    await step("create a cluster + provision one edge node", async () => {
       await cli.run(["cluster", "create", cluster, "--region", region]);
-      await cli.run(["node", "create", node, "--role", "both", "--cluster", cluster, "--yes"]);
+      await cli.run(["node", "create", node, "--role", "edge", "--cluster", cluster, "--yes"]);
     });
 
     await step("a just-provisioned node is not flagged idle (mid-setup, not wasting yet)", async () => {
@@ -114,7 +114,7 @@ async function main(): Promise<boolean> {
   } finally {
     if (keep) {
       note(`--keep set — leaving cluster "${cluster}" running. Tear it down later with:`);
-      note(`  LAUNCHPAD_HOME=${home} launch-pad cluster destroy ${cluster} --yes`);
+      note(`  LAUNCHPAD_HOME=${home} launchpad cluster destroy ${cluster} --yes`);
     } else {
       await teardown();
     }

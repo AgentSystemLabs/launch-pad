@@ -13,7 +13,7 @@ launch-pad/
 ├── packages/
 │   ├── shared/                # the typed CLI ↔ agent contract (Zod schemas)
 │   ├── cli/                   # the product: init/deploy/status/logs/secret/node/cluster
-│   ├── agent/                 # the node reconciler (TypeScript, production)
+│   ├── agent-rust/            # the node reconciler (Rust; edge + app binaries)
 │   └── dashboard/             # local web UI (Bun; excluded from pnpm workspace)
 ├── e2e/                       # real-AWS end-to-end harness (opt-in, costs money)
 ├── examples/                  # runnable example apps — one per feature combination
@@ -34,18 +34,19 @@ Both sides import it so they cannot drift; a mismatch is a parse error, not a hu
 | Module | Purpose |
 | ------ | ------- |
 | `config.ts` | `launch-pad.toml` schema (`ServiceDeclSchema`, `LaunchPadConfigSchema`) |
-| `desired.ts` | `desired.json` — CLI → agent desired state; tri-state web ingress |
+| `desired.ts` | `desired.json` — CLI → agent desired state; web ingress is `null` (worker) or `{ domain, edge }` with a required edge node id |
 | `status.ts` | `status.json` — agent → CLI node/service/replica status |
 | `registry.ts` | `node.json` — node identity, role, capacity |
-| `cluster.ts` | `cluster.json` — cluster topology, default edge |
+| `cluster.ts` | `cluster.json` — cluster config, default edge |
 | `s3-keys.ts` | **All** S3 key derivation (bucket name, node/cluster/upstream keys) |
 | `edge.ts` | Upstream-shard routing types (edge config, backends) |
 | `capacity.ts` | Admission check + instance sizing (1024 shares = 1 vCPU) |
 | `merge.ts` | Ownership-aware desired-state merge (multi-project nodes) |
 | `health.ts` | Health-check + rollout schemas, duration parsing |
-| `config-lock.ts` | Post-first-deploy config baseline (cpu/memory/replicas/env/secrets mutable; identity locked) |
+| `config-lock.ts` | Post-first-deploy config baseline (cpu/memory/replicas/env/secrets/domain/domainPattern mutable; identity locked) |
 | `secrets.ts` | SSM parameter path layout + key validation |
 | `logs.ts` / `stats.ts` | CloudWatch log group/stream naming; `launchpad.stats` line schema |
+| `node-names.ts` | Generated `<noun>-<verb>-<adverb>` node names (create/bootstrap/auto-add/scale-out) |
 | `constants.ts` | `PROTOCOL_VERSION`, heartbeat cadences, host-port range, labels |
 | `aws-tags.ts` | `launch-pad=true` resource tagging |
 
@@ -62,14 +63,17 @@ Both sides import it so they cannot drift; a mismatch is a parse error, not a hu
 | `src/commands/node/` | create/list/show/destroy/pause/resume/resize/upgrade-agent/install-logging/reconcile/monitor |
 | `src/commands/cluster/` | create/list/show/set-edge/use/current/pause/resume/destroy |
 | `src/aws/` | Thin AWS SDK clients (ec2, ecr, iam, ssm, s3-state, sts via `context.ts`) — per-node least-privilege IAM lives in `iam.ts` |
-| `src/provision/` | Node bootstrap: `user-data.ts` (cloud-init), `systemd-unit.ts`, `agent-bundle.ts`, `golden-ami.ts` + committed `golden-ami-manifest.json` |
-| `src/deploy/` | Pure planners: `placement.ts` (replica/cluster placement), `provision-plan.ts` (role inference), `watch.ts` (status polling), `deployed-footprint.ts`, `drift-plan.ts`/`drift-apply.ts` |
+| `src/provision/` | Node bootstrap: `user-data.ts` (role-specific cloud-init), `systemd-unit.ts`, `agent-bundle.ts` (Rust binary distribution), `golden-ami.ts` + committed role-keyed `golden-ami-manifest.json` |
+| `src/deploy/` | Pure planners: `placement.ts` (scheduler: bin-pack replicas over the app pool), `provision-plan.ts` (edge + app-node provisioning plan), `watch.ts` (status polling), `deployed-footprint.ts`, `drift-plan.ts`/`drift-apply.ts` |
 | `src/config/` | TOML load/parse + `local.ts` (`~/.launch-pad/config.toml` local prefs) |
 | `src/cluster/` | Cluster resolution/banner |
 
-## `packages/agent` — the node reconciler
+## `packages/agent-rust` — the node reconciler
 
-`src/index.ts` is the poll loop. See [agent.md](agent.md) for behavior.
+One Rust crate, two role-specific binaries (`src/bin/agent-edge.rs` routes Caddy from
+upstream shards; `src/bin/agent-app.rs` reconciles Docker). `cargo test` covers the pure
+planners; `pnpm build:agent` cross-compiles the linux binaries the CLI distributes. See
+[agent.md](agent.md) for behavior.
 
 | Module | Purpose |
 | ------ | ------- |
@@ -103,8 +107,8 @@ pnpm workspace. See [dashboard.md](dashboard.md).
 | ------------ | ------- |
 | Add/change a `launch-pad.toml` field | `shared/src/config.ts` (+ `config-lock.ts` if it should be locked) |
 | Change what crosses the wire | `shared/src/desired.ts` / `status.ts` — **additive only**, bump `PROTOCOL_VERSION` on shape changes |
-| Change container start/stop/rollout behavior | `agent/src/reconcile.ts` (pure planner first), then `docker.ts` |
-| Change HTTPS/routing behavior | `agent/src/routes.ts` / `caddy.ts`; split-topology: `upstream.ts` + `cli/src/aws/iam.ts` |
+| Change container start/stop/rollout behavior | `agent-rust/src/reconcile.rs` (pure planner first), then `docker.rs` |
+| Change HTTPS/routing behavior | `agent-rust/src/routes.rs` / `caddy.rs`; edge routing: `upstream.rs` + `cli/src/aws/iam.ts` |
 | Change placement/scheduling | `cli/src/deploy/placement.ts` + `shared/src/capacity.ts` |
 | Change node provisioning / first boot | `cli/src/provision/*` + `infra/packer/` |
 | Add a CLI command | `cli/src/commands/` + register in `cli/src/index.ts`; update [cli.md](cli.md) |

@@ -81,9 +81,8 @@ describe("CloudWatch agent config shaping", () => {
     expect(list[0]?.file_path).toBe("/var/log/launch-pad/agent.log");
   });
 
-  it("ships agent + caddy for edge/both nodes", () => {
+  it("ships agent + caddy for edge nodes", () => {
     expect(systemComponentsForRole("edge")).toEqual(["agent", "caddy"]);
-    expect(systemComponentsForRole("both")).toEqual(["agent", "caddy"]);
     const config = systemCwConfig("lower", "edge-1", "edge");
     const streams = config.logs.logs_collected.files.collect_list.map((e) => e.log_stream_name);
     expect(streams).toEqual(["agent", "caddy"]);

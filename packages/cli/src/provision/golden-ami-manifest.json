@@ -1,5 +1,8 @@
 {
-  "schemaVersion": 1,
-  "defaultAgentType": "ts",
-  "amis": {}
+  "schemaVersion": 2,
+  "defaultAgentType": "rust",
+  "amis": {
+    "edge": {},
+    "app": {}
+  }
 }

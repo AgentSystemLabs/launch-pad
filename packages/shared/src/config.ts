@@ -1,10 +1,19 @@
 import { z } from "zod";
 import { LAUNCH_PAD_ENVIRONMENT } from "./constants";
+import { cronExpressionError, nextCronFire, parseCronExpression } from "./cron";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import { SECRET_KEY_HINT, SECRET_KEY_REGEX } from "./secrets";
 
 /** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1–40 chars. */
 export const LABEL_REGEX = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
+
+/**
+ * Separator between project and component in a derived footprint owner
+ * (`componentOwner`). Forbidden inside `project`/`component` labels so the
+ * derived owner can never be ambiguous. Owners are derived once and never
+ * parsed back — the project index (`project-registry.ts`) is the mapping.
+ */
+export const COMPONENT_SEPARATOR = "--";
 
 /**
  * Minimum allowed value for each numeric, post-deploy-mutable service field. The
@@ -33,9 +42,6 @@ export function nodeIdError(id: string): string | null {
 const label = (what: string) =>
   z.string().regex(LABEL_REGEX, `${what} must be lowercase letters, numbers and hyphens (1–40 chars)`);
 
-const nodeId = (what: string) =>
-  z.string().regex(NODE_ID_REGEX, `${what} must be ${NODE_ID_HINT}`);
-
 /** Tokens a `domainPattern` may interpolate. `{env}` is required; `{service}` is optional. */
 const DOMAIN_PATTERN_TOKENS = new Set(["env", "service"]);
 
@@ -60,19 +66,35 @@ export function domainPatternError(pattern: string): string | null {
 const DEPRECATED_SERVICE_KEYS: ReadonlyMap<string, string> = new Map([
   [
     "cluster",
-    "`cluster` is not supported in launch-pad.toml — pass --cluster on deploy (e.g. launch-pad deploy --cluster lower)",
+    "`cluster` is not supported in launch-pad.toml — pass --cluster on deploy (e.g. launchpad deploy --cluster lower)",
+  ],
+  [
+    "schedule",
+    "`schedule` was removed — cluster auto-placement always bin-packs by free CPU/memory; drop `schedule` from launch-pad.toml",
+  ],
+  [
+    "node",
+    "`node` was removed — placement is automatic; the scheduler picks nodes (and provisions them when needed); drop `node` from launch-pad.toml",
+  ],
+  [
+    "nodes",
+    "`nodes` was removed — placement is automatic; the scheduler picks nodes (and provisions them when needed); drop `nodes` from launch-pad.toml",
+  ],
+  [
+    "edge",
+    "`edge` was removed — every web service is fronted by the cluster's dedicated edge node; drop `edge` from launch-pad.toml",
+  ],
+  [
+    "topology",
+    "`topology` was removed — the edge always runs on its own node, so every deploy is split-topology; drop `topology` from launch-pad.toml",
   ],
 ]);
 
-const SUPPORTED_TOP_LEVEL_KEYS = new Set(["project", "domainPattern", "service"]);
+const SUPPORTED_TOP_LEVEL_KEYS = new Set(["project", "component", "domainPattern", "service"]);
 
 const SUPPORTED_SERVICE_KEYS = new Set([
   "name",
-  "node",
-  "nodes",
-  "edge",
-  "schedule",
-  "topology",
+  "cron",
   "dockerfile",
   "context",
   "replicas",
@@ -119,12 +141,14 @@ export function assertSupportedLaunchPadConfigRaw(input: unknown): void {
   });
 }
 
-/** Node-picking strategy for cluster auto-placement (services without `node`/`nodes`). */
+/** @deprecated Removed — cluster placement always bin-packs by free CPU/memory. Kept so old config-baselines parse. */
 export const ServiceScheduleSchema = z.enum(["even", "capacity"]);
+/** @deprecated */
 export type ServiceSchedule = z.infer<typeof ServiceScheduleSchema>;
 
-/** Ingress shape for cluster auto-placement (services without `node`/`nodes`). */
+/** @deprecated Removed — the edge always runs on its own node ("split"). Kept so old config-baselines parse. */
 export const ServiceTopologySchema = z.enum(["split", "co-located", "auto"]);
+/** @deprecated */
 export type ServiceTopology = z.infer<typeof ServiceTopologySchema>;
 
 export const VOLUME_PATH_HINT =
@@ -163,26 +187,12 @@ export type VolumeDecl = z.infer<typeof VolumeDeclSchema>;
 export const ServiceDeclSchema = z
   .object({
     name: label("service name"),
-    /** Single target node (mutually exclusive with `nodes`). Omit both to place via `deploy --cluster`. */
-    node: nodeId("node").optional(),
-    /** Multiple target nodes — replicas are distributed round-robin across them. */
-    nodes: z.array(nodeId("node")).min(1).optional(),
-    /** Node id whose Caddy fronts this service's domain (a dedicated edge). */
-    edge: nodeId("edge").optional(),
     /**
-     * Cluster auto-placement strategy: "even" round-robin (default) or "capacity"
-     * bin-packing by free CPU/memory. Optional here (NOT `.default()`) so the
-     * superRefine below can reject an EXPLICIT value alongside `node`/`nodes`;
-     * the trailing `.transform()` fills the default afterwards.
+     * 5-field cron expression (UTC) turning this worker into a scheduled job: the
+     * agent runs one container per fire and lets it exit, instead of keeping a
+     * long-running container. Workers only — see the superRefine constraints.
      */
-    schedule: ServiceScheduleSchema.optional(),
-    /**
-     * Cluster auto-placement ingress shape: "split" (private app nodes fronted by
-     * an edge), "co-located" (one both-role node, local Caddy, no remote edge), or
-     * "auto" (default: edge when resolvable). Optional for the same reason as
-     * `schedule`.
-     */
-    topology: ServiceTopologySchema.optional(),
+    cron: z.string().optional(),
     dockerfile: z.string().default("./Dockerfile"),
     /** Docker build context, relative to the launch-pad.toml directory. */
     context: z.string().default("."),
@@ -193,7 +203,7 @@ export const ServiceDeclSchema = z
       .min(SERVICE_NUMERIC_FIELD_MIN.cpu, "cpu must be a positive integer (vCPU shares, 1024 = 1 vCPU)"),
     memory: z.number().int().min(SERVICE_NUMERIC_FIELD_MIN.memory, "memory must be a positive integer (MB)"),
     env: z.record(z.string(), z.string()).default({}),
-    /** Secret key names — values live in SSM; maintained by `launch-pad secret set`. */
+    /** Secret key names — values live in SSM; maintained by `launchpad secret set`. */
     secrets: z
       .array(z.string().regex(SECRET_KEY_REGEX, `secret name must be ${SECRET_KEY_HINT}`))
       .default([]),
@@ -208,13 +218,6 @@ export const ServiceDeclSchema = z
   })
   .strict()
   .superRefine((s, ctx) => {
-    if (s.node !== undefined && s.nodes !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "set `node` or `nodes`, not both — omit both to place via `deploy --cluster`",
-        path: ["node"],
-      });
-    }
     if ((s.domain === undefined) !== (s.port === undefined)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -223,13 +226,6 @@ export const ServiceDeclSchema = z
       });
     }
     const isWeb = s.domain !== undefined && s.port !== undefined;
-    if (s.edge !== undefined && !isWeb) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "only web services (with a domain) can be routed by an `edge`",
-        path: ["edge"],
-      });
-    }
     if (s.domainPattern !== undefined) {
       if (!isWeb) {
         ctx.addIssue({
@@ -242,43 +238,40 @@ export const ServiceDeclSchema = z
         if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, message: err, path: ["domainPattern"] });
       }
     }
-    const isPinned = s.node !== undefined || s.nodes !== undefined;
-    if (s.schedule !== undefined && isPinned) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "`schedule` only applies to cluster auto-placement — drop it, or remove `node`/`nodes`",
-        path: ["schedule"],
-      });
-    }
-    if (s.topology !== undefined && isPinned) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "`topology` only applies to cluster auto-placement — drop it, or remove `node`/`nodes`",
-        path: ["topology"],
-      });
-    }
-    if (s.topology === "split" && !isWeb) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: '`topology = "split"` only applies to a web service — a worker has no ingress to split',
-        path: ["topology"],
-      });
-    }
-    if (s.topology === "co-located" && s.edge !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          '`topology = "co-located"` serves the domain from the service\'s own node — remove `edge`, or use `topology = "split"`',
-        path: ["edge"],
-      });
-    }
-    const nodeCount = s.nodes?.length ?? (s.node ? 1 : 0);
-    if (isWeb && nodeCount > 1 && s.edge === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "a web service spread across multiple `nodes` needs a dedicated `edge` to load-balance them",
-        path: ["edge"],
-      });
+    if (s.cron !== undefined) {
+      const exprErr = cronExpressionError(s.cron);
+      if (exprErr) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: exprErr, path: ["cron"] });
+      } else if (nextCronFire(parseCronExpression(s.cron), Date.now()) === null) {
+        // A parseable-but-impossible date (e.g. `0 0 30 2 *`, Feb 30) would make the
+        // agent scan its full horizon every tick for nothing — reject it up front.
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "cron expression never fires (no matching date within a year)",
+          path: ["cron"],
+        });
+      }
+      if (isWeb) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "`cron` only applies to a worker — a scheduled job can't also serve a domain; drop `domain`/`port`",
+          path: ["cron"],
+        });
+      }
+      if (s.healthCheck !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "a `cron` service can't declare a healthCheck — a run is judged by its exit code, not a probe",
+          path: ["healthCheck"],
+        });
+      }
+      if (s.replicas > 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "a `cron` service runs exactly one container per fire — drop `replicas` (or set it to 1)",
+          path: ["replicas"],
+        });
+      }
     }
     if (isWeb && s.healthCheck === undefined) {
       ctx.addIssue({
@@ -289,24 +282,6 @@ export const ServiceDeclSchema = z
       });
     }
     if (s.volumes.length > 0) {
-      // A persistent volume's data lives on ONE node's disk, so the service must be
-      // pinned there. Cluster auto-placement (or a future rebalance) could move it and
-      // strand the data; `nodes` would split a separate copy onto each node.
-      if (s.nodes !== undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "[[service.volumes]] can't be combined with `nodes` (multiple nodes) — the data would split per node; pin a single `node`",
-          path: ["volumes"],
-        });
-      } else if (s.node === undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "a service with [[service.volumes]] must be pinned to a single `node` — its data lives on that node's disk, so cluster auto-placement isn't allowed",
-          path: ["volumes"],
-        });
-      }
       const vNames = new Set<string>();
       const vPaths = new Set<string>();
       s.volumes.forEach((v, vi) => {
@@ -328,17 +303,19 @@ export const ServiceDeclSchema = z
         vPaths.add(v.path);
       });
     }
-  })
-  .transform((s) => ({
-    ...s,
-    schedule: s.schedule ?? ("even" as ServiceSchedule),
-    topology: s.topology ?? ("auto" as ServiceTopology),
-  }));
+  });
 
 /** The whole launch-pad.toml document. */
 export const LaunchPadConfigSchema = z
   .object({
     project: label("project"),
+    /**
+     * This repo's deployable slice of the logical project (federated multi-repo
+     * deploys). Optional — omitted means the TOML owns the whole project footprint
+     * (today's behavior, owner = `project`). With a component the footprint owner
+     * becomes `<project>--<component>` (see `componentOwner`).
+     */
+    component: label("component").optional(),
     /** Project-wide default `domainPattern` (per-service `domainPattern` overrides it). */
     domainPattern: z.string().min(1).optional(),
     service: z.array(ServiceDeclSchema).min(1, "at least one [[service]] is required"),
@@ -348,6 +325,23 @@ export const LaunchPadConfigSchema = z
     if (cfg.domainPattern !== undefined) {
       const err = domainPatternError(cfg.domainPattern);
       if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, message: err, path: ["domainPattern"] });
+    }
+    // `--` is the project/component separator in derived footprint owners
+    // (`componentOwner`); forbid it inside either label so an owner can never be
+    // ambiguous between a literal project name and a project+component pair.
+    if (cfg.project.includes(COMPONENT_SEPARATOR)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `project must not contain "${COMPONENT_SEPARATOR}" (reserved as the project/component separator)`,
+        path: ["project"],
+      });
+    }
+    if (cfg.component?.includes(COMPONENT_SEPARATOR)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `component must not contain "${COMPONENT_SEPARATOR}" (reserved as the project/component separator)`,
+        path: ["component"],
+      });
     }
     const seen = new Set<string>();
     cfg.service.forEach((s, i) => {
@@ -376,16 +370,6 @@ export function isWebService(s: ServiceDecl): boolean {
   return s.domain !== undefined && s.port !== undefined;
 }
 
-/** The node ids a service targets explicitly (`nodes` or the single `node`). */
-export function targetNodes(s: ServiceDecl): string[] {
-  return s.nodes ?? (s.node ? [s.node] : []);
-}
-
-/** True when placement is deferred to `deploy --cluster` (no `node` / `nodes` in TOML). */
-export function usesClusterPlacement(s: ServiceDecl): boolean {
-  return targetNodes(s).length === 0;
-}
-
 /**
  * The footprint owner for a deploy environment. With no env it's the base project
  * (today's behavior); with an env it's `<project>-<env>`, so an environment's
@@ -394,6 +378,29 @@ export function usesClusterPlacement(s: ServiceDecl): boolean {
  */
 export function envProject(project: string, env: string | undefined): string {
   return env === undefined ? project : `${project}-${env}`;
+}
+
+/**
+ * The base footprint owner for a project + optional component. Without a
+ * component it's the project itself (zero change for single-TOML projects);
+ * with one it's `<project>--<component>`, giving each component repo its own
+ * replace key, config-lock baseline, secrets tree, and S3 state prefix while
+ * sibling components coexist untouched on the same nodes.
+ */
+export function componentOwner(project: string, component: string | undefined): string {
+  return component === undefined ? project : `${project}${COMPONENT_SEPARATOR}${component}`;
+}
+
+/**
+ * The footprint owner a deploy (or any footprint-scoped command) operates on:
+ * `envProject(componentOwner(project, component), env)`. The single derivation
+ * point for owner strings — derive here, never parse an owner back apart.
+ */
+export function footprintOwner(
+  config: { project: string; component?: string | undefined },
+  env: string | undefined,
+): string {
+  return envProject(componentOwner(config.project, config.component), env);
 }
 
 /**

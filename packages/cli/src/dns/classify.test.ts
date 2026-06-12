@@ -1,32 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { classifyDns, type DnsObservation, ipv4InCidr, isCloudflareIp, isIpv4 } from "./classify";
+import { classifyDns, type DnsObservation, isIpv4 } from "./classify";
 
 const obs = (over: Partial<DnsObservation> = {}): DnsObservation => ({
   a: [],
   aaaa: [],
   cname: null,
   ...over,
-});
-
-describe("ipv4InCidr", () => {
-  it("matches inside the block and rejects outside", () => {
-    expect(ipv4InCidr("104.16.5.5", "104.16.0.0/13")).toBe(true);
-    expect(ipv4InCidr("104.23.255.255", "104.16.0.0/13")).toBe(true);
-    expect(ipv4InCidr("104.24.0.0", "104.16.0.0/13")).toBe(false);
-    expect(ipv4InCidr("8.8.8.8", "104.16.0.0/13")).toBe(false);
-  });
-
-  it("handles a /17 boundary correctly", () => {
-    // 198.41.128.0/17 covers .128.0–.255.255, NOT .0.0–.127.255
-    expect(ipv4InCidr("198.41.200.1", "198.41.128.0/17")).toBe(true);
-    expect(ipv4InCidr("198.41.100.1", "198.41.128.0/17")).toBe(false);
-  });
-
-  it("returns false for malformed input instead of throwing", () => {
-    expect(ipv4InCidr("not-an-ip", "104.16.0.0/13")).toBe(false);
-    expect(ipv4InCidr("104.16.5.5", "garbage")).toBe(false);
-    expect(ipv4InCidr("999.1.1.1", "104.16.0.0/13")).toBe(false);
-  });
 });
 
 describe("isIpv4", () => {
@@ -39,21 +18,6 @@ describe("isIpv4", () => {
     expect(isIpv4("1.2.3.4.5")).toBe(false);
     expect(isIpv4("not-an-ip")).toBe(false);
     expect(isIpv4("2606:4700::1")).toBe(false);
-  });
-});
-
-describe("isCloudflareIp", () => {
-  it("recognizes well-known Cloudflare ranges", () => {
-    expect(isCloudflareIp("104.16.1.1")).toBe(true);
-    expect(isCloudflareIp("172.64.0.1")).toBe(true);
-    expect(isCloudflareIp("162.159.0.1")).toBe(true); // 162.158.0.0/15
-    expect(isCloudflareIp("131.0.72.5")).toBe(true);
-  });
-
-  it("does not flag non-Cloudflare IPs (e.g. an EC2 Elastic IP, Google DNS)", () => {
-    expect(isCloudflareIp("54.210.1.2")).toBe(false);
-    expect(isCloudflareIp("8.8.8.8")).toBe(false);
-    expect(isCloudflareIp("1.1.1.1")).toBe(false); // CF's resolver, NOT in their proxy ranges
   });
 });
 
@@ -74,16 +38,11 @@ describe("classifyDns", () => {
     expect(v.message).toContain(EIP);
   });
 
-  it("cloudflare-proxied when A records are Cloudflare IPs (the HTTP-01 footgun)", () => {
+  it("wrong-ip when A records are a proxy/CDN's IPs instead of the Elastic IP", () => {
     const v = classifyDns(obs({ a: ["104.16.1.1", "104.16.2.2"] }), EIP);
-    expect(v.status).toBe("cloudflare-proxied");
+    expect(v.status).toBe("wrong-ip");
     expect(v.ok).toBe(false);
-    expect(v.message).toMatch(/cloudflare/i);
-  });
-
-  it("flags Cloudflare proxy even when the expected IP is unknown", () => {
-    const v = classifyDns(obs({ a: ["172.64.1.1"] }), null);
-    expect(v.status).toBe("cloudflare-proxied");
+    expect(v.message).toContain(EIP);
   });
 
   it("no-records when nothing resolves (NXDOMAIN / no A record yet)", () => {

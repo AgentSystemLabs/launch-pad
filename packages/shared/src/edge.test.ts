@@ -43,7 +43,7 @@ function replica(index: number, hostPort: number, state: string, healthy: boolea
 
 function desired(nodeId: string, edge: string): DesiredState {
   return {
-    version: 1,
+    version: 2,
     nodeId,
     updatedAt: "t",
     services: [

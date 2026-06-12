@@ -1,11 +1,12 @@
 # One config, many environments — no edits to ship a new one.
 #
 #   launch-pad deploy                 → the literal production domains below
-#   launch-pad deploy --env <name>    → a parallel, isolated footprint on the
-#                                       SAME shared edge, with projected domains
+#   launch-pad deploy --env <name>    → a parallel, isolated footprint behind the
+#                                       SAME cluster edge, with projected domains
 #
-# Both `api` and `ui` route through one edge (node-edge). Under --env <name> the
-# footprint owner becomes "shop-<name>" so environments coexist on node-app.
+# Both `api` and `ui` route through the cluster's edge node. Under --env <name>
+# the footprint owner becomes "shop-<name>" so environments coexist on the
+# cluster's app node(s).
 project = "shop"
 
 # Project-wide default: under --env <name>, a domain becomes "<service>-<name>.shop.example.com".
@@ -14,10 +15,8 @@ domainPattern = "{service}-{env}.shop.example.com"
 
 [[service]]
 name = "api"
-node = "node-app"
-edge = "node-edge"
-dockerfile = "../both-node-web-worker/Dockerfile"
-context = "../both-node-web-worker"
+dockerfile = "../web-worker/Dockerfile"
+context = "../web-worker"
 cpu = 256
 memory = 256
 domain = "api.shop.example.com"
@@ -30,10 +29,8 @@ env = { NODE_ENV = "production" }
 
 [[service]]
 name = "ui"
-node = "node-app"
-edge = "node-edge"
-dockerfile = "../both-node-web-worker/Dockerfile"
-context = "../both-node-web-worker"
+dockerfile = "../web-worker/Dockerfile"
+context = "../web-worker"
 cpu = 256
 memory = 256
 domain = "shop.example.com"

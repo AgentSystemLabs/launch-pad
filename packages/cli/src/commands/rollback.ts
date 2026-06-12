@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import {
   ecrRepositoryName,
-  envProject,
+  footprintOwner,
   findPreviousImageTag,
   type ImageTagPushedAt,
   LABEL_REGEX,
@@ -91,7 +91,7 @@ export async function runRollback(opts: RollbackOptions): Promise<void> {
       hint: "use lowercase letters, numbers and hyphens (a valid DNS label)",
     });
   }
-  const ownerProject = envProject(config.project, env);
+  const ownerProject = footprintOwner(config, env);
 
   // Resolve the target service (required unless the project has exactly one).
   let serviceName = opts.service;
@@ -200,9 +200,9 @@ export function registerRollback(program: Command): void {
         "ECR keeps every immutable build, so any prior version is available to roll back to.",
         "",
         "Examples:",
-        "  $ launch-pad rollback --service web           # to the previous build",
-        "  $ launch-pad rollback --service web --to sha-abc123",
-        "  $ launch-pad rollback --service web --dry-run",
+        "  $ launchpad rollback --service web           # to the previous build",
+        "  $ launchpad rollback --service web --to sha-abc123",
+        "  $ launchpad rollback --service web --dry-run",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {

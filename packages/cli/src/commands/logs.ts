@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { Command } from "commander";
 import {
-  envProject,
+  footprintOwner,
   LABEL_REGEX,
   logGroupName,
   parseLogStreamName,
@@ -149,7 +149,7 @@ async function runLogs(service: string, opts: LogsOptions): Promise<void> {
       hint: "use lowercase letters, numbers and hyphens (a valid DNS label)",
     });
   }
-  const project = envProject(config.project, opts.env);
+  const project = footprintOwner(config, opts.env);
 
   const aws = await prepareAws(opts);
   const group = logGroupName(aws.clusterId, project, service);
@@ -224,10 +224,10 @@ export function registerLogs(program: Command): void {
         "Your local AWS profile needs read access (logs:FilterLogEvents) to those groups.",
         "",
         "Examples:",
-        "  $ launch-pad logs api",
-        "  $ launch-pad logs api --env staging --since 1h --tail 200",
-        "  $ launch-pad logs api --follow",
-        '  $ launch-pad logs api --filter "error"',
+        "  $ launchpad logs api",
+        "  $ launchpad logs api --env staging --since 1h --tail 200",
+        "  $ launchpad logs api --follow",
+        '  $ launchpad logs api --filter "error"',
       ].join("\n"),
     )
     .action(async (service: string, _opts, command: Command) => {

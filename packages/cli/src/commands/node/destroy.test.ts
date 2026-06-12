@@ -154,6 +154,14 @@ function makeRecordingAws(sent: SentCommand[], opts: { iamError?: Error } = {}):
         const id = (command.input?.InstanceIds ?? ["i-x"])[0];
         return { Reservations: [{ Instances: [{ InstanceId: id, State: { Name: "terminated" } }] }] };
       }
+      if (command.constructor.name === "ListObjectsV2Command") {
+        const prefix = command.input?.Prefix as string | undefined;
+        return {
+          Contents: prefix?.endsWith("/")
+            ? [{ Key: `${prefix}node.json` }, { Key: `${prefix}agent.cjs` }]
+            : [],
+        };
+      }
       return {};
     },
   });
@@ -201,7 +209,8 @@ describe("teardownNode — per-node IAM cleanup", () => {
     expect(kinds).toContain("ec2:TerminateInstancesCommand");
     expect(kinds).toContain("ec2:ReleaseAddressCommand");
     expect(kinds).toContain("ec2:DeleteSecurityGroupCommand");
-    expect(kinds.filter((k) => k === "s3:DeleteObjectCommand").length).toBe(3); // status + desired + node.json
+    expect(kinds).toContain("s3:ListObjectsV2Command");
+    expect(kinds).toContain("s3:DeleteObjectsCommand");
   });
 
   it("is best-effort — an IAM failure does not abort the teardown", async () => {

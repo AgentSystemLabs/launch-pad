@@ -4,26 +4,28 @@ import { registerBackup } from "./commands/backup";
 import { registerCluster } from "./commands/cluster";
 import { registerConfig } from "./commands/config";
 import { registerAlerts } from "./commands/alerts";
+import { registerAutoscale } from "./commands/autoscale";
 import { registerCompletions } from "./commands/completions";
 import { registerCost } from "./commands/cost";
 import { registerDeploy } from "./commands/deploy";
+import { registerDestroy } from "./commands/destroy";
 import { registerDns } from "./commands/dns";
 import { registerDoctor } from "./commands/doctor";
 import { registerHistory } from "./commands/history";
 import { registerInit } from "./commands/init";
 import { registerLogs } from "./commands/logs";
 import { registerNode } from "./commands/node";
+import { registerProject } from "./commands/project";
 import { registerRebalance } from "./commands/rebalance";
 import { registerRollback } from "./commands/rollback";
 import { registerScale } from "./commands/scale";
 import { registerSecret } from "./commands/secret";
 import { registerSetup } from "./commands/setup";
 import { registerStatus } from "./commands/status";
-import { registerUndeploy } from "./commands/undeploy";
 import { effectiveCluster } from "./config/local";
 import { CliError } from "./errors";
 import type { GlobalOpts } from "./globals";
-import { log, setJsonMode } from "./ui/log";
+import { isJsonMode, log, printJson, setJsonMode } from "./ui/log";
 import { configureColor } from "./ui/theme";
 import { readVersion } from "./version";
 
@@ -31,7 +33,7 @@ const version = readVersion();
 const program = new Command();
 
 program
-  .name("launch-pad")
+  .name("launchpad")
   .description("Deploy your apps to your own AWS infrastructure — one command.")
   .version(version, "-V, --version", "print the version")
   // Global options are also defined on each leaf (see globals.ts) so they may
@@ -63,12 +65,13 @@ function commandPath(cmd: Command): string {
 function showsClusterBanner(path: string): boolean {
   return (
     path === "deploy" ||
-    path === "undeploy" ||
+    path === "destroy" ||
     path === "rollback" ||
     path === "rebalance" ||
     path === "status" ||
     path === "history" ||
     path === "logs" ||
+    path.startsWith("project ") ||
     path.startsWith("scale") ||
     path.startsWith("config ") ||
     path.startsWith("dns ") ||
@@ -102,9 +105,10 @@ registerInit(program);
 registerDoctor(program);
 registerSetup(program);
 registerDeploy(program);
-registerUndeploy(program);
+registerDestroy(program);
 registerRollback(program);
 registerRebalance(program);
+registerAutoscale(program);
 registerScale(program);
 registerConfig(program);
 registerStatus(program);
@@ -113,6 +117,7 @@ registerLogs(program);
 registerSecret(program);
 registerDns(program);
 registerNode(program);
+registerProject(program);
 registerCluster(program);
 registerBackup(program);
 registerCost(program);
@@ -124,12 +129,17 @@ async function main(): Promise<void> {
     await program.parseAsync(process.argv);
   } catch (error) {
     if (error instanceof CliError) {
+      // --json suppresses decorative stderr, so the error must reach stdout as JSON —
+      // otherwise automation sees a bare exit code with no explanation.
+      if (isJsonMode()) printJson({ error: error.message, ...(error.hint ? { hint: error.hint } : {}) });
       log.error(error.message);
       if (error.hint) log.dim(`  ${error.hint}`);
       process.exitCode = error.exitCode;
       return;
     }
-    log.error(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    if (isJsonMode()) printJson({ error: message });
+    log.error(message);
     if (program.opts<GlobalOpts>().verbose && error instanceof Error && error.stack) {
       log.dim(error.stack);
     }

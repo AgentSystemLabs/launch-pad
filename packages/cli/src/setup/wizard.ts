@@ -1,5 +1,5 @@
 /**
- * Pure planning for the `launch-pad setup` first-run wizard. The command resolves the
+ * Pure planning for the `launchpad setup` first-run wizard. The command resolves the
  * AWS account + region (and prompts interactively), then this derives what setup will do:
  * which state bucket to ensure, and whether a local `~/.launch-pad` target gets saved (only
  * for a NAMED cluster — the implicit `default` cluster runs on ambient AWS creds, so there's

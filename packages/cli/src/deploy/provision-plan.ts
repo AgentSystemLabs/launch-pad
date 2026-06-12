@@ -1,26 +1,22 @@
 import {
+  DEFAULT_EDGE_INSTANCE_TYPE,
   type InstanceCapacity,
   type NodeRegistryEntry,
   type NodeRole,
+  lookupInstanceCapacity,
+  nodeFrontsIngress,
   smallestInstanceTypeFor,
 } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 
 /**
- * What `deploy` knows about a referenced node before deciding whether to
- * provision it — derived from the resolved service placements (which nodes a
- * service targets + the edge that fronts it), not the raw config.
+ * What `deploy` knows about an app node before deciding whether to provision it —
+ * derived from the resolved service placements. Every demand is an APP node; the
+ * cluster's dedicated edge is planned separately ({@link planEdgeAction}) because
+ * it hosts no containers and has no capacity demand.
  */
 export interface NodeDemand {
   nodeId: string;
-  /** Referenced as an edge (a web service routes through it). */
-  isEdgeRef: boolean;
-  /** Referenced as an app / placement target. */
-  isAppTarget: boolean;
-  /** A web service runs co-located here (no dedicated edge) → the node needs Caddy. */
-  coLocatedWeb: boolean;
-  /** Distinct edges fronting services placed here. */
-  frontingEdges: string[];
   /** Summed cpu/memory demand placed here (shares / MB, already × replicas). */
   cpu: number;
   memory: number;
@@ -32,25 +28,6 @@ export interface NodeDemand {
    */
   surgeCpu?: number;
   surgeMemory?: number;
-}
-
-/**
- * Infer the role a referenced node must have — and, for a private `app` node,
- * the edge that fronts it. An `app` node is reachable only via its edge's
- * security group and runs no Caddy; a `both` node co-locates Caddy and is
- * publicly reachable; an `edge` node is a dedicated router.
- */
-export function inferNodeRole(d: NodeDemand): { role: NodeRole; edgeNodeId?: string } {
-  if (d.isEdgeRef && d.isAppTarget) return { role: "both" };
-  if (d.isEdgeRef) return { role: "edge" };
-  if (d.coLocatedWeb) return { role: "both" };
-  // Private app node: only when fronted by exactly one edge (its SG references one).
-  if (d.frontingEdges.length === 1) {
-    const [edgeNodeId] = d.frontingEdges;
-    return { role: "app", edgeNodeId };
-  }
-  // Worker-only, or fronted by multiple edges (can't pin a single edge SG) → co-located.
-  return { role: "both" };
 }
 
 export type NodeAction =
@@ -67,6 +44,8 @@ export type NodeAction =
 
 export interface BuildProvisionPlanArgs {
   demands: NodeDemand[];
+  /** The cluster's dedicated edge — every created app node is fronted by it. */
+  edgeNodeId: string;
   /** Load a node's registry entry from the (cluster-scoped) store, or null. */
   load: (nodeId: string) => Promise<NodeRegistryEntry | null>;
   /** When false, a missing node is a hard error (the pre-auto-provision behavior). */
@@ -76,9 +55,50 @@ export interface BuildProvisionPlanArgs {
 }
 
 /**
- * Partition every referenced node into an action: `ready` (exists, running),
- * `resume` (exists, paused), or `create` (missing → auto-sized + role inferred).
- * Pure except for the injected `load`, so it unit-tests without AWS.
+ * Plan the cluster's dedicated edge node: `ready` (exists, running), `resume`
+ * (exists, paused), or `create` ({@link DEFAULT_EDGE_INSTANCE_TYPE} — the edge
+ * only runs Caddy, so the smallest burstable type is plenty).
+ */
+export async function planEdgeAction(args: {
+  edgeNodeId: string;
+  load: (nodeId: string) => Promise<NodeRegistryEntry | null>;
+  allowCreate: boolean;
+}): Promise<NodeAction> {
+  const entry = await args.load(args.edgeNodeId);
+  if (entry) {
+    if (!nodeFrontsIngress(entry.role)) {
+      throw new CliError(
+        `node "${args.edgeNodeId}" is the cluster's edge but has role "${entry.role}"`,
+        { hint: "set the cluster's default edge to an edge-role node: launchpad cluster set-edge" },
+      );
+    }
+    return entry.state === "stopped"
+      ? { kind: "resume", nodeId: args.edgeNodeId, entry }
+      : { kind: "ready", nodeId: args.edgeNodeId, entry };
+  }
+  if (!args.allowCreate) {
+    throw new CliError(`edge node "${args.edgeNodeId}" does not exist`, {
+      hint: "create it first, or drop --no-create to auto-provision it",
+    });
+  }
+  const capacity = lookupInstanceCapacity(DEFAULT_EDGE_INSTANCE_TYPE);
+  if (!capacity) {
+    throw new CliError(`unknown instance type "${DEFAULT_EDGE_INSTANCE_TYPE}" for the edge node`);
+  }
+  return {
+    kind: "create",
+    nodeId: args.edgeNodeId,
+    role: "edge",
+    instanceType: DEFAULT_EDGE_INSTANCE_TYPE,
+    capacity,
+  };
+}
+
+/**
+ * Partition every app node the placement targets into an action: `ready` (exists,
+ * running), `resume` (exists, paused), or `create` (missing → auto-sized, role
+ * "app", fronted by the cluster's edge). Pure except for the injected `load`, so
+ * it unit-tests without AWS.
  */
 export async function buildProvisionPlan(args: BuildProvisionPlanArgs): Promise<NodeAction[]> {
   const actions: NodeAction[] = [];
@@ -97,7 +117,6 @@ export async function buildProvisionPlan(args: BuildProvisionPlanArgs): Promise<
         hint: "create it first, or drop --no-create to auto-provision it",
       });
     }
-    const { role, edgeNodeId } = inferNodeRole(d);
     // Size for the rollout peak (steady + largest single surge), not just steady
     // state, so the node can do a zero-downtime surge from its first deploy on.
     const peakCpu = d.cpu + (d.surgeCpu ?? 0);
@@ -112,8 +131,8 @@ export async function buildProvisionPlan(args: BuildProvisionPlanArgs): Promise<
     actions.push({
       kind: "create",
       nodeId: d.nodeId,
-      role,
-      edgeNodeId,
+      role: "app",
+      edgeNodeId: args.edgeNodeId,
       instanceType: sized.instanceType,
       capacity: sized.capacity,
     });

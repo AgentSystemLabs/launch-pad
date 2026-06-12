@@ -1,16 +1,15 @@
 import { Command } from "commander";
 import {
   DEFAULT_CLUSTER,
-  envProject,
+  footprintOwner,
   LABEL_REGEX,
   type NodeRegistryEntry,
+  nodeFrontsIngress,
   nodeRegistryKey,
   parseNodeRegistryEntry,
   type ServiceConfig,
   type ServiceDecl,
   resolveServiceDomain,
-  targetNodes,
-  usesClusterPlacement,
 } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import { awsErrorName } from "../aws/errors";
@@ -28,10 +27,14 @@ import {
 import {
   type ClusterServiceInput,
   type Placement,
-  distributeReplicas,
   planClusterPlacement,
 } from "../deploy/placement";
-import { type RebalanceDiff, type ServicePlacement, diffPlacement } from "../deploy/rebalance-plan";
+import {
+  type RebalanceDiff,
+  type ServicePlacement,
+  currentPlacement,
+  diffPlacement,
+} from "../deploy/rebalance-plan";
 import { type WatchTarget, waitForConvergence } from "../deploy/watch";
 import { enforceConfigLock, publishDesired, publishEdgeConfig, toServiceConfig } from "./deploy";
 import { CliError, EvacuationBlockedError } from "../errors";
@@ -88,19 +91,6 @@ interface Resolved {
 
 const isWeb = (s: ServiceDecl): boolean => s.domain !== undefined && s.port !== undefined;
 
-/** Build per-service node→replicas maps from a footprint's published placement. */
-function currentPlacement(snapshot: DeployedPlacementSnapshot): ServicePlacement[] {
-  const byService = new Map<string, Map<string, number>>();
-  for (const [nodeId, occupancies] of snapshot.byNode) {
-    for (const occ of occupancies) {
-      const m = byService.get(occ.service) ?? new Map<string, number>();
-      m.set(nodeId, occ.replicas);
-      byService.set(occ.service, m);
-    }
-  }
-  return [...byService].map(([service, byNode]) => ({ service, byNode }));
-}
-
 /** Build per-service node→replicas maps from the freshly-resolved placement. */
 function plannedPlacement(resolved: Map<string, Resolved>): ServicePlacement[] {
   return [...resolved].map(([service, r]) => ({
@@ -124,16 +114,7 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
       hint: "use lowercase letters, numbers and hyphens (a valid DNS label)",
     });
   }
-  const ownerProject = envProject(config.project, env);
-
-  // Only cluster-placed services (omit node/nodes) can be moved; pinned placement is
-  // frozen by the config lock, so there's nothing to rebalance if none are cluster-placed.
-  const clusterServices = config.service.filter((s) => usesClusterPlacement(s));
-  if (clusterServices.length === 0) {
-    throw new CliError(`no cluster-placed services in "${config.project}" to rebalance`, {
-      hint: "rebalance moves services that omit node/nodes (schedule/topology); pinned services are fixed",
-    });
-  }
+  const ownerProject = footprintOwner(config, env);
 
   const aws = await prepareAws(opts);
   log.step(`cluster ${color.cyan(aws.clusterId)} · account ${color.cyan(aws.accountId)} · region ${color.cyan(aws.region)}`);
@@ -141,20 +122,33 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
   if (!opts.dryRun) rememberClusterTarget(aws.clusterId, { region: aws.region, profile: opts.profile });
 
   // Rebalance must not sneak a config change in — the toml has to match the locked baseline.
-  await enforceConfigLock(aws, config, ownerProject, {});
+  await enforceConfigLock(aws, config, ownerProject);
 
   const clusterCfg = aws.clusterId === DEFAULT_CLUSTER ? null : await getClusterConfig(aws, aws.clusterId);
-  const clusterDefaultEdge = clusterCfg?.defaultEdge ?? null;
 
-  const needsCapacitySnapshot = clusterServices.some((s) => s.schedule === "capacity");
-  const pool = await buildCandidateNodes(aws, ownerProject, { needsCapacitySnapshot });
+  const pool = await buildCandidateNodes(aws, ownerProject, { needsCapacitySnapshot: true });
   const nodes = pool.nodes;
   let candidateNodes = pool.candidateNodes;
   let clusterAppNodeIds = pool.clusterAppNodeIds;
 
-  // `--drain` / `drainNodes`: evacuate the footprint off node(s) by removing them from the
-  // schedulable pool. Pinned (node/nodes) services on them can't move (config-locked), so a
-  // pinned service on a drained node is a hard block — `EvacuationBlockedError` so a calling
+  // The cluster's dedicated edge fronting every web service: cluster.json's
+  // defaultEdge, else the registry's single edge-role node. Rebalance never
+  // provisions, so a missing edge is a hard error (deploy creates it).
+  let clusterEdgeId: string | null = clusterCfg?.defaultEdge ?? null;
+  if (clusterEdgeId === null) {
+    const edgeRoleNodes = [...nodes.values()].filter((n) => nodeFrontsIngress(n.role)).map((n) => n.nodeId);
+    if (edgeRoleNodes.length > 1) {
+      throw new CliError(
+        `cluster "${aws.clusterId}" has ${edgeRoleNodes.length} edge nodes (${edgeRoleNodes.join(", ")}) and no default`,
+        { hint: `pick one: launchpad cluster set-edge ${aws.clusterId} <node-id>` },
+      );
+    }
+    clusterEdgeId = edgeRoleNodes[0] ?? null;
+  }
+
+  // `--drain` / `drainNodes`: evacuate the footprint off node(s) by removing them from
+  // the schedulable pool. A volume-bearing service can't move (its data is node-local),
+  // so one on a drained node is a hard block — `EvacuationBlockedError` so a calling
   // command (`node destroy --evacuate`) can tell it apart from a real failure.
   const drainSet = resolveDrainSet(opts.drain, opts.drainNodes);
   if (drainSet.size > 0) {
@@ -162,18 +156,9 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
     for (const id of drainList) {
       if (!nodes.has(id)) {
         throw new CliError(`node "${id}" is not in cluster "${aws.clusterId}"`, {
-          hint: "pass an app/both node id from `launch-pad node list`",
+          hint: "pass an app node id from `launchpad node list`",
         });
       }
-    }
-    const pinnedOnNode = config.service.filter(
-      (s) => !usesClusterPlacement(s) && targetNodes(s).some((n) => drainSet.has(n)),
-    );
-    if (pinnedOnNode.length > 0) {
-      throw new EvacuationBlockedError(
-        `can't evacuate ${quoteList(drainList)}: ${pinnedOnNode.map((s) => s.name).join(", ")} pinned to it`,
-        { hint: "pinned placement is config-locked — undeploy those services or recreate the footprint to move them" },
-      );
     }
     candidateNodes = candidateNodes.filter((c) => !drainSet.has(c.nodeId));
     clusterAppNodeIds = clusterAppNodeIds.filter((id) => !drainSet.has(id));
@@ -183,11 +168,11 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
     if (drainSet.size > 0) {
       throw new EvacuationBlockedError(
         `draining ${quoteList([...drainSet].sort())} would leave cluster "${aws.clusterId}" with no app nodes`,
-        { hint: `add capacity first: launch-pad node create <name> --cluster ${aws.clusterId} --role app` },
+        { hint: `add capacity first: launchpad node create <name> --cluster ${aws.clusterId} --role app` },
       );
     }
     throw new CliError(`cluster "${aws.clusterId}" has no app nodes to place services on`, {
-      hint: `create one: launch-pad node create <name> --cluster ${aws.clusterId} --role app`,
+      hint: `create one: launchpad node create <name> --cluster ${aws.clusterId} --role app`,
     });
   }
 
@@ -201,7 +186,7 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
   }
   const priorPlacement = buildPlacementSnapshot(states, ownerProject);
   if (priorPlacement.footprints.length === 0) {
-    throw new CliError(`nothing is deployed for "${ownerProject}" — run \`launch-pad deploy\` first`, {
+    throw new CliError(`nothing is deployed for "${ownerProject}" — run \`launchpad deploy\` first`, {
       hint: "rebalance redistributes an already-deployed footprint; it doesn't create one",
     });
   }
@@ -212,32 +197,35 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
     }
   }
 
-  // Resolve the new placement: pinned services stay; cluster-placed services re-plan.
+  /** The node a service currently occupies (sticky volume placement). */
+  const publishedNodeOf = (serviceName: string): string | null => {
+    for (const [nodeId, occupancies] of priorPlacement.byNode) {
+      if (occupancies.some((o) => o.service === serviceName)) return nodeId;
+    }
+    return null;
+  };
+
+  // A volume service is sticky to its current node — draining that node would strand
+  // the data, so it's a hard block (the planner would otherwise re-place it fresh).
+  if (drainSet.size > 0) {
+    const stuck = config.service.filter((s) => {
+      if (s.volumes.length === 0) return false;
+      const current = publishedNodeOf(s.name);
+      return current !== null && drainSet.has(current);
+    });
+    if (stuck.length > 0) {
+      throw new EvacuationBlockedError(
+        `can't evacuate ${quoteList([...drainSet].sort())}: ${stuck.map((s) => s.name).join(", ")} ` +
+          `keep persistent volumes there`,
+        { hint: "a volume service can't move nodes without stranding its data — destroy it first or keep the node" },
+      );
+    }
+  }
+
+  // Resolve the new placement (volume services stay put via their sticky node).
   const resolved = new Map<string, Resolved>();
   const clusterInputs: ClusterServiceInput[] = [];
   for (const s of config.service) {
-    const domain = resolveServiceDomain(
-      { domain: s.domain, domainPattern: s.domainPattern ?? config.domainPattern, service: s.name },
-      env,
-    );
-    if (!usesClusterPlacement(s)) {
-      const nodeIds = targetNodes(s);
-      resolved.set(s.name, {
-        placements: distributeReplicas(nodeIds, s.replicas),
-        edge: isWeb(s) ? (s.edge ?? clusterDefaultEdge) : null,
-        domain,
-      });
-      // Seed the capacity scheduler with this pinned demand so a replan respects it.
-      for (const p of distributeReplicas(nodeIds, s.replicas)) {
-        const cn = candidateNodes.find((c) => c.nodeId === p.nodeId);
-        if (!cn) continue;
-        cn.steadyCpu += s.cpu * p.replicas;
-        cn.steadyMemory += s.memory * p.replicas;
-        cn.maxSurgeCpu = Math.max(cn.maxSurgeCpu, s.cpu * Math.min(s.rollout.maxSurge, p.replicas));
-        cn.maxSurgeMemory = Math.max(cn.maxSurgeMemory, s.memory * Math.min(s.rollout.maxSurge, p.replicas));
-      }
-      continue;
-    }
     clusterInputs.push({
       name: s.name,
       replicas: s.replicas,
@@ -245,21 +233,24 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
       memory: s.memory,
       maxSurge: s.rollout.maxSurge,
       isWeb: isWeb(s),
-      explicitEdge: s.edge ?? null,
-      schedule: s.schedule,
-      topology: s.topology,
+      hasVolumes: s.volumes.length > 0,
+      stickyNodeId: s.volumes.length > 0 ? publishedNodeOf(s.name) : null,
     });
   }
   for (const plan of planClusterPlacement({
     clusterId: aws.clusterId,
-    clusterDefaultEdge,
     nodes: candidateNodes,
     services: clusterInputs,
   })) {
     const decl = config.service.find((s) => s.name === plan.service) as ServiceDecl;
+    if (isWeb(decl) && clusterEdgeId === null) {
+      throw new CliError(`service "${decl.name}" serves a domain but cluster "${aws.clusterId}" has no edge node`, {
+        hint: "run `launchpad deploy` to provision the cluster's dedicated edge first",
+      });
+    }
     resolved.set(plan.service, {
       placements: plan.placements,
-      edge: plan.edge,
+      edge: isWeb(decl) ? clusterEdgeId : null,
       domain: resolveServiceDomain(
         { domain: decl.domain, domainPattern: decl.domainPattern ?? config.domainPattern, service: decl.name },
         env,
@@ -311,7 +302,10 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
   // `wait`: block until the surviving pool reports its new running replica counts — so a
   // caller (`node destroy --evacuate`) never tears down the drained node before its replicas
   // are confirmed up elsewhere. Throws on non-convergence so the destroy aborts (fail-safe).
-  if (opts.wait === true) await waitForRebalanceConvergence(aws, ownerProject, resolved, imageByService, opts);
+  if (opts.wait === true) {
+    const cronServices = new Set(config.service.filter((s) => s.cron !== undefined).map((s) => s.name));
+    await waitForRebalanceConvergence(aws, ownerProject, resolved, imageByService, cronServices, opts);
+  }
 
   if (isJsonMode()) {
     if (!opts.quiet) {
@@ -322,10 +316,10 @@ export async function runRebalance(opts: RebalanceOptions): Promise<void> {
   if (opts.quiet) return;
   if (draining) {
     log.success(`evacuated ${color.cyan(ownerProject)} off ${color.cyan(drainLabel)} — the agents converge on their next poll`);
-    log.dim(`  once \`launch-pad status\` shows it drained, you can pause/destroy ${drainLabel}`);
+    log.dim(`  once \`launchpad status\` shows it drained, you can pause/destroy ${drainLabel}`);
   } else {
     log.success(`rebalanced ${color.cyan(ownerProject)} — the agents converge on their next poll`);
-    log.dim("  run `launch-pad status` to watch the replicas move");
+    log.dim("  run `launchpad status` to watch the replicas move");
   }
 }
 
@@ -344,6 +338,7 @@ async function waitForRebalanceConvergence(
   ownerProject: string,
   resolved: Map<string, Resolved>,
   imageByService: Map<string, string>,
+  cronServices: ReadonlySet<string>,
   opts: RebalanceOptions,
 ): Promise<void> {
   const targets: WatchTarget[] = [];
@@ -352,7 +347,14 @@ async function waitForRebalanceConvergence(
     if (image === undefined) continue;
     for (const p of r.placements) {
       if (p.replicas <= 0) continue;
-      targets.push({ nodeId: p.nodeId, project: ownerProject, service, image, expectedReplicas: p.replicas });
+      targets.push({
+        nodeId: p.nodeId,
+        project: ownerProject,
+        service,
+        image,
+        // A cron service idles at 0 running replicas — converged = reported without error.
+        expectedReplicas: cronServices.has(service) ? 0 : p.replicas,
+      });
     }
   }
   if (targets.length === 0) return;
@@ -370,7 +372,7 @@ async function waitForRebalanceConvergence(
     throw new CliError(
       `evacuation published but ${failed.length} placement(s) haven't converged yet`,
       {
-        hint: "the desired state is written; watch `launch-pad status` and re-run the destroy once it's running — nothing was torn down",
+        hint: "the desired state is written; watch `launchpad status` and re-run the destroy once it's running — nothing was torn down",
       },
     );
   }
@@ -427,7 +429,7 @@ async function applyRebalance(
     const entry = await entryFor(id);
     if (!entry) {
       throw new CliError(`node "${id}" is no longer in cluster "${aws.clusterId}" — can't place services on it`, {
-        hint: "the cluster changed under the plan — re-run `launch-pad rebalance`",
+        hint: "the cluster changed under the plan — re-run `launchpad rebalance`",
       });
     }
     entries.set(id, entry);
@@ -485,7 +487,7 @@ function reportPlan(diff: RebalanceDiff, dryRun: boolean): void {
 export function registerRebalance(program: Command): void {
   const cmd = program
     .command("rebalance")
-    .description("Replan cluster-placed services across the current app pool (after adding/removing nodes)")
+    .description("Replan the footprint's services across the current app pool (after adding/removing nodes)")
     .option("--env <name>", "target a named environment footprint (same as deploy --env)")
     .option("--drain <node>", "evacuate the footprint OFF this node (exclude it from the pool)")
     .option("--dry-run", "show the moves without writing any state")
@@ -495,12 +497,12 @@ export function registerRebalance(program: Command): void {
       [
         "",
         "Rebalance re-runs the cluster scheduler over the CURRENT app pool and republishes the",
-        "footprint's cluster-placed services (those that omit node/nodes) to match — reusing each",
-        "service's already-published image (no rebuild). Use it after adding an app node (to spread",
-        "load onto it) or before removing one. Pinned (node/nodes) services never move.",
+        "footprint's services to match — reusing each service's already-published image (no",
+        "rebuild). Use it after adding an app node (to spread load onto it) or before removing",
+        "one. A service with [[service.volumes]] never moves (its data is node-local).",
         "",
         "It is config-lock-safe: the launch-pad.toml must match the deployed baseline (only the",
-        "placement, derived from schedule/topology over the live pool, changes).",
+        "placement over the live pool changes).",
         "",
         "Convergence is eventual: rebalance republishes desired state and each node's agent",
         "reconciles on its next poll (it publishes nodes that gain replicas before nodes that",
@@ -508,8 +510,8 @@ export function registerRebalance(program: Command): void {
         "deploy/scale of the same footprint — a re-run reconciles any interleaving safely.",
         "",
         "Examples:",
-        "  $ launch-pad rebalance --dry-run     # preview the moves",
-        "  $ launch-pad rebalance --yes         # apply them",
+        "  $ launchpad rebalance --dry-run     # preview the moves",
+        "  $ launchpad rebalance --yes         # apply them",
       ].join("\n"),
     )
     .action(async (_opts, command: Command) => {

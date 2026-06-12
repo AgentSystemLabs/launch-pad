@@ -16,10 +16,6 @@ const baseConfig: LaunchPadConfig = {
   service: [
     {
       name: "web",
-      node: "node-app",
-      edge: "node-edge",
-      schedule: "even",
-      topology: "auto",
       dockerfile: "./Dockerfile",
       context: ".",
       replicas: 1,
@@ -67,7 +63,7 @@ describe("snapshotConfigBaseline", () => {
         project: "p",
         service: [
           { ...baseConfig.service[0]!, name: "z", cpu: 256, memory: 256 },
-          { ...baseConfig.service[0]!, name: "a", cpu: 256, memory: 256, domain: undefined, port: undefined, edge: undefined, healthCheck: undefined },
+          { ...baseConfig.service[0]!, name: "a", cpu: 256, memory: 256, domain: undefined, port: undefined, healthCheck: undefined },
         ],
       },
       "now",
@@ -78,6 +74,14 @@ describe("snapshotConfigBaseline", () => {
   it("resolves healthCheck.port to the service port so it matches the deployed form", () => {
     const snap = baseline();
     expect(snap.services[0]?.healthCheck?.port).toBe(3000);
+  });
+
+  it("does not emit the removed placement fields (node/nodes/edge/topology)", () => {
+    const snap = baseline();
+    expect(snap.services[0]).not.toHaveProperty("node");
+    expect(snap.services[0]).not.toHaveProperty("nodes");
+    expect(snap.services[0]).not.toHaveProperty("edge");
+    expect(snap.services[0]).not.toHaveProperty("topology");
   });
 });
 
@@ -100,9 +104,37 @@ describe("findConfigLockViolations (baseline file)", () => {
     ]);
   });
 
-  it("rejects domain change before anything else", () => {
+  it("rejects a component change (added, removed, or renamed)", () => {
+    const withComponent = baseline({ ...baseConfig, component: "auth" });
+    expect(findConfigLockViolations(baseline(), withComponent)).toEqual([
+      expect.objectContaining({ path: "component" }),
+    ]);
+    expect(findConfigLockViolations(withComponent, baseline())).toEqual([
+      expect.objectContaining({ path: "component" }),
+    ]);
+    const renamed = baseline({ ...baseConfig, component: "notes" });
+    expect(findConfigLockViolations(withComponent, renamed)).toEqual([
+      expect.objectContaining({ path: "component" }),
+    ]);
+    expect(findConfigLockViolations(withComponent, withComponent)).toEqual([]);
+  });
+
+  it("a reconstructed baseline carries the logical identity, not the derived owner", () => {
+    const recon = baselineFromDeployedFootprints(
+      { project: "edge-express-web", component: "auth" },
+      [webFootprint],
+      "now",
+    );
+    expect(recon.project).toBe("edge-express-web");
+    expect(recon.component).toBe("auth");
+    const current = baseline({ ...baseConfig, component: "auth" });
+    expect(findConfigLockViolations(recon, current, { baselineFromDesired: true })).toEqual([]);
+  });
+
+  it("allows domain change after the initial deploy", () => {
     const current = baseline(withService({ domain: "other.example.com" }));
-    expect(findConfigLockViolations(baseline(), current)[0]?.path).toBe("service.web");
+    expect(findConfigLockViolations(baseline(), current)).toEqual([]);
+    expect(() => assertConfigLockAllowed(baseline(), current)).not.toThrow();
   });
 
   it("rejects port change", () => {
@@ -154,40 +186,37 @@ describe("findConfigLockViolations (baseline file)", () => {
     ).toEqual([]);
   });
 
-  it("rejects placement changes", () => {
-    expect(findConfigLockViolations(baseline(), baseline(withService({ node: "node-app-2" })))[0]?.path).toBe("service.web");
-    expect(findConfigLockViolations(baseline(), baseline(withService({ node: undefined, nodes: ["a", "b"], edge: "node-edge" })))[0]?.path).toBe("service.web");
-  });
-
-  it("rejects edge change", () => {
-    const current = baseline(withService({ edge: "node-edge-2" }));
-    expect(findConfigLockViolations(baseline(), current)[0]?.path).toBe("service.web");
-  });
-
-  it("rejects schedule and topology changes", () => {
-    expect(findConfigLockViolations(baseline(), baseline(withService({ schedule: "capacity" })))[0]?.path).toBe("service.web");
-    expect(findConfigLockViolations(baseline(), baseline(withService({ topology: "split" })))[0]?.path).toBe("service.web");
-  });
-
-  it("parses a legacy baseline without schedule/topology and compares clean", () => {
-    // A baseline file written before the fields existed: strip them, re-parse, compare.
+  it("parses a legacy baseline carrying the removed placement fields and compares clean", () => {
+    // Baselines written before the placement model was removed may still carry
+    // node/nodes/edge/schedule/topology — they parse, but are stripped from the
+    // lock view, so they never trip the lock against a fresh snapshot.
     const legacy = JSON.parse(JSON.stringify(baseline())) as ConfigBaseline;
-    for (const s of legacy.services) {
-      delete (s as Partial<(typeof legacy.services)[number]>).schedule;
-      delete (s as Partial<(typeof legacy.services)[number]>).topology;
-    }
+    legacy.services[0]!.node = "node-app";
+    legacy.services[0]!.edge = "node-edge";
+    legacy.services[0]!.topology = "auto";
+    legacy.services[0]!.schedule = "even";
     const reparsed = parseConfigBaseline(legacy);
+    expect(reparsed.services[0]?.node).toBe("node-app");
     expect(reparsed.services[0]?.schedule).toBe("even");
-    expect(reparsed.services[0]?.topology).toBe("auto");
     expect(findConfigLockViolations(reparsed, baseline())).toEqual([]);
+    expect(findConfigLockViolations(baseline(), reparsed)).toEqual([]);
   });
 
-  it("rejects top-level domainPattern change", () => {
+  it("ignores a legacy `nodes` list in a stored baseline", () => {
+    const legacy = JSON.parse(JSON.stringify(baseline())) as ConfigBaseline;
+    legacy.services[0]!.nodes = ["node-a", "node-b"];
+    expect(findConfigLockViolations(parseConfigBaseline(legacy), baseline())).toEqual([]);
+  });
+
+  it("allows top-level domainPattern change", () => {
     const before = baseline({ ...baseConfig, domainPattern: "{service}.example.com" });
-    const after = baseline({ ...baseConfig, domainPattern: "{service}.other.com" });
-    expect(findConfigLockViolations(before, after)).toEqual([
-      expect.objectContaining({ path: "domainPattern" }),
-    ]);
+    const after = baseline({ ...baseConfig, domainPattern: "{service}-{env}.example.com" });
+    expect(findConfigLockViolations(before, after)).toEqual([]);
+  });
+
+  it("allows per-service domainPattern change", () => {
+    const current = baseline(withService({ domainPattern: "api-{env}.example.com" }));
+    expect(findConfigLockViolations(baseline(), current)).toEqual([]);
   });
 
   it("rejects added or removed services", () => {
@@ -195,7 +224,7 @@ describe("findConfigLockViolations (baseline file)", () => {
       ...baseConfig,
       service: [
         baseConfig.service[0]!,
-        { ...baseConfig.service[0]!, name: "worker", domain: undefined, port: undefined, edge: undefined, healthCheck: undefined },
+        { ...baseConfig.service[0]!, name: "worker", domain: undefined, port: undefined, healthCheck: undefined },
       ],
     });
     expect(findConfigLockViolations(baseline(), added).some((v) => v.path === "service.worker")).toBe(true);
@@ -215,13 +244,13 @@ describe("findConfigLockViolations (baseline file)", () => {
       ]),
     );
     expect(() => assertConfigLockAllowed(baseline(), renamed)).toThrow(
-      /only cpu, memory, replicas, env, and secrets may change/,
+      /only cpu, memory, replicas, env, secrets, domain, and domainPattern may change/,
     );
   });
 });
 
 describe("findConfigLockViolations (baseline reconstructed from desired.json)", () => {
-  const fromDesired = baselineFromDeployedFootprints("edge-express-web", [webFootprint], "now");
+  const fromDesired = baselineFromDeployedFootprints({ project: "edge-express-web" }, [webFootprint], "now");
   const opts = { baselineFromDesired: true } as const;
 
   it("allows a cpu/memory-only change (no false positive on dockerfile/context/healthCheck port)", () => {
@@ -234,14 +263,21 @@ describe("findConfigLockViolations (baseline reconstructed from desired.json)", 
     expect(findConfigLockViolations(fromDesired, baseline(), opts)).toEqual([]);
   });
 
+  it("does not emit placement fields when reconstructing from footprints", () => {
+    expect(fromDesired.services[0]).not.toHaveProperty("node");
+    expect(fromDesired.services[0]).not.toHaveProperty("nodes");
+    expect(fromDesired.services[0]).not.toHaveProperty("edge");
+    expect(fromDesired.services[0]).not.toHaveProperty("topology");
+  });
+
   it("rejects a service rename", () => {
     const renamed = baseline(withService({ name: "webgg" }));
     expect(() => assertConfigLockAllowed(fromDesired, renamed, opts)).toThrow(/service "web" was removed/);
   });
 
-  it("rejects a domain change", () => {
+  it("allows a domain change", () => {
     const current = baseline(withService({ domain: "other.example.com" }));
-    expect(findConfigLockViolations(fromDesired, current, opts)[0]?.path).toBe("service.web");
+    expect(findConfigLockViolations(fromDesired, current, opts)).toEqual([]);
   });
 
   it("allows an env change", () => {
@@ -254,45 +290,23 @@ describe("findConfigLockViolations (baseline reconstructed from desired.json)", 
     expect(findConfigLockViolations(fromDesired, current, opts)).toEqual([]);
   });
 
-  it("drops schedule/topology from the compare (desired.json can't carry them)", () => {
-    const current = baseline(withService({ schedule: "capacity", topology: "split" }));
-    expect(findConfigLockViolations(fromDesired, current, opts)).toEqual([]);
-  });
-
-  it("does not false-positive on a cluster-placed decl vs reconstructed node/nodes/edge", () => {
-    // The reconstructed baseline records wherever replicas landed (node-app,
-    // edge node-edge); a decl that never pinned placement must not trip the lock.
-    const current = baseline(withService({ node: undefined, edge: undefined }));
-    expect(findConfigLockViolations(fromDesired, current, opts)).toEqual([]);
-  });
-
-  it("still catches a node change on a PINNED decl in fromDesired mode", () => {
-    const current = baseline(withService({ node: "node-app-2" }));
-    expect(findConfigLockViolations(fromDesired, current, opts)[0]?.path).toBe("service.web");
-  });
-
   it("ignores the deploy-injected LAUNCH_PAD_ENVIRONMENT in a reconstructed env", () => {
     const envFootprint: DeployedFootprint = {
       ...webFootprint,
       env: { [LAUNCH_PAD_ENVIRONMENT]: "staging", NODE_ENV: "production" },
     };
-    const recon = baselineFromDeployedFootprints("edge-express-web", [envFootprint], "now");
+    const recon = baselineFromDeployedFootprints({ project: "edge-express-web" }, [envFootprint], "now");
     // current TOML declares only NODE_ENV — the injected var must not look like a change.
     expect(findConfigLockViolations(recon, baseline(), opts)).toEqual([]);
   });
 });
 
 describe("config lock — persistent volumes are locked identity", () => {
-  // A volume-bearing service must be pinned, so it carries `node` (no edge/web here).
-  const pinnedWithVol = (volumes: Array<{ name: string; path: string }>): LaunchPadConfig => ({
+  const withVol = (volumes: Array<{ name: string; path: string }>): LaunchPadConfig => ({
     project: "edge-express-web",
     service: [
       {
         name: "web",
-        node: "node-app",
-        edge: "node-edge",
-        schedule: "even",
-        topology: "auto",
         dockerfile: "./Dockerfile",
         context: ".",
         replicas: 1,
@@ -310,19 +324,19 @@ describe("config lock — persistent volumes are locked identity", () => {
   });
 
   it("allows an unchanged volume set", () => {
-    const base = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/data" }]), "t");
-    const cur = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/data" }]), "t2");
+    const base = snapshotConfigBaseline(withVol([{ name: "data", path: "/data" }]), "t");
+    const cur = snapshotConfigBaseline(withVol([{ name: "data", path: "/data" }]), "t2");
     expect(findConfigLockViolations(base, cur)).toEqual([]);
   });
 
   it("rejects adding, removing, or changing a volume after the first deploy", () => {
-    const base = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/data" }]), "t");
+    const base = snapshotConfigBaseline(withVol([{ name: "data", path: "/data" }]), "t");
     const added = snapshotConfigBaseline(
-      pinnedWithVol([{ name: "data", path: "/data" }, { name: "cache", path: "/cache" }]),
+      withVol([{ name: "data", path: "/data" }, { name: "cache", path: "/cache" }]),
       "t2",
     );
-    const movedPath = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/var/data" }]), "t2");
-    const removed = snapshotConfigBaseline(pinnedWithVol([]), "t2");
+    const movedPath = snapshotConfigBaseline(withVol([{ name: "data", path: "/var/data" }]), "t2");
+    const removed = snapshotConfigBaseline(withVol([]), "t2");
     for (const cur of [added, movedPath, removed]) {
       const v = findConfigLockViolations(base, cur);
       expect(v.length).toBeGreaterThan(0);
@@ -331,9 +345,9 @@ describe("config lock — persistent volumes are locked identity", () => {
   });
 
   it("compares equal to a baseline reconstructed from desired.json (volumes carried on the wire)", () => {
-    const base = snapshotConfigBaseline(pinnedWithVol([{ name: "data", path: "/data" }]), "t");
+    const base = snapshotConfigBaseline(withVol([{ name: "data", path: "/data" }]), "t");
     const reconstructed = baselineFromDeployedFootprints(
-      "edge-express-web",
+      { project: "edge-express-web" },
       [{ ...webFootprint, volumes: [{ name: "data", path: "/data" }] }],
       "t2",
     );

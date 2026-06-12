@@ -65,11 +65,10 @@ export function registerNodes(station: Station<AppCtx>) {
             <label class="form-control">
               <span class="label-text mb-1">Role</span>
               <select name="role" class="select select-bordered select-sm w-28">
-                <option value="both" selected>
-                  both
+                <option value="app" selected>
+                  app
                 </option>
                 <option value="edge">edge</option>
-                <option value="app">app</option>
               </select>
             </label>
             <label class="form-control">
@@ -213,7 +212,7 @@ export function registerNodes(station: Station<AppCtx>) {
       cluster: z.string().min(1),
       name: NAME_RULES,
       instanceType: z.string().min(1),
-      role: z.enum(["both", "edge", "app"]),
+      role: z.enum(["edge", "app"]),
       edge: z.string().optional(),
     }),
     handler: async ({ data, ctx, broadcast, invalidate, reply }) => {

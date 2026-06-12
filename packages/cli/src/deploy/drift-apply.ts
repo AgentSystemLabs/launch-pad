@@ -62,7 +62,7 @@ export async function applyNodeDrift(p: ApplyNodeDriftParams): Promise<NodeRegis
 
     case "blocked":
       throw new CliError(`node "${entry.nodeId}": ${action.reason}`, {
-        hint: "fix it in the AWS console, or run `launch-pad node reconcile` once it is stable",
+        hint: "fix it in the AWS console, or run `launchpad node reconcile` once it is stable",
       });
   }
 }

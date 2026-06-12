@@ -2,45 +2,77 @@
 
 A long-running process on every node — **the only thing that touches Docker and Caddy**.
 It polls S3 for desired state and reconciles the node to match. The implementation lives in
-[`packages/agent`](../packages/agent) (TypeScript, bundled to a single CJS file).
+[`packages/agent-rust`](../packages/agent-rust) (Rust, one crate) and ships as **two
+role-specific static binaries**, installed at `/opt/launch-pad/agent` and run under systemd:
 
-## The reconcile loop
+- **`launchpad-agent-app`** — the Docker reconciler, on every app node. No Caddy code.
+- **`launchpad-agent-edge`** — the Caddy router, on the cluster's dedicated edge. The
+  Docker/ECR/SSM paths (and their AWS SDK dependencies) are compiled out entirely, so an
+  idle edge agent is a few MB of RSS and the edge AMI doesn't even install Docker.
 
-`src/index.ts` runs a poll loop (default 5s). Each `tick()`:
+Each binary **fails closed** when the node's `/etc/launch-pad/agent.json` role doesn't
+match (clear error naming the right binary), and the app binary refuses to start without
+Docker — a wrong-AMI-for-role provisioning mistake surfaces at first tick, not as silence.
+
+## The reconcile loop (app)
+
+`src/bin/agent-app.rs` runs a poll loop (default 10s). Each tick:
 
 1. Read `desired.json` from S3.
 2. Inspect live managed containers (label-based metadata: project, service, replica index,
    image, resources, config stamp).
-3. `planReconcile` (**pure**, in `reconcile.ts`) diffs desired vs. live and emits actions —
-   image/resource drift collapses into a single `rollout` action per service.
-4. Apply actions via `docker.ts` (pull / run / graceful stop / remove), with ECR auth
-   cached ~6h via the instance role (`ecr-auth.ts`).
-5. Program **Caddy** through its admin API (`caddy.ts`; routes built in `routes.ts`) for
-   domain → container HTTPS, with write-on-change reloads.
-6. Write `status.json` + heartbeat (`status.ts`, `status-write.ts`).
+3. `plan_reconcile` (**pure**, in `reconcile.rs`) diffs desired vs. live and emits actions —
+   image/resource/config drift collapses into a single `rollout` action per service.
+4. Apply actions via `docker.rs` (pull / run / graceful stop / remove), with ECR auth
+   cached ~6h via the instance role (`ecr.rs`).
+5. Publish this node's **upstream shard** (its private IP + backend list) into the edge's
+   `upstream/` S3 prefix — the routing signal the edge consumes. App nodes never run Caddy.
+6. Sample stats, write `status.json` + heartbeat (`status.rs`, `status_write.rs`), sync the
+   CloudWatch Agent config.
 
 The agent is **idempotent and crash-safe**: running it twice against the same desired state
 is a no-op; per-action errors are isolated and the next tick retries from scratch. Local
 port allocation (host ports 20000–30000, hashed per service+replica) persists in
 `/var/lib/launch-pad/state.json` with atomic renames, so it self-heals across reboots.
 
+## The edge loop
+
+`src/bin/agent-edge.rs` polls only its own `upstream/*` shards (with a LIST-ETag cache that
+skips redundant GETs) and programs **Caddy** through its admin API (`caddy.rs`; routes built
+in `routes.rs`) for domain → backend HTTPS, with write-on-change reloads.
+
+**Caddy-restart detection:** the agent doesn't trust its own "last pushed" cache — every
+tick it GETs `{admin}/config/` (a cheap loopback call) and compares Caddy's LIVE config
+against the desired one. If Caddy restarted out from under the agent (crash, OOM,
+`systemctl restart caddy`) and reverted to its boot config, the agent force-re-pushes
+within one poll cycle. An unreadable admin API also forces a push, so the resulting error
+lands in `status.json` instead of being masked by a stale cache.
+
+## Scheduled jobs (cron)
+
+A desired service carrying a `cron` expression bypasses the long-running branches entirely
+(`plan_cron_service` inside `plan_reconcile`): one container per fire, started with
+`--restart no` and a `launchpad.cronFire=<epoch-ms>` label, judged by exit code. The
+due-run decision (`due_cron_fire`, `cron.rs` — a port of shared `cron.ts`, kept in
+lock-step) compares the schedule against the last fire, recorded twice for crash-safety:
+the run container's fire **label** (survives agent restarts) and `cronFires` in
+`state.json` (survives container removal; seeded at first sight so a new schedule never
+replays history). The fire is recorded **before** the container starts — a crash between
+the two skips a run, never duplicates one. A run still in progress suppresses the next
+fire (no overlap), and missed fires collapse to the single latest one (no catch-up storm).
+The exited run container is kept until the next fire so its exit code (and CloudWatch
+logs) remain inspectable; `status.json` carries a per-service `cron` rollup
+(`lastRunAt` / `lastExitCode` / `nextRunAt`). An idle (armed) schedule reports state
+`running` — a failed run surfaces via the rollup and message, not state `error`, so a
+deploy's convergence watch can't be wedged by one bad run.
+
 ## Zero-downtime rollouts
 
-`rolloutService` surges a new replica (pull → run → wait for consecutive health-check
-passes), refreshes routing **mid-rollout** (Caddy routes locally; upstream shards re-published
-for remote edges at every surge/drain step), then drains the old replica — removed from
-routing, drain wait floored at the edge's poll cadence, graceful `SIGTERM` stop. Caddy is
-tuned for the handoff: retries, passive failure eviction, and active health probes.
-
-## Edge routing
-
-- **Co-located** (`both`-role, or `edge: null`): the local Caddy routes straight to local
-  containers.
-- **Split topology:** an `app` agent publishes an *upstream shard* (its private IP + backend
-  list) into its edge's `upstream/` S3 prefix; the `edge` agent polls only its own
-  `upstream/*` and reloads Caddy. No node ever reads another node's desired/status —
-  enforced by per-node least-privilege IAM. Edge/both nodes reuse a per-tick shard-list
-  cache (LIST ETags) to skip redundant GETs.
+`rollout_service` surges a new replica (pull → run → wait for consecutive health-check
+passes), refreshes routing **mid-rollout** (the upstream shard is re-published for the edge
+at every surge/drain step), then drains the old replica — removed from routing, drain wait
+floored at the edge's poll cadence, graceful `SIGTERM` stop. Caddy is tuned for the handoff:
+retries, passive failure eviction, and active health probes.
 
 ## Status publishing & heartbeats
 
@@ -50,43 +82,73 @@ re-publishes every `LIVENESS_HEARTBEAT_MS` (30s) as a liveness heartbeat so the 
 staleness check (60s) stays reliable; mid-rollout and error paths always write.
 `LAUNCHPAD_DEBUG_S3=1` logs written-vs-skipped PUTs per tick.
 
+`status.json` also embeds the node's latest **host utilization sample** (`host`: CPU busy %,
+memory used/total MB, `sampledAt`) — the live signal `launchpad autoscale run` reads from S3
+without needing CloudWatch. It is telemetry, not convergence state: the fingerprint ignores
+it (no PUT storm), so a fresh sample reaches S3 with the next change or liveness heartbeat.
+
 ## Secrets, volumes, logs, stats
 
-- **Secrets** (`secrets.ts`): resolves registered keys from SSM Parameter Store at container
+- **Secrets** (`secrets.rs`): resolves registered keys from SSM Parameter Store at container
   start and merges with plain `env` (plain wins on collision).
-- **Volumes** (`docker.ts` `volumeName`/`buildRunArgs`): mounts a service's declared
+- **Volumes** (`docker.rs` `volume_name`/`build_run_args`): mounts a service's declared
   `[[service.volumes]]` as docker named volumes (`launchpadvol_<project>_<service>_<name>`,
   index-independent so the data is re-mounted across rollouts). A `docker rm` leaves the
-  named volume intact, so the data outlives a container replacement. Deploy refuses to
-  schedule a volume-bearing service onto a legacy rust-agent node (see below).
-- **Logs** (`cloudwatch-logs.ts`): reconciles the Amazon CloudWatch Agent config
+  named volume intact, so the data outlives a container replacement.
+- **Logs** (`cloudwatch_logs.rs`): reconciles the Amazon CloudWatch Agent config
   (write-on-change) so container stdout ships to per-service log groups; degraded-safe —
-  logging failures never break reconciliation.
-- **Stats** (`stats.ts`): samples host CPU/memory (`/proc`) and per-container usage,
+  logging failures never break reconciliation. The edge ships agent + caddy system logs.
+- **Stats** (`stats.rs`): samples host CPU/memory (`/proc`) and per-container usage,
   emitting `launchpad.stats` JSON lines (~60s) that reach CloudWatch via the system log
-  group — the data behind `launch-pad node monitor`.
+  group — the data behind `launchpad node monitor`. The latest host sample is also
+  embedded into `status.json` (see above) for `launchpad autoscale`.
 
 ## Configuration (env vars)
 
 | Variable | Purpose |
 | -------- | ------- |
-| `LAUNCHPAD_POLL_MS` | Poll interval (default 5000) |
+| `LAUNCHPAD_POLL_MS` | Poll interval (default 10000) |
 | `LAUNCHPAD_LIVENESS_MS` | Liveness heartbeat cadence (default 30000, clamped ≤ half the stale window) |
 | `LAUNCHPAD_STATS_INTERVAL_MS` | Stats sampling cadence |
+| `LAUNCHPAD_STATS_SERVICES` | `0` disables per-container sampling (app) |
 | `LAUNCHPAD_ONCE` | Run a single tick and exit |
 | `LAUNCHPAD_DEBUG_S3` | Log written-vs-skipped S3 PUTs |
-| `LAUNCHPAD_CADDY_ADMIN` | Caddy admin API address (default localhost:2019) |
-| `LAUNCHPAD_STATE` | State file path override |
+| `LAUNCHPAD_CADDY_ADMIN` | Caddy admin API address (edge; default localhost:2019) |
+| `LAUNCHPAD_STATE` | State file path override (app) |
+| `LAUNCHPAD_AGENT_CONFIG` | agent.json path override |
 
 Node identity (region, nodeId, clusterId, bucket, role) comes from the config file written
-by cloud-init at provision time.
+by cloud-init at provision time — unchanged from the TypeScript agent, so upgrades need no
+re-provisioning.
 
-## Distribution
+## Distribution & migration from the TypeScript agent
 
-The agent is **not on npm**. It is bundled to one self-contained CJS file, uploaded to
-`nodes/<id>/agent.cjs` in S3, fetched via presigned URL by cloud-init on full bootstrap (or
-pre-baked into the [golden AMI](golden-ami.md)), and run under systemd via Node.js.
-`launch-pad node upgrade-agent` publishes a fresh bundle and restarts agents via SSM.
+The agent is **not on npm**. `pnpm build:agent` cross-compiles both binaries for
+linux/amd64 (static musl, ~11 MB each); the CLI uploads the role-appropriate one to
+`nodes/<id>/agent` in S3, where cloud-init curls it via presigned URL on full bootstrap (or
+the [golden AMI](golden-ami.md) pre-bakes it). `launchpad node upgrade-agent` publishes a
+fresh binary and restarts agents via SSM.
 
-Legacy nodes may still have `agentType: "rust"` in their registry entry from an earlier
-release; `node upgrade-agent` migrates them to the TypeScript bundle.
+**Migrating a live TS-agent cluster** (no re-provision needed):
+
+1. Upgrade the CLI and build the binaries (`pnpm install && pnpm build:agent`).
+2. `launchpad node upgrade-agent --yes` — each node downloads the binary for **its** role,
+   the systemd unit is rewritten from `node agent.cjs` to the binary, the stale bundle is
+   removed, and an edge node additionally stops its now-unneeded Docker daemon.
+3. `launchpad deploy` as usual. `launchpad doctor` warns while any node still reports the
+   deprecated `agentType: "ts"`.
+
+Container identity is preserved across the migration: the Rust agent computes
+matching `configStamp` labels and status fingerprints, so the first Rust tick is normally
+a no-op — it does not roll your containers. One narrow exception: a service whose env
+keys / secret names mix digits, underscores, and case such that ICU and byte-wise key
+ordering disagree (e.g. `DB_HOST` + `DB2_HOST`) gets a single zero-downtime rolling
+replace on the first tick, because the old TypeScript agent sorted stamp keys with the
+locale-dependent `localeCompare` while the Rust agent sorts deterministically.
+
+## Testing
+
+`cargo test` (in `packages/agent-rust`, or `pnpm test:agent` from the repo root) runs the
+ported unit suite — the pure planners (`reconcile`, `cron`, `status_write` fingerprints
+with golden hashes, `stats` parsers, `caddy` config + restart detection) are the heavily
+tested seam, mirroring the repo's pure-planner testing convention.

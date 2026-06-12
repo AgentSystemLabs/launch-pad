@@ -1,5 +1,5 @@
 /**
- * launch-pad real-AWS regression for the `launch-pad setup` first-run wizard.
+ * launchpad real-AWS regression for the `launchpad setup` first-run wizard.
  *
  * Fast (no EC2, no Docker): exercises both paths of the bootstrap —
  *  - default cluster:  ensures the account+region state bucket exists (ambient creds, no
@@ -116,7 +116,7 @@ async function main(): Promise<boolean> {
   } finally {
     if (keep) {
       note(`--keep set — leaving cluster "${cluster}" registered. Tear it down later with:`);
-      note(`  LAUNCHPAD_HOME=${home} launch-pad cluster destroy ${cluster} --yes`);
+      note(`  LAUNCHPAD_HOME=${home} launchpad cluster destroy ${cluster} --yes`);
     } else {
       await teardown();
     }

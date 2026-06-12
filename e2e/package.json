@@ -7,11 +7,11 @@
   "scripts": {
     "e2e": "tsx src/run.ts",
     "e2e:scale": "tsx src/scale.ts",
-    "e2e:undeploy": "tsx src/undeploy.ts",
+    "e2e:destroy": "tsx src/destroy.ts",
     "e2e:deploy-changed": "tsx src/deploy-changed.ts",
     "e2e:deploy-image": "tsx src/deploy-image.ts",
     "e2e:rollback": "tsx src/rollback.ts",
-    "e2e:dns": "tsx src/dns-setup.ts",
+    "e2e:remote-build": "tsx src/remote-build.ts",
     "e2e:empty-cluster": "tsx src/empty-cluster.ts",
     "e2e:auto-add": "tsx src/auto-add-node.ts",
     "e2e:setup": "tsx src/setup.ts",
@@ -25,10 +25,18 @@
     "e2e:operator-iam": "tsx src/operator-iam.ts",
     "e2e:rebalance": "tsx src/rebalance.ts",
     "e2e:destroy-evacuate": "tsx src/destroy-evacuate.ts",
+    "e2e:resize-evacuate": "tsx src/resize-evacuate.ts",
+    "e2e:cron": "tsx src/cron.ts",
+    "e2e:autoscale": "tsx src/autoscale.ts",
+    "e2e:destroy-env": "tsx src/destroy-env.ts",
+    "e2e:components": "tsx src/components.ts",
     "typecheck": "tsc --noEmit",
     "test": "echo \"e2e is a live AWS harness — run \\`pnpm e2e\\` (see README)\" && exit 0"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.1061.0",
+    "@aws-sdk/client-codebuild": "^3.1065.0",
+    "@aws-sdk/client-iam": "^3.1059.0",
     "@aws-sdk/client-route-53": "^3.726.0",
     "@aws-sdk/client-s3": "^3.726.0",
     "execa": "^9.5.2"

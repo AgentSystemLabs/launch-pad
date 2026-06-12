@@ -31,7 +31,6 @@ const TWO_SERVICE_TOML = `project = "my-app"
 
 [[service]]
 name = "web"
-node = "node-1"
 cpu = 256
 memory = 256
 replicas = 2
@@ -44,7 +43,6 @@ env = { NODE_ENV = "production" }
 
 [[service]]
 name = "worker"
-node = "node-1"
 cpu = 256
 memory = 512
 replicas = 1
@@ -88,7 +86,6 @@ describe("setServiceNumericField", () => {
 
 [[service]]
 name = "worker"
-node = "n1"
 cpu = 256
 memory = 256
 `);
@@ -124,14 +121,12 @@ describe("readServiceNumericField", () => {
 
 [[service]]
 name = "web"
-node = "n1"
 cpu = 256
 memory = 256
 replicas = 2
 
 [[service]]
 name = "worker"
-node = "n1"
 cpu = 256
 memory = 256
 `);

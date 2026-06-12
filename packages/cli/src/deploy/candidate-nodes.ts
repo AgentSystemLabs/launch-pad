@@ -6,7 +6,9 @@ import {
   allocatableMemory,
   desiredKey,
   nodeRegistryKey,
+  nodeHostsContainers,
   parseDesiredState,
+  parseDesiredStateOrEmpty,
   parseNodeRegistryEntry,
 } from "@agentsystemlabs/launch-pad-shared";
 import type { AwsEnv } from "../aws/context";
@@ -31,21 +33,20 @@ export function demandsOf(services: ServiceConfig[]): CapacityServiceDemand[] {
 export interface CandidateNodes {
   /** Every cluster node by id (all roles) — used to look up an entry when publishing. */
   nodes: Map<string, NodeRegistryEntry>;
-  /** app/both node ids in listNodeIds (S3-lexicographic) order — the schedulable pool. */
+  /** app node ids in listNodeIds (S3-lexicographic) order — the schedulable pool. */
   clusterAppNodeIds: string[];
-  /** The capacity scheduler's view of the schedulable pool (same order). */
+  /** The placement planner's view of the schedulable pool (same order). */
   candidateNodes: CandidateNode[];
 }
 
 /**
- * The capacity scheduler's view of every app/both node in the cluster, in
- * `listNodeIds` (S3-lexicographic) order — load-bearing for `schedule = "even"`, which
- * must match legacy round-robin. Shared by `deploy` and `rebalance` so a placement one
- * plans is feasible for the other. `ownerProject`'s own published services are excluded
- * from each node's committed demand because the caller's publish replaces them.
+ * The cluster placement planner's view of every app node in the cluster, in
+ * `listNodeIds` (S3-lexicographic) order. Shared by `deploy` and `rebalance` so a
+ * placement one plans is feasible for the other. `ownerProject`'s own published services
+ * are excluded from each node's committed demand because the caller's publish replaces them.
  *
- * `needsCapacitySnapshot` reads each node's desired.json for committed demand (only
- * `schedule = "capacity"` needs it; `even` round-robins without it — skip the reads).
+ * `needsCapacitySnapshot` reads each node's desired.json for committed demand (required
+ * for headroom-aware bin-packing — skip only when the caller knows the pool is empty).
  */
 export async function buildCandidateNodes(
   aws: AwsEnv,
@@ -61,7 +62,7 @@ export async function buildCandidateNodes(
     if (!obj) continue;
     const entry = parseNodeRegistryEntry(obj.raw);
     nodes.set(id, entry);
-    if (entry.role !== "app" && entry.role !== "both") continue;
+    if (!nodeHostsContainers(entry.role)) continue;
     clusterAppNodeIds.push(id);
 
     let steadyCpu = 0;
@@ -70,7 +71,9 @@ export async function buildCandidateNodes(
     let maxSurgeMemory = 0;
     if (opts.needsCapacitySnapshot) {
       const desired = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, id));
-      const existing = desired ? parseDesiredState(desired.raw).services : [];
+      const existing = desired
+        ? parseDesiredStateOrEmpty(id, desired.raw, new Date().toISOString()).services
+        : [];
       for (const d of demandsOf(existing.filter((s) => s.project !== ownerProject))) {
         steadyCpu += d.cpu;
         steadyMemory += d.memory;
@@ -80,7 +83,6 @@ export async function buildCandidateNodes(
     }
     candidateNodes.push({
       nodeId: id,
-      role: entry.role,
       allocatableCpu: allocatableCpu(entry),
       allocatableMemory: allocatableMemory(entry),
       steadyCpu,

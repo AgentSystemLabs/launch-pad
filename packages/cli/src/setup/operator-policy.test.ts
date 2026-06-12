@@ -131,6 +131,41 @@ describe("buildOperatorPolicy", () => {
     expect(pass.Condition?.StringEquals?.["iam:PassedToService"]).toBe("ec2.amazonaws.com");
   });
 
+  it("scopes CodeBuild (remote builds) to launch-pad-build-* projects and its role to CodeBuild", () => {
+    const projects = stmt("CodeBuildRemoteBuilds");
+    expect(projects.Action).toEqual(
+      expect.arrayContaining([
+        "codebuild:CreateProject",
+        "codebuild:UpdateProject",
+        "codebuild:DeleteProject",
+        "codebuild:StartBuild",
+        "codebuild:BatchGetBuilds",
+      ]),
+    );
+    expect(resources(projects)).toEqual([
+      `arn:aws:codebuild:${REGION}:${ACCOUNT}:project/launch-pad-build-*`,
+    ]);
+
+    const roles = stmt("IamCodeBuildRole");
+    for (const r of resources(roles)) {
+      expect(r).toBe(`arn:aws:iam::${ACCOUNT}:role/launch-pad-codebuild-*`);
+    }
+
+    const pass = stmt("IamPassCodeBuildRole");
+    expect(pass.Action).toEqual(["iam:PassRole"]);
+    expect(resources(pass)).toEqual([`arn:aws:iam::${ACCOUNT}:role/launch-pad-codebuild-*`]);
+    expect(pass.Condition?.StringEquals?.["iam:PassedToService"]).toBe("codebuild.amazonaws.com");
+
+    // Failure diagnostics read — and cluster destroy deletes — only the build
+    // project's own CloudWatch log group.
+    const logs = stmt("CodeBuildLogs");
+    expect(logs.Action).toEqual(["logs:GetLogEvents", "logs:DeleteLogGroup"]);
+    expect(resources(logs)).toEqual([
+      `arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/aws/codebuild/launch-pad-build-*`,
+      `arn:aws:logs:${REGION}:${ACCOUNT}:log-group:/aws/codebuild/launch-pad-build-*:*`,
+    ]);
+  });
+
   it("restricts AttachRolePolicy to the SSM managed policy ARN", () => {
     const attach = stmt("IamAttachManagedPolicy");
     expect(attach.Action).toEqual(
@@ -162,7 +197,7 @@ describe("buildOperatorPolicy", () => {
     expect(resources(ami)).toEqual([`arn:aws:ssm:${REGION}::parameter/aws/service/*`]);
   });
 
-  it("allows Run Command only for AWS-RunShellScript on launch-pad instances", () => {
+  it("allows Run Command only for AWS-RunShellScript on launchpad instances", () => {
     const run = stmt("SsmRunCommand");
     expect(run.Action).toEqual(expect.arrayContaining(["ssm:SendCommand"]));
     const res = resources(run);
@@ -178,33 +213,15 @@ describe("buildOperatorPolicy", () => {
     expect(kms.Condition?.StringEquals?.["kms:ViaService"]).toBe(`ssm.${REGION}.amazonaws.com`);
   });
 
-  it("scopes CloudWatch Logs reads to the launch-pad namespace", () => {
+  it("scopes CloudWatch Logs reads to the launchpad namespace", () => {
     const logs = stmt("CloudWatchLogsRead");
     expect(logs.Action).toEqual(expect.arrayContaining(["logs:FilterLogEvents"]));
     expect(resources(logs).some((r) => r.includes(":log-group:/launch-pad/"))).toBe(true);
   });
 
-  it("scopes Route53 record changes to hosted zones (global service, no region condition)", () => {
-    // ListHostedZonesByName has no resource-level support — it must be `*` in its own statement.
-    const list = stmt("Route53List");
-    expect(list.Action).toEqual(["route53:ListHostedZonesByName"]);
-    expect(resources(list)).toEqual(["*"]);
-    expect(list.Condition).toBeUndefined();
-
-    const records = stmt("Route53Records");
-    expect(records.Action).toEqual(
-      expect.arrayContaining([
-        "route53:ListResourceRecordSets",
-        "route53:ChangeResourceRecordSets",
-        "route53:GetChange",
-      ]),
-    );
-    const res = resources(records);
-    // Record reads/changes scope to hosted-zone + change ARNs (account-less, region-less).
-    expect(res).toContain("arn:aws:route53:::hostedzone/*");
-    expect(res).toContain("arn:aws:route53:::change/*");
-    // Route53 is global — a RequestedRegion condition would break it, so there must be none.
-    expect(records.Condition).toBeUndefined();
+  it("grants no Route53 permissions (DNS is user-managed)", () => {
+    const actions = (policy().Statement as Stmt[]).flatMap((s) => s.Action);
+    expect(actions.some((a) => a.startsWith("route53:"))).toBe(false);
   });
 
   it("includes sts:GetCallerIdentity", () => {

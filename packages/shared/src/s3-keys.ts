@@ -65,20 +65,68 @@ export function ecrRepositoryName(project: string, service: string): string {
   return `${project}/${service}`;
 }
 
-/** Root prefix for a footprint's per-project state (config baseline, deploy events). */
-function projectPrefix(clusterId: string, ownerProject: string): string {
+/** Root prefix under which every footprint's per-project state lives (for listings). */
+export function projectsPrefix(clusterId: string): string {
   const prefix = clusterId === DEFAULT_CLUSTER ? "" : `${CLUSTERS_PREFIX}${clusterId}/`;
-  return `${prefix}projects/${ownerProject}/`;
+  return `${prefix}projects/`;
+}
+
+/** Root prefix for a footprint's per-project state (config baseline, deploy events). */
+export function projectStatePrefix(clusterId: string, ownerProject: string): string {
+  return `${projectsPrefix(clusterId)}${ownerProject}/`;
+}
+
+/**
+ * Directory under `projects/` holding per-logical-project component indexes.
+ * Leads with `_` so it can never collide with a real footprint owner
+ * (LABEL_REGEX forbids underscores).
+ */
+export const PROJECT_INDEX_DIR = "_index";
+
+/**
+ * Component registry index for one logical project (see shared/src/project-registry.ts).
+ * CLI-only state: maps a project to its deployed components and their owners.
+ */
+export function projectIndexKey(clusterId: string, project: string): string {
+  return `${projectsPrefix(clusterId)}${PROJECT_INDEX_DIR}/${project}.json`;
+}
+
+/** Prefix listing every logical project's component index. */
+export function projectIndexPrefix(clusterId: string): string {
+  return `${projectsPrefix(clusterId)}${PROJECT_INDEX_DIR}/`;
+}
+
+/** Preview-environment marker written by `deploy --env` (see shared/src/preview.ts). */
+export function previewMarkerKey(clusterId: string, ownerProject: string): string {
+  return `${projectStatePrefix(clusterId, ownerProject)}preview.json`;
 }
 
 /** Frozen launch-pad.toml snapshot for post-deploy config locking (per footprint). */
 export function configBaselineKey(clusterId: string, ownerProject: string): string {
-  return `${projectPrefix(clusterId, ownerProject)}config-baseline.json`;
+  return `${projectStatePrefix(clusterId, ownerProject)}config-baseline.json`;
 }
 
 /** Prefix holding a footprint's append-only deploy-history events. */
 export function deployEventsPrefix(clusterId: string, ownerProject: string): string {
-  return `${projectPrefix(clusterId, ownerProject)}events/`;
+  return `${projectStatePrefix(clusterId, ownerProject)}events/`;
+}
+
+/** Prefix holding a footprint's uploaded remote-build contexts (`deploy --remote-build`). */
+export function remoteBuildContextPrefix(clusterId: string, ownerProject: string): string {
+  return `${projectStatePrefix(clusterId, ownerProject)}builds/`;
+}
+
+/**
+ * Key for one service's uploaded docker build context (a tar.gz CodeBuild downloads).
+ * Lives under the cluster's prefix so `cluster destroy`'s sweep removes it.
+ */
+export function remoteBuildContextKey(
+  clusterId: string,
+  ownerProject: string,
+  service: string,
+  tag: string,
+): string {
+  return `${remoteBuildContextPrefix(clusterId, ownerProject)}${service}/${tag}.tar.gz`;
 }
 
 /**

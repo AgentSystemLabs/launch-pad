@@ -1,7 +1,16 @@
+/**
+ * TEST-HARNESS-ONLY Route53 helper. Launch Pad itself never writes DNS — it's
+ * user-managed (point a record/wildcard at the edge's Elastic IP). The full
+ * lifecycle e2e (`run.ts`) provisions a FRESH edge EIP every run, so no pre-set
+ * record can cover it; this helper plays the role of "the user pointing DNS at
+ * the edge" so cert issuance can be exercised unattended. It must never be
+ * imported by product code.
+ */
 import {
   ChangeResourceRecordSetsCommand,
   GetChangeCommand,
   ListHostedZonesByNameCommand,
+  ListResourceRecordSetsCommand,
   Route53Client,
 } from "@aws-sdk/client-route-53";
 
@@ -10,6 +19,8 @@ const stripDot = (s: string): string => s.replace(/\.$/, "");
 export interface Dns {
   /** Find the hosted zone whose name is the longest suffix of `domain`. */
   findZoneId(domain: string): Promise<string>;
+  /** The A record's current values for `name` (empty when no record exists). */
+  currentA(zoneId: string, name: string): Promise<string[]>;
   /** Create/replace an A record `name → ip`. Returns the change id. */
   upsertA(zoneId: string, name: string, ip: string, ttl?: number): Promise<string>;
   /** Delete the A record `name → ip` (no-op if it doesn't exist). */
@@ -39,6 +50,21 @@ export function makeDns(region = "us-east-1"): Dns {
     return zone.id;
   }
 
+  async function currentA(zoneId: string, name: string): Promise<string[]> {
+    const res = await r53.send(
+      new ListResourceRecordSetsCommand({
+        HostedZoneId: zoneId,
+        StartRecordName: name,
+        StartRecordType: "A",
+        MaxItems: 1,
+      }),
+    );
+    const rr = (res.ResourceRecordSets ?? []).find(
+      (r) => r.Type === "A" && stripDot(r.Name ?? "") === stripDot(name),
+    );
+    return (rr?.ResourceRecords ?? []).map((r) => r.Value ?? "").filter((v) => v.length > 0);
+  }
+
   async function change(
     action: "UPSERT" | "DELETE",
     zoneId: string,
@@ -50,7 +76,7 @@ export function makeDns(region = "us-east-1"): Dns {
       new ChangeResourceRecordSetsCommand({
         HostedZoneId: zoneId,
         ChangeBatch: {
-          Comment: "launch-pad e2e",
+          Comment: "launchpad e2e",
           Changes: [
             {
               Action: action,
@@ -95,5 +121,5 @@ export function makeDns(region = "us-east-1"): Dns {
     }
   }
 
-  return { findZoneId, upsertA, deleteA, waitInsync };
+  return { findZoneId, currentA, upsertA, deleteA, waitInsync };
 }

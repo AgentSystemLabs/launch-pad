@@ -7,7 +7,7 @@ the env label **before** the zone label (`ui-<name>.multi…`), not as a sibling
 ```
   multi.agentsystem.dev ────────┐
   api.multi.agentsystem.dev ────┤
-  ui-<name>.multi.agentsystem.dev┼──▶ node-edge (edge) ──VPC──▶ node-app
+  ui-<name>.multi.agentsystem.dev┼──▶ edge node ──VPC──▶ app node
   api-<name>.multi… ────────────┘
 ```
 
@@ -25,7 +25,8 @@ Example: `--env preview` → `ui-preview.multi.agentsystem.dev` and `api-preview
 DNS wildcards cover **one** label. `*.agentsystem.dev` matches `api.multi.agentsystem.dev`
 but **not** `ui-preview.multi.agentsystem.dev` (two labels under `multi`).
 
-Point both at the **edge** Elastic IP from `node create node-edge`:
+Point both at the **edge node's** Elastic IP (printed by `node show <edge-id>` or the
+deploy provisioning panel):
 
 | Type | Name / host | Resolves |
 | ---- | ----------- | -------- |
@@ -56,8 +57,7 @@ Deploy resolves `launch-pad.toml` from **`process.cwd()`**, so run every command
 
 ### 1. Verify auto-provisioning (no EC2 spend)
 
-With **no** `node-edge` / `node-app` in S3 yet, deploy prints a provisioning plan and
-creates nothing:
+With an empty cluster, deploy prints a provisioning plan and creates nothing:
 
 ```bash
 cd examples/edge-1-app-deploy-env-nested-multi-dns
@@ -72,15 +72,15 @@ npx @agentsystemlabs/launch-pad deploy --dry-run
 Expect a panel like:
 
 ```
-+ create node-edge edge · t3.small
-+ create node-app  app · t3.small
++ create edge-1 edge · t3.micro
++ create app-1  app · t3.small
 ```
 
-Edges are planned **before** app nodes (app SG references the edge). If a node already
-exists, you may see `ready` or `resume` instead of `create`. Use `--json` for machine-readable
-`provision.create` / `provision.repair`.
+The edge is planned **before** app nodes (the app SG references the edge). If nodes
+already exist, you may see `ready` or `resume` instead of `create`. Use `--json` for
+machine-readable `provision.create` / `provision.repair`.
 
-To **require** pre-created nodes (old behavior): `deploy --no-create` errors when a node is missing.
+To **require** pre-created nodes: `deploy --no-create` errors when a node is missing.
 
 ### 2. Deploy production (auto-creates missing nodes)
 
@@ -92,7 +92,7 @@ node --import tsx/esm ../../packages/cli/src/index.ts deploy --yes
 - **`--yes`** skips the "provision N node(s)?" prompt (needed in CI; recommended when
   you intend to create instances).
 - Without `--yes`, deploy prompts before launching EC2.
-- Creates `node-edge` then `node-app` if missing; builds/pushes images; writes
+- Creates the edge + app node if missing; builds/pushes images; writes
   `desired.json`; watches `status.json` until the agent converges.
 
 ### 3. Deploy named environments (same nodes, no new infra)
@@ -102,12 +102,13 @@ node --import tsx/esm ../../packages/cli/src/index.ts deploy --env preview --yes
 node --import tsx/esm ../../packages/cli/src/index.ts deploy --env qa --yes
 ```
 
-No extra nodes — only new footprints on `node-app` and new routes on `node-edge`.
+No extra nodes — only new footprints on the app node and new routes on the edge.
 
 ### 4. DNS (after the edge exists)
 
 ```bash
-node --import tsx/esm ../../packages/cli/src/index.ts node show node-edge
+node --import tsx/esm ../../packages/cli/src/index.ts node list
+node --import tsx/esm ../../packages/cli/src/index.ts node show edge-1
 ```
 
 Use the printed **Elastic IP** for the records in [DNS — two records](#dns--two-records-on-the-edge-eip) above.
@@ -126,12 +127,12 @@ curl -s https://ui-preview.multi.agentsystem.dev/
 You can still pre-create nodes; deploy will show `ready` and skip create:
 
 ```bash
-launch-pad node create node-edge --role edge
-launch-pad node create node-app  --role app --edge node-edge
+launchpad node create node-edge --role edge
+launchpad node create node-app  --edge node-edge   # role defaults to "app"
 ```
 
-Footprints `multi`, `multi-preview`, and `multi-qa` coexist on `node-app`. The edge adds
-a route per projected hostname.
+Footprints `multi`, `multi-preview`, and `multi-qa` coexist on the app node. The edge
+adds a route per projected hostname.
 
 ## How the TOML maps to DNS
 

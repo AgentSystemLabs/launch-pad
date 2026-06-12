@@ -1,15 +1,15 @@
 # CLI reference
 
-Install/run via npx (no global install required). Both `launch-pad` and the short alias
-`lpd` are registered as bins.
+Install/run via npx (no global install required). Three bins are registered: `launchpad`,
+`launch-pad`, and the short alias `lpd`.
 
 ```bash
 npx @agentsystemlabs/launch-pad <command>
 ```
 
-Commands: [`init`](#init) · [`doctor`](#doctor) · [`deploy`](#deploy) · [`scale`](#scale) ·
-[`config`](#config) · [`status`](#status) · [`logs`](#logs) · [`secret`](#secret) ·
-[`dns`](#dns) · [`node`](#node) · [`cluster`](#cluster)
+Commands: [`init`](#init) · [`doctor`](#doctor) · [`deploy`](#deploy) · [`destroy`](#destroy) ·
+[`scale`](#scale) · [`config`](#config) · [`status`](#status) · [`logs`](#logs) ·
+[`secret`](#secret) · [`dns`](#dns) · [`node`](#node) · [`project`](#project) · [`cluster`](#cluster)
 
 ## Global options
 
@@ -29,6 +29,10 @@ Available on every command (before or after the subcommand):
 AWS-touching commands print a `cluster: <id>` banner so you always know which cluster a
 command targets.
 
+In `--json` mode a failing command emits `{"error": "...", "hint": "..."}` to **stdout**
+(plus the non-zero exit code) — human-readable stderr logging is suppressed, so this is
+the only way automation sees *why* a command failed.
+
 ---
 
 ## `init`
@@ -36,13 +40,12 @@ command targets.
 Create a `launch-pad.toml` in the current directory.
 
 ```bash
-launch-pad init [options]
+launchpad init [options]
 ```
 
 | Flag | Description |
 | ---- | ----------- |
 | `--name <name>` | Project and service name |
-| `--node <nodeId>` | Target node id |
 | `--domain <domain>` | Public domain (makes this a web service) |
 | `--port <port>` | Container port |
 | `--dockerfile <path>` | Path to Dockerfile (default `./Dockerfile`) |
@@ -64,9 +67,9 @@ Preflight your environment **before** the first deploy (and before any spend). R
 checks and reports `pass` / `warn` / `fail` for each — it provisions nothing.
 
 ```bash
-launch-pad doctor                       # check the default region
-launch-pad doctor --region us-west-2    # check a specific region
-launch-pad doctor --json                # machine-readable (for CI)
+launchpad doctor                       # check the default region
+launchpad doctor --region us-west-2    # check a specific region
+launchpad doctor --json                # machine-readable (for CI)
 ```
 
 | Check | What it verifies |
@@ -80,7 +83,7 @@ launch-pad doctor --json                # machine-readable (for CI)
 
 If AWS credentials/region can't be resolved, the AWS-dependent checks are **skipped** (not
 failed). Exit code is non-zero when any check **fails** (warnings and skips don't fail), so
-`launch-pad doctor` is safe to gate a CI pipeline on.
+`launchpad doctor` is safe to gate a CI pipeline on.
 
 ---
 
@@ -92,9 +95,9 @@ copy-paste IAM + CI templates so you don't have to attach `AdministratorAccess`.
 ### `setup` (first-run wizard)
 
 ```bash
-launch-pad setup                                  # guided default-cluster bootstrap (interactive)
-launch-pad setup --region us-west-2 --yes         # scriptable, no prompts
-launch-pad setup --cluster prod --region us-east-1 --yes   # also set up a named cluster
+launchpad setup                                  # guided default-cluster bootstrap (interactive)
+launchpad setup --region us-west-2 --yes         # scriptable, no prompts
+launchpad setup --cluster prod --region us-east-1 --yes   # also set up a named cluster
 ```
 
 | Flag | Description |
@@ -115,13 +118,13 @@ flags + `--yes`.
 
 Print a **least-privilege IAM policy** for the operator (the human or CI principal that runs
 `launch-pad`). It grants exactly the permissions deploy/provision/manage need, scoped to the
-launch-pad state bucket, ECR repos, the `launch-pad-node-*` IAM roles, `/launch-pad/*` secrets,
+launchpad state bucket, ECR repos, the `launch-pad-node-*` IAM roles, `/launch-pad/*` secrets,
 CloudWatch Logs, and a **single region** (an `aws:RequestedRegion` condition on EC2).
 
 ```bash
-launch-pad setup iam-policy                                  # for your current account + region
-launch-pad setup iam-policy --json > operator-policy.json    # just the document
-launch-pad setup iam-policy --account 111122223333 --region us-west-2   # offline (no AWS call)
+launchpad setup iam-policy                                  # for your current account + region
+launchpad setup iam-policy --json > operator-policy.json    # just the document
+launchpad setup iam-policy --account 111122223333 --region us-west-2   # offline (no AWS call)
 
 # Then create + attach it:
 aws iam create-policy --policy-name launch-pad-operator \
@@ -137,7 +140,7 @@ deploy to. It is sized to fit a single managed policy (≤ 6144 chars). The poli
 so don't hand it to an untrusted principal without adding an IAM permissions boundary.
 
 > Verified end-to-end against real AWS: `pnpm e2e:operator-iam` mints a temp IAM user with
-> **only** this policy and runs a full provision → deploy → undeploy → destroy under it (and
+> **only** this policy and runs a full provision → deploy → destroy under it (and
 > asserts it can't act outside its scope or region).
 
 ### `setup github-oidc`
@@ -147,9 +150,9 @@ CI deploys (GitHub Actions assumes an IAM role via OIDC — no long-lived access
 secrets).
 
 ```bash
-launch-pad setup github-oidc --repo acme/widgets               # branch main (default)
-launch-pad setup github-oidc --repo acme/widgets --branch release
-launch-pad setup github-oidc --repo acme/widgets --json        # both artifacts as one JSON object
+launchpad setup github-oidc --repo acme/widgets               # branch main (default)
+launchpad setup github-oidc --repo acme/widgets --branch release
+launchpad setup github-oidc --repo acme/widgets --json        # both artifacts as one JSON object
 ```
 
 | Option | Effect |
@@ -200,22 +203,26 @@ Build Docker images, push to ECR, and publish desired state to S3. Auto-provisio
 nodes and resumes paused ones (with confirmation unless `--yes`), repairs EC2 console drift
 before publishing, and waits for the agent to report convergence.
 
-For **cluster-auto-placed** services (no `node`/`nodes`), deploy also handles two node-pool
-gaps automatically: it **bootstraps the first node** when the cluster is empty, and **auto-adds
-`app-<n>` nodes** when the current pool can't fit the deploy (e.g. after a replica scale-up) —
-both spend-gated like any provision, and both disabled by `--no-create`.
+Placement is **automatic**: the scheduler bin-packs services across the cluster's app nodes
+by free CPU/memory, and every web domain routes through the cluster's **dedicated edge node**
+(every cluster is at least 2 nodes — the edge + ≥1 app node). Deploy handles the node-pool
+gaps itself: it **bootstraps an empty cluster** (the `edge-1` edge, default `t3.micro`, plus
+a first auto-sized app node) and **auto-adds app nodes** (generated `<noun>-<verb>-<adverb>`
+names) when the current pool can't
+fit the deploy (e.g. after a replica scale-up) — both spend-gated like any provision, and
+both disabled by `--no-create`.
 
 ```bash
-launch-pad deploy [options]
+launchpad deploy [options]
 ```
 
 | Flag | Description |
 | ---- | ----------- |
 | `--service <name>` | Deploy only this service |
 | `--changed <ref>` | Deploy only services whose build context/Dockerfile changed since this git ref (monorepo CI) |
-| `--node <nodeId>` | Override target node for all services |
 | `--env <name>` | Named environment: projects domains + namespaces the footprint |
-| `--no-create` | Fail if a referenced node is missing (also disables empty-cluster bootstrap + capacity auto-add) |
+| `--ttl <duration>` | Env lifetime (`30m`/`72h`/`7d`) — [`destroy --prune-expired`](#destroy) tears the env down after it. Requires `--env` |
+| `--no-create` | Fail if a needed node is missing (disables edge/app bootstrap + capacity auto-add) |
 | `--no-repair` | Fail on EC2 console drift instead of repairing |
 | `--no-recreate` | Repair stopped nodes but fail on terminated instances |
 | `--no-wait` | Don't wait for agent convergence |
@@ -225,16 +232,19 @@ launch-pad deploy [options]
 | `--ami <id>` | AMI id for auto-provisioned/recreated nodes |
 | `--restart` | Skip build/push; re-publish desired state and roll containers |
 | `--image <uri>` | Skip build/push; redeploy an existing ECR tag of one `--service` (rollback / promote) |
+| `--remote-build` | Build images on AWS CodeBuild instead of local docker (slim CI runners) |
 
 ```bash
-launch-pad deploy
-launch-pad deploy --service web --no-wait
-launch-pad deploy --changed origin/main --yes   # CI: deploy only what changed
-launch-pad deploy --env staging
-launch-pad deploy --yes               # CI
-launch-pad deploy --dry-run
-launch-pad deploy --restart --service api   # roll containers after a secret rotation
-launch-pad deploy --service web --image <uri>   # redeploy an existing tag (rollback)
+launchpad deploy
+launchpad deploy --service web --no-wait
+launchpad deploy --changed origin/main --yes   # CI: deploy only what changed
+launchpad deploy --remote-build --yes          # CI runner without a docker daemon
+launchpad deploy --env staging
+launchpad deploy --env pr-123 --ttl 72h --yes  # PR preview that auto-expires
+launchpad deploy --yes               # CI
+launchpad deploy --dry-run
+launchpad deploy --restart --service api   # roll containers after a secret rotation
+launchpad deploy --service web --image <uri>   # redeploy an existing tag (rollback)
 ```
 
 **`--changed <ref>`** is first-class "deploy changed services only" for **monorepos**. It runs
@@ -242,7 +252,7 @@ a git diff between `<ref>` and your working tree (committed, uncommitted, and un
 all count, because they all land in the image a rebuild would push) and deploys only the
 services whose **build inputs** changed — i.e. a changed file lives under the service's docker
 `context` directory, or is its `dockerfile`. Unchanged services keep their previously-published
-image. Wire it into CI as `launch-pad deploy --changed origin/main --yes` (or `--changed
+image. Wire it into CI as `launchpad deploy --changed origin/main --yes` (or `--changed
 ${{ github.event.before }}`). With **no** service changed it's a clean no-op that exits `0`, so
 a docs-only commit doesn't fail the deploy job. Config-only edits (`cpu`/`replicas`/`env` in
 `launch-pad.toml`) are **not** build inputs — use [`scale`](#scale) / [`config set`](#config)
@@ -260,46 +270,137 @@ Container config (`cpu`/`memory`/`replicas`/`env`/`secrets`) still comes from th
 `launch-pad.toml`, so the [config lock](configuration.md#config-lock) applies as usual.
 Re-running with the same image is an idempotent no-op (no container churn). Mutually exclusive
 with `--restart`. ECR keeps every immutable tag, so any prior build is always available to roll
-back to — this is why `undeploy` deliberately leaves images in place.
+back to — this is why `destroy` deliberately leaves images in place.
+
+**`--remote-build`** builds every image on **AWS CodeBuild** instead of local docker — for slim
+CI runners (or laptops) with no docker daemon. Per service, deploy packs the build context into
+a tarball, uploads it under the footprint's `builds/` prefix in the state bucket, and runs one
+build in a per-cluster CodeBuild project (`launch-pad-build-<cluster>`) that produces the
+**same immutable, content-addressed linux/amd64 tag** the local buildx path would. Everything
+after the build — merge, publish, convergence watch — is identical, and an image already in ECR
+skips its build the same way.
+
+The tarball honors `.dockerignore` for what gets **uploaded**: literal paths, root-level globs
+(`*.pem`, `.env*`), and any-depth `**/`-prefixed patterns are excluded from the upload — so the
+glob patterns people guard secrets with keep those files **out of S3**, exactly as docker keeps
+them out of the build. Unsupported glob shapes (and everything, when a `!negation` makes
+exclusion unsafe for the build) upload anyway but are still ignored by docker remotely — the
+full `.dockerignore` ships in the tarball. Anything truly sensitive should not live in the
+build context at all (use `secrets`).
+
+First use creates the CodeBuild project plus a least-privilege service role
+(`launch-pad-codebuild-<cluster>`) that can only read its **own cluster's** `builds/` tarballs
+(never `desired.json`/`status.json`), push to ECR, and write its own build logs;
+`cluster destroy` removes project, role, and log group. The uploaded tarball is deleted after
+each build. The dockerfile must live **inside** its build `context` (the tarball is all
+CodeBuild sees). On a failed build the CLI prints the failing command's log context.
+
+⚠️ **Docker Hub rate limits:** CodeBuild egresses through shared NAT IPs that Docker Hub
+aggressively throttles for anonymous pulls (`429 Too Many Requests` on `FROM node:…`). The
+buildspec retries the build up to 3× with backoff, but for reliable remote builds prefer AWS's
+mirror of the official images — e.g. `FROM public.ecr.aws/docker/library/node:24-alpine` —
+which has no rate limit from CodeBuild.
+
+CodeBuild bills per build minute (small Linux instances; expect ~$0.01–0.03 per typical
+build). Mutually exclusive with `--restart` / `--image`, which skip building entirely. Wire it
+into CI as `launchpad deploy --remote-build --yes`.
+
+**`--env <name>` is a named (parallel) environment** — staging, develop, a PR preview. The footprint becomes
+`<project>-<env>` (coexisting with prod on the same nodes), every web domain is **projected**
+— via the service's `domainPattern` (`{env}`/`{service}` tokens), or by suffixing the first
+label (`app.example.com` → `app-pr-123.example.com`). DNS stays **yours to configure**: one
+wildcard DNS-only A record at the edge's Elastic IP (e.g. `*.example.com → <edge EIP>`)
+covers every projected env subdomain — the deploy's DNS panel prints the exact targets (and
+the wildcard, when a `domainPattern` makes one possible), and
+[`dns verify`](#dns-verify) checks them. Each `--env` deploy also writes an **env marker**
+(`projects/<project>-<env>/preview.json`) recording the env's domains and — with `--ttl` —
+an expiry deadline. [`destroy`](#destroy) operates
+on those markers; `--ttl` on a later re-deploy re-arms the deadline (a re-deploy without
+`--ttl` keeps the existing one).
 
 ---
 
-## `undeploy`
+## `destroy`
 
-The inverse of `deploy`: remove a project — or one of its services — from the nodes it runs
-on. The agent on each node stops the containers on its next poll. This is the sanctioned way
-to drop a service the [config lock](configuration.md#config-lock) otherwise freezes: deleting
-a `[[service]]` block and re-deploying aborts with "service removed", but `undeploy` removes
-it cleanly and **trims the config baseline** so a follow-up `deploy` of the edited
-`launch-pad.toml` passes the lock.
+The inverse of `deploy`: remove a deployment — the whole base footprint, one of its services,
+or a named environment. The agent on each node stops the containers on its next poll.
+Infrastructure teardown stays separate: [`node destroy`](#node-destroy) for EC2 nodes,
+[`cluster destroy`](#cluster) for whole clusters.
+
+This is also the sanctioned way to drop a service the
+[config lock](configuration.md#config-lock) otherwise freezes: deleting a `[[service]]` block
+and re-deploying aborts with "service removed", but `destroy` removes it cleanly and **trims
+the config baseline** so a follow-up `deploy` of the edited `launch-pad.toml` passes the lock.
 
 ```bash
-launch-pad undeploy [options]
+launchpad destroy [options]
 ```
 
 | Flag | Description |
 | ---- | ----------- |
-| `--service <name>` | Undeploy only this service (default: the whole project footprint) |
-| `--env <name>` | Target a named environment footprint (same as `deploy --env`) |
+| `--service <name>` | Destroy only this service (default: the whole project footprint) |
+| `--env <name>` | Destroy a named environment created by `deploy --env`: containers + S3 state |
+| `--project <name>` | With `--env`: scope the env teardown (when several projects share the env name). Alone: destroy **all of the project's components** — every base + env footprint and the component registry (TOML-less). Also filters `--list-envs` |
+| `--component <name>` | Component the env belongs to (when one project's components share an env name; also filters `--list-envs`) |
+| `--list-envs` | List the cluster's environments (project, component, env, expiry, domains) instead of destroying |
+| `--prune-expired` | Destroy every env whose `deploy --ttl` deadline has passed (dry-run without `--yes`; cron-able) |
 | `--purge-secrets` | Also delete the removed services' SSM secrets (irreversible; off by default) |
 | `--no-wait` | Don't wait for the agent to stop the containers |
 | `--timeout <seconds>` | How long to wait for the containers to stop (default `120`) |
-| `--yes` | Skip the confirmation prompt |
+| `--yes` | Skip the confirmation prompt (required with `--json` for `--env` / `--prune-expired`) |
 
 ```bash
-launch-pad undeploy --service worker         # remove one service, keep the rest
-launch-pad undeploy                          # remove the whole footprint
-launch-pad undeploy --env staging --yes      # remove a named-env footprint
-launch-pad undeploy --service api --purge-secrets
+launchpad destroy --service worker          # remove one service, keep the rest
+launchpad destroy                           # remove the whole base footprint
+launchpad destroy --env pr-123 --yes        # tear a PR env down (containers + state)
+launchpad destroy --list-envs               # what environments exist?
+launchpad destroy --prune-expired --yes     # reap every TTL-expired env (cron/CI)
+launchpad destroy --service api --purge-secrets
+launchpad destroy --project shop --yes      # whole logical project: every component + env
+launchpad destroy --project shop --env pr-7 --yes  # one env across ALL of shop's components
 ```
+
+**Base footprint** (no `--env`) requires a `launch-pad.toml` in cwd (or a parent):
 
 - **Single service:** drops it from every node's `desired.json` and trims the baseline to the
   remaining services. Afterward, delete its `[[service]]` block from `launch-pad.toml`.
 - **Whole footprint** (no `--service`): removes every service and **clears the baseline**, so
   the next `deploy` is a fresh first deploy with identity unlocked again.
+- DNS is never touched — it's yours to manage at your provider.
+
+**Named environment** (`--env <name>`) is marker-driven — it works without a
+`launch-pad.toml` in cwd, so a PR-close job can run it from anywhere:
+
+- Undeploys the env's whole footprint, waits for the drain, and sweeps its `projects/` state
+  (marker, deploy events, baseline). DNS is never touched — a wildcard record keeps covering
+  the envs that remain, and per-env records are yours to remove at your provider.
+- Only marker-backed environments are eligible — the base project's footprint can never be
+  destroyed via `--env`, and other footprints co-located on the same nodes are never touched
+  (the teardown reuses the ownership-scoped undeploy planner).
+- `--service <name> --env <name>` removes one service from the env's footprint (needs the
+  `launch-pad.toml`, like a base partial; leaves the marker alone).
+- With components (federated multi-repo deploys), the env teardown is scoped to the cwd
+  TOML's component by default; `--component <name>` disambiguates without a TOML, and an
+  explicit `--project <name> --env <name>` destroys that env across **all** components.
+
+**Whole project** (`--project <name>`, no `--env`) is registry-driven and TOML-less: it
+reads the project's component index (written by every deploy), destroys each component's
+env footprints (marker-driven) and base footprint, sweeps their `projects/` state, and
+finally deletes the index. A partial failure keeps the registry so a retry can finish.
+Other projects' services on shared nodes are never touched.
+
+**`--prune-expired`** is one cron-able reconcile pass (no daemon — same model as
+`autoscale run`): destroy every env whose `--ttl` deadline has passed, keep the rest. Without
+`--yes` it's a dry run that only lists the expired envs. Envs deployed without `--ttl` never
+expire. A failed teardown keeps the env's marker, so the next pass retries it. In `--json`
+mode it requires `--yes` (it destroys environments — automation must be explicit).
+
+- **ECR images are kept** in every mode — immutable + content-addressed, they cost almost
+  nothing and preserve rollback. **SSM secrets are kept** unless you pass `--purge-secrets`.
 - Another project's services on the same node are never touched (ownership-scoped merge).
-- **ECR images are kept** — immutable + content-addressed, they cost almost nothing and
-  preserve rollback. **SSM secrets are kept** unless you pass `--purge-secrets`.
+- Typical PR wiring: the PR workflow deploys with `--env pr-<n> --ttl 72h`; a scheduled
+  workflow runs `destroy --prune-expired --yes --json`; the PR-close job runs
+  `destroy --env pr-<n> --yes`.
 
 ---
 
@@ -311,7 +412,7 @@ published image, finds the build pushed just before it (by ECR push time), and r
 place (health-gated, zero-downtime).
 
 ```bash
-launch-pad rollback [options]
+launchpad rollback [options]
 ```
 
 | Flag | Description |
@@ -325,9 +426,9 @@ launch-pad rollback [options]
 | `--yes` | Skip the confirmation prompt |
 
 ```bash
-launch-pad rollback --service web              # to the previous build
-launch-pad rollback --service web --to sha-abc123
-launch-pad rollback --service web --dry-run    # preview from → to
+launchpad rollback --service web              # to the previous build
+launchpad rollback --service web --to sha-abc123
+launchpad rollback --service web --dry-run    # preview from → to
 ```
 
 - The auto-pick is the most-recent build **strictly older** than what's deployed; if there's
@@ -345,7 +446,7 @@ footprint) recording who deployed, when, which image per service, how it ran (`b
 `restart` / `image`), and whether it converged.
 
 ```bash
-launch-pad history [options]
+launchpad history [options]
 ```
 
 | Flag | Description |
@@ -355,9 +456,9 @@ launch-pad history [options]
 | `--limit <n>` | How many deploys to show (default `10`) |
 
 ```bash
-launch-pad history                       # the last 10 deploys
-launch-pad history --service web --limit 20
-launch-pad history --env staging
+launchpad history                       # the last 10 deploys
+launchpad history --service web --limit 20
+launchpad history --env staging
 ```
 
 History is **advisory** — an audit trail and a hint for which tags `rollback` can target — and
@@ -371,14 +472,18 @@ values), and live under `…/projects/<footprint>/events/`.
 Show service status from each node's `status.json` in S3.
 
 ```bash
-launch-pad status [options]
+launchpad status [options]
 ```
 
 | Flag | Description |
 | ---- | ----------- |
-| `--node <nodeId>` | Only this node (default: nodes in `launch-pad.toml`) |
+| `--node <nodeId>` | Only this node (default: the nodes the footprint is deployed on) |
 | `--env <name>` | Only this environment's footprint (`<project>-<env>`) |
 | `--watch` | Re-poll until interrupted |
+
+A **scheduled (cron) service** reports a `cron` rollup per service — `lastRunAt`,
+`lastExitCode`, `nextRunAt` — and stays state `running` while armed between fires (a failed
+run surfaces through the exit code and message, not an `error` state).
 
 ---
 
@@ -388,7 +493,7 @@ Stream a service's logs from CloudWatch, merged across all nodes/replicas. Run f
 project directory (`launch-pad.toml` resolves the project).
 
 ```bash
-launch-pad logs <service> [options]
+launchpad logs <service> [options]
 ```
 
 | Flag | Description |
@@ -407,9 +512,9 @@ Store sensitive values in **SSM Parameter Store** (SecureString). Key names are 
 in `launch-pad.toml`; values never land in git or S3 `desired.json`.
 
 ```bash
-launch-pad secret set DATABASE_URL --service api    # hidden prompt (or stdin / --value)
-launch-pad secret list --service api                # names only, never values
-launch-pad secret rm DATABASE_URL --service api
+launchpad secret set DATABASE_URL --service api    # hidden prompt (or stdin / --value)
+launchpad secret list --service api                # names only, never values
+launchpad secret rm DATABASE_URL --service api
 ```
 
 | Flag | Description |
@@ -424,16 +529,16 @@ SSM path layout: `/launch-pad/<cluster>/<ownerProject>/<service>/<KEY>`
 After rotating a secret, roll containers without rebuilding:
 
 ```bash
-launch-pad deploy --restart --service api
+launchpad deploy --restart --service api
 ```
 
 **Operator IAM** (not auto-provisioned): your local AWS profile needs `ssm:PutParameter`,
 `ssm:GetParameter`, `ssm:GetParameters`, `ssm:GetParametersByPath`, `ssm:DeleteParameter`,
 and `ssm:DescribeParameters` on `arn:aws:ssm:<region>:<account>:parameter/launch-pad/*`.
 
-**Node IAM:** app/both agents need `ssm:GetParameter` + `ssm:GetParameters` on the same
+**Node IAM:** app agents need `ssm:GetParameter` + `ssm:GetParameters` on the same
 prefix. New nodes get this automatically; on existing nodes run
-`launch-pad node upgrade-agent` (refreshes the IAM policy) before the first secrets deploy.
+`launchpad node upgrade-agent` (refreshes the IAM policy) before the first secrets deploy.
 
 ---
 
@@ -445,11 +550,11 @@ edits `launch-pad.toml` in place, then runs `deploy --service <name>` so the cha
 out health-gated and zero-downtime.
 
 ```bash
-launch-pad scale replicas web 3        # scale to 3 replicas and roll it out
-launch-pad scale cpu web 512 --yes     # 512 vCPU shares (1024 = 1 vCPU)
-launch-pad scale memory worker 1024    # 1024 MB
-launch-pad scale replicas web 5 --no-deploy   # edit launch-pad.toml only
-launch-pad scale replicas web 5 --dry-run     # preview; change nothing
+launchpad scale replicas web 3        # scale to 3 replicas and roll it out
+launchpad scale cpu web 512 --yes     # 512 vCPU shares (1024 = 1 vCPU)
+launchpad scale memory worker 1024    # 1024 MB
+launchpad scale replicas web 5 --no-deploy   # edit launch-pad.toml only
+launchpad scale replicas web 5 --dry-run     # preview; change nothing
 ```
 
 | Flag | Description |
@@ -459,6 +564,9 @@ launch-pad scale replicas web 5 --dry-run     # preview; change nothing
 | `--yes` | Skip confirmation prompts (e.g. for provisioning a scale-up needs) |
 | `--no-wait` | Don't wait for the agent to report convergence |
 | `--timeout <seconds>` | How long to wait for convergence |
+
+`scale replicas` refuses a **scheduled (cron) service** — a cron job runs exactly one
+container per fire (`scale cpu`/`memory` work normally).
 
 A scale-up that needs more room than the node has fails the capacity admission check (the
 same one `deploy` runs) — raise the node's instance type or move services first.
@@ -472,10 +580,10 @@ as `scale`; for secrets use [`secret`](#secret), for replicas/cpu/memory use
 [`scale`](#scale).
 
 ```bash
-launch-pad config set web FEATURE_FLAGS=beta      # set an env var + roll it out
-launch-pad config set web LOG_LEVEL=debug --yes
-launch-pad config unset web FEATURE_FLAGS         # remove it + roll it out
-launch-pad config set web LOG_LEVEL=debug --no-deploy   # edit only
+launchpad config set web FEATURE_FLAGS=beta      # set an env var + roll it out
+launchpad config set web LOG_LEVEL=debug --yes
+launchpad config unset web FEATURE_FLAGS         # remove it + roll it out
+launchpad config set web LOG_LEVEL=debug --no-deploy   # edit only
 ```
 
 | Flag | Description |
@@ -494,16 +602,16 @@ env key that's also declared as a `secret` aborts the deploy (keep secret values
 
 ## `rebalance`
 
-Replan a footprint's **cluster-placed** services (those that omit `node`/`nodes`, scheduled by
-`schedule`/`topology`) across the **current** app pool and republish to match — reusing each
-service's already-published image (no rebuild). Use it after adding an app node (to spread load
-onto it) or before removing one. Pinned (`node`/`nodes`) services never move — their placement
-is frozen by the [config lock](configuration.md#config-lock).
+Replan **all** of a footprint's services across the **current** app pool and republish to
+match — reusing each service's already-published image (no rebuild). Use it after adding an
+app node (to spread load onto it) or before removing one. The one exception is a
+**volume-bearing service**: its placement is sticky (its data lives on one node's disk), so
+it never moves.
 
 ```bash
-launch-pad rebalance --dry-run            # preview the moves
-launch-pad rebalance --yes                # apply them
-launch-pad rebalance --drain node-prod-2  # evacuate the footprint OFF a node
+launchpad rebalance --dry-run            # preview the moves
+launchpad rebalance --yes                # apply them
+launchpad rebalance --drain node-prod-2  # evacuate the footprint OFF a node
 ```
 
 | Flag | Description |
@@ -514,17 +622,94 @@ launch-pad rebalance --drain node-prod-2  # evacuate the footprint OFF a node
 | `--yes` | Skip the confirmation prompt |
 
 Run from the project directory. Rebalance is **config-lock-safe**: the `launch-pad.toml` must
-match the deployed baseline — only the placement (re-derived from `schedule`/`topology` over the
-live pool) changes. It re-runs the same scheduler `deploy` uses, so a planned move always passes
-the capacity admission check.
+match the deployed baseline — only the placement (re-planned over the live pool) changes. It
+re-runs the same scheduler `deploy` uses, so a planned move always passes the capacity
+admission check.
 
 Convergence is **eventual**: rebalance republishes desired state and each node's agent
 reconciles on its next poll (it publishes nodes that gain replicas before nodes that shed them,
 but doesn't health-gate across nodes the way a single-node rolling update does). Don't run it
 concurrently with a `deploy`/`scale` of the same footprint; a re-run reconciles any interleaving
 safely (it's idempotent — a balanced footprint reports "already balanced" and writes nothing).
-`--drain` refuses if a **pinned** service targets the node (it can't move) and refuses to drain
-the last app node.
+`--drain` refuses if a **volume-bearing** service lives on the node (its data can't move) and
+refuses to drain the last app node.
+
+---
+
+## `autoscale`
+
+Reactive node-pool autoscaling: a **declarative policy** (min/max app nodes + CPU/memory
+utilization thresholds) stored in the cluster's `cluster.json`, applied by a one-shot
+**reconcile pass** — there is no daemon, matching the no-control-plane design. Cron
+`autoscale run` (locally, CI, or a scheduled workflow) for hands-off scaling.
+
+```bash
+launchpad autoscale set --min 1 --max 3            # save the policy (cluster.json)
+launchpad autoscale show                           # print it
+launchpad autoscale run --dry-run                  # what would happen right now?
+launchpad autoscale run --yes                      # apply at most ONE scale action
+launchpad autoscale off                            # disable (clears the policy)
+```
+
+### `autoscale set`
+
+| Flag | Description |
+| ---- | ----------- |
+| `--min <n>` | Minimum app nodes — maintained even when idle (required) |
+| `--max <n>` | Maximum app nodes — utilization never grows past this (required) |
+| `--scale-out-percent <p>` | Scale out when **average** pool CPU *or* memory ≥ this % (default 80) |
+| `--scale-in-percent <p>` | Scale in when **every** node's CPU *and* memory are below this % (default 30) |
+| `--cooldown <seconds>` | Minimum seconds between utilization-driven actions (default 300) |
+
+The thrash guard requires `scale-in % < scale-out %`. Policy lives in `cluster.json`, so
+autoscale needs a **named cluster** (the implicit `default` cluster has none).
+
+### `autoscale run`
+
+One reconcile pass: read the policy, observe the live pool (registry + each node's
+`status.json` **host utilization sample**, which the agent embeds every stats interval),
+ask the pure planner for at most **one** action, apply it, record `lastScaleAt`, exit.
+
+- **Scale out** — provisions a new app node with a generated name (sized like the largest node already
+  in the pool, floor `t3.small`; always role `app` behind the cluster's edge) and
+  rebalances the project's services onto the new pool. Triggered by the
+  `minNodes` floor (which bypasses the cooldown) or by average utilization ≥ the
+  scale-out threshold (never past `maxNodes`).
+- **Scale in** — drains the least-utilized node via the rebalance machinery, **waits
+  for the survivors to converge**, then gives the victim's agent a drain-grace window
+  (graceful container stop + upstream-shard retraction) before terminating it. It
+  refuses to touch the cluster's edge, refuses if the node still hosts *any*
+  service after the drain (another project's, or a volume-bearing one — autoscale never
+  orphans workloads), refuses to act when any pool node is missing fresh metrics (a node it
+  can't see is assumed busy), and only picks a victim whose **reserved footprint the
+  survivors can absorb** — low live utilization never overrides the capacity admission
+  check (`cpu`/`memory` are reservations); when no drainable node fits, the pass
+  reports why and does nothing.
+
+Before applying an action, the pass **CAS-claims** `lastScaleAt` in `cluster.json`
+(conditional PUT): two overlapping runs can't both act — the loser aborts having changed
+nothing — and a pass that fails mid-action leaves the cooldown in place, so a cron retry
+can't launch instances every interval. Like `rebalance`, avoid running it concurrently
+with a `deploy`/`scale` of the same footprint.
+
+| Flag | Description |
+| ---- | ----------- |
+| `--env <name>` | Environment footprint (same as `deploy --env`) |
+| `--dry-run` | Report the planned action without changing anything |
+| `--yes` | Skip the confirmation prompts — **required** for billable/destructive actions in `--json`/cron mode |
+| `--timeout <seconds>` | Scale-in drain convergence timeout (default 300) |
+
+Run it from the project directory (the rebalance step needs `launch-pad.toml`); `--dry-run`
+and no-op passes work from anywhere. Example cron line:
+
+```
+*/5 * * * *  cd /path/to/project && launchpad autoscale run --yes --cluster prod
+```
+
+Utilization comes from the host sample each agent publishes in its `status.json`
+(CPU busy % and memory used % of the whole host, refreshed every `LAUNCHPAD_STATS_INTERVAL_MS`,
+60s default). Samples older than 5 minutes — or from a node whose heartbeat is stale — are
+ignored, which blocks scale-in entirely (conservative) and simply shrinks the scale-out average.
 
 ---
 
@@ -532,41 +717,18 @@ the last app node.
 
 DNS is the most common thing standing between a deploy and working HTTPS: Let's Encrypt's
 HTTP-01 challenge only succeeds if the domain's A record points **directly** at the node's
-Elastic IP. `dns setup` writes that record for you (Route53), and `dns verify` checks it.
-
-### `dns setup`
-
-If your domain is hosted in **AWS Route53**, `dns setup` creates/updates a **DNS-only** A
-record for every web service in the project, pointing each domain at the Elastic IP of the
-node that fronts it (its edge, or its co-located node). Records are never proxied, so HTTP-01
-issuance works. Run it from the project directory, typically right after a deploy.
-
-```bash
-launch-pad dns setup                       # all web services → their fronting node's EIP
-launch-pad dns setup --service web --wait  # one service, block until Route53 is INSYNC
-launch-pad dns setup --env staging --yes   # an environment footprint, no prompt (CI)
-```
-
-| Flag | Description |
-| ---- | ----------- |
-| `--service <name>` | Only set up DNS for this service |
-| `--env <name>` | Environment footprint (same as `deploy --env`) |
-| `--ttl <seconds>` | Record TTL in seconds (default 60) |
-| `--wait` | Block until Route53 reports the change `INSYNC` |
-| `--yes` | Skip the confirmation prompt (required in CI / `--json` writes) |
-
-It shows the plan first and asks before writing (skip with `--yes`). A record that already
-points at the right IP is reported `already set` and left untouched (idempotent). Domains
-**not** owned by a Route53 hosted zone are **skipped** (with a non-zero exit) — for Cloudflare
-or another registrar, add a grey-cloud A record there by hand, then `dns verify`. Requires the
-operator policy from `setup iam-policy` (it grants the needed `route53:*` actions).
+Elastic IP. **DNS is yours to configure** — point each web domain (or a wildcard like
+`*.example.com`, which covers every `deploy --env` subdomain too) as an A record at your
+edge node's Elastic IP, at any DNS provider. Every
+deploy prints the exact targets in its DNS panel; `dns verify` is the CI-friendly check that
+you got it right.
 
 ### `dns verify`
 
 ```bash
-launch-pad dns verify app.example.com               # look up the expected EIP from the project
-launch-pad dns verify app.example.com --expect 54.210.10.20   # check any domain, no project needed
-launch-pad dns verify app-staging.example.com --env staging
+launchpad dns verify app.example.com               # look up the expected EIP from the project
+launchpad dns verify app.example.com --expect 54.210.10.20   # check any domain, no project needed
+launchpad dns verify app-staging.example.com --env staging
 ```
 
 | Flag | Description |
@@ -576,17 +738,16 @@ launch-pad dns verify app-staging.example.com --env staging
 | `--expect <ip>` | Compare against this IPv4 directly (skips the cluster registry lookup) |
 
 Run from the project directory so the expected Elastic IP can be looked up from the cluster
-registry (the edge node that fronts the domain, or its co-located node). It reports one of:
+registry (the edge node that fronts the domain). It reports one of:
 
 | Status | Meaning |
 | ------ | ------- |
 | `ok` | The A record points at the node's Elastic IP — HTTPS can issue. |
-| `wrong-ip` | Resolves, but to a different IP than the fronting node's EIP. |
-| `cloudflare-proxied` | The A record is a **Cloudflare proxy** IP (orange cloud) — this blocks HTTP-01. Switch the record to **DNS-only** (grey cloud). |
+| `wrong-ip` | Resolves, but to a different IP than the edge's EIP (e.g. a proxy/CDN sits in front — the record must resolve directly to the edge). |
 | `no-records` | No A record (NXDOMAIN or not created yet). |
 | `no-expected-ip` | Resolved fine, but the expected EIP couldn't be determined (run from the project dir or pass `--expect`). |
 
-Exit code is non-zero for `wrong-ip`, `cloudflare-proxied`, and `no-records` so it's scriptable
+Exit code is non-zero for `wrong-ip` and `no-records` so it's scriptable
 in CI. Every `deploy` now also prints a **DNS panel** with each domain's A-record target.
 
 ---
@@ -595,24 +756,49 @@ in CI. Every `deploy` now also prints a **DNS panel** with each domain's A-recor
 
 Manage EC2 nodes — the machines that run your services.
 
-### `node create <name>`
+### `node create [name]`
 
-Provision an EC2 instance, bootstrap the agent, and register the node.
+Provision an EC2 instance, bootstrap the agent, and register the node. The name is
+optional — when omitted, a generated `<noun>-<verb>-<adverb>` id (e.g. `dog-runs-fast`,
+unique within the cluster) is used, so you never have to invent node names.
 
 | Flag | Description |
 | ---- | ----------- |
 | `--instance-type <type>` | EC2 instance type (default `t3.small`) |
-| `--role <role>` | `app`, `edge`, or `both` (default `both`) |
+| `--role <role>` | `app` or `edge` (default `app`) |
 | `--edge <nodeId>` | For an `app` node: the edge that routes to it |
 | `--key-name <keypair>` | EC2 key pair for SSH (omit to disable SSH) |
 | `--ami <id>` | AMI id (default: Launch Pad golden AMI, falling back to latest Amazon Linux 2023) |
 | `--agent-version <semver>` | Agent version to install |
+| `--amount <n>` | Create `n` nodes — generated names when `[name]` is omitted; sequential ids from an explicit base (`app` → `app-1`…`app-n`) |
 | `--dry-run` | Show plan without creating anything |
 | `--yes` | Skip launch confirmation |
 
+An `app` node **needs an edge**: explicit `--edge` wins, else the cluster's `defaultEdge`
+(set via [`cluster set-edge`](#cluster-set-edge-name-nodeid)) — with neither, the create is
+refused. App nodes are VPC-private (no public IP); an `edge` node gets the public 80/443 +
+Elastic IP.
+
 ### `node list`
 
-List registered nodes with capacity and heartbeat age.
+List registered nodes with capacity and heartbeat age. Prefixes in S3 with no `node.json`
+show as `missing node.json` — leftover state from a partial destroy or failed provision.
+
+### `node prune`
+
+Remove orphaned S3 node prefixes that have objects but no `node.json` registry entry. Safe to
+run after destroying nodes; it only sweeps state that `node list` would show as
+`missing node.json`.
+
+| Flag | Description |
+| ---- | ----------- |
+| `--yes` | Skip the confirmation prompt |
+
+```bash
+launchpad node prune --yes
+```
+
+Re-running `node destroy <name>` on an already-destroyed node also sweeps any leftover prefix.
 
 ### `node show <name>`
 
@@ -622,14 +808,15 @@ Show registry entry, desired state, and live status for one node.
 
 Fully tear down the node(s) (comma- or space-separated ids): terminate the instance, release
 the Elastic IP, delete the security group, **delete the per-node IAM role + instance profile**,
-and remove its S3 state. Deleting IAM is best-effort + idempotent and only ever touches the
+and remove its full S3 prefix (`node.json`, `desired.json`, `status.json`, the agent binary,
+`upstream/*`, etc.). Deleting IAM is best-effort + idempotent and only ever touches the
 `launch-pad-node-<cluster>-<node>`-named resources (a legacy shared role is left alone).
 
 | Flag | Description |
 | ---- | ----------- |
 | `--yes` | Skip the confirmation prompt |
 | `--force` | Destroy even if the node still hosts services (they will be **orphaned**) |
-| `--evacuate` | First move the current project's cluster-placed services off the node(s), wait for them to come up elsewhere, **then** destroy |
+| `--evacuate` | First move the current project's services off the node(s), wait for them to come up elsewhere, **then** destroy |
 | `--env <name>` | Target a named environment footprint for `--evacuate` (same as `deploy --env`) |
 | `--timeout <seconds>` | How long `--evacuate` waits for the moved replicas to converge (default 300) |
 
@@ -638,61 +825,87 @@ destroying it would orphan their containers (no node reconciles them anymore). T
 which `project/service`s are at risk. Three ways forward:
 
 - **`--evacuate`** (one-shot, recommended) — run it from your project directory and it auto-moves
-  this project's **cluster-placed** services onto the rest of the app pool (= `node evacuate`),
-  **waits** for them to be running there, then tears the node down. Pinned (`node`/`nodes`)
-  services and **other projects'** services can't be auto-moved; if any remain the destroy still
+  this project's services onto the rest of the app pool (= `node evacuate`),
+  **waits** for them to be running there, then tears the node down. **Volume-bearing**
+  services (their data lives on the node's disk) and **other projects'** services can't be
+  auto-moved; if any remain the destroy still
   refuses (evacuate those projects too, or add `--force`). Draining every node — or a node whose
   drain would leave the cluster with no app nodes — can't relocate the replicas, so it refuses.
   It never terminates the node until the footprint is confirmed up elsewhere (a stuck convergence
   aborts with nothing torn down).
-- **manual** — `node evacuate <name>` first, watch `launch-pad status`, then re-run destroy.
+- **manual** — `node evacuate <name>` first, watch `launchpad status`, then re-run destroy.
 - **`--force`** — destroy now and orphan whatever is still scheduled there.
 
 ```bash
-launch-pad node destroy app-2 --evacuate --yes   # evacuate this project's services, then destroy
-launch-pad node destroy app-2 --force --yes       # destroy now, orphan its services
+launchpad node destroy app-2 --evacuate --yes   # evacuate this project's services, then destroy
+launchpad node destroy app-2 --force --yes       # destroy now, orphan its services
 ```
 
 To tear down a whole cluster at once, use [`cluster destroy`](#cluster-destroy-name).
 
 ### `node evacuate <name>`
 
-Move the current project's **cluster-placed** services OFF a node — the safe pre-step to
+Move the current project's services OFF a node — the safe pre-step to
 `node pause`/`destroy`/`resize`. Run from the project directory; it replans the footprint across
 the rest of the app pool (reusing each service's published image) so the node is freed. It is
 exactly [`rebalance --drain <name>`](#rebalance) scoped to the current project.
 
 ```bash
-launch-pad node evacuate node-prod-2 --dry-run
-launch-pad node evacuate node-prod-2 --yes
+launchpad node evacuate node-prod-2 --dry-run
+launchpad node evacuate node-prod-2 --yes
 ```
 
-Pinned (`node`/`nodes`) services **can't** be evacuated — their placement is config-locked, so
-evacuate refuses if the project pins a service to the node (undeploy it or recreate the
-footprint to move it). A node hosting **other projects** needs each of them evacuated too (run
-it from each project dir). Once `launch-pad status` shows the node drained, `node destroy`/`pause`
+**Volume-bearing** services **can't** be evacuated — their placement is sticky (the data
+lives on that node's disk), so evacuate refuses if one lives on the node (destroy it or
+recreate the footprint to move it). A node hosting **other projects** needs each of them evacuated too (run
+it from each project dir). Once `launchpad status` shows the node drained, `node destroy`/`pause`
 will accept it. To evacuate **and** destroy in one step (with the drain wait built in), use
 [`node destroy --evacuate`](#node-destroy-names).
 
 ### `node pause <name>` / `node resume <name>`
 
-Stop the EC2 instance to save cost / start it back up. Edge and both-role nodes keep their
-Elastic IP and disk while paused.
+Stop the EC2 instance to save cost / start it back up. The edge node keeps its Elastic IP
+and disk while paused.
 
 ### `node resize <name>`
 
-Change a node's EC2 instance type (stops + starts it — brief downtime).
+Change a node's EC2 instance type. EC2 can only retype a **stopped** instance, so a plain
+resize is stop → modify → start — the node's services are briefly down during the swap. A
+paused node stays paused at the new size; shrinking is blocked when the node's scheduled
+services (plus rollout surge) no longer fit; an edge node's Elastic IP survives the cycle.
+
+`--evacuate` makes it **non-disruptive** for the current project's services
+(run from the project directory): it drains them onto the rest of the app pool (=
+[`node evacuate`](#node-evacuate-name)), **waits** for them to be confirmed running
+elsewhere, resizes the emptied node, then rebalances back and waits again — so a replica is
+never down with the instance. It needs another app node with room; it refuses a paused node
+(nothing running to protect) and a node hosting a **volume-bearing** service (its data can't
+move — plain resize is the path there). Other projects' services on the node still ride the
+brief stop/start, and resizing the **edge** node still blips ingress while Caddy restarts.
 
 | Flag | Description |
 | ---- | ----------- |
 | `--instance-type <type>` | Target instance type (required) |
-| `--dry-run` | Show the from→to change only |
+| `--evacuate` | Drain this project's services first, resize, rebalance back (no downtime for them) |
+| `--env <name>` | Environment footprint for `--evacuate` (same as `deploy --env`) |
+| `--timeout <seconds>` | How long `--evacuate` waits for each convergence (default 300) |
+| `--dry-run` | Show the from→to change (and whether it would drain) only |
 | `--yes` | Skip confirmation |
+
+```bash
+launchpad node resize node-prod-1 --instance-type t3.large                  # brief downtime
+launchpad node resize node-prod-1 --instance-type t3.large --evacuate --yes # rolling, no downtime
+```
 
 ### `node upgrade-agent [name]`
 
-Upload a fresh agent bundle to S3 and install it on running instance(s) via SSM (with
-manual fallback). With no name, upgrades every node in the cluster.
+Upload the **role-specific Rust agent binary** to S3 and install it on running
+instance(s) via SSM (with manual fallback). With no name, upgrades every node in the
+cluster. Each node gets the binary for **its** role (edge → Caddy router, app → Docker
+reconciler), and the registry records `agentType: "rust"`. A node still on the legacy
+TypeScript agent is migrated in place — the systemd unit is rewritten to run the binary,
+the old bundle is removed, and an edge node also stops its now-unneeded Docker daemon —
+no re-provisioning. (Build the binaries first: `pnpm build:agent`.)
 
 | Flag | Description |
 | ---- | ----------- |
@@ -708,8 +921,8 @@ targets every node in the cluster. `--dry-run` / `--yes` as above.
 
 ### `node reconcile [name]`
 
-Repair EC2 console drift: start stopped nodes, replace terminated ones (same node id;
-edge/both keep their Elastic IP). `deploy` runs this automatically unless `--no-repair`.
+Repair EC2 console drift: start stopped nodes, replace terminated ones (same node id; the
+edge keeps its Elastic IP). `deploy` runs this automatically unless `--no-repair`.
 
 | Flag | Description |
 | ---- | ----------- |
@@ -738,6 +951,43 @@ profile; historic mode needs only `logs:FilterLogEvents`.
 
 ---
 
+## `project`
+
+Inspect deployed project footprints in the active cluster (from each node's published
+`desired.json` — declarative placement, not live container health). Use [`status`](#status)
+for agent-reported rollout state.
+
+```bash
+launchpad project list [options]
+launchpad project show <name> [options]
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `--env <name>` | Named environment footprint (`project show` only; same as `deploy --env`) |
+
+Examples:
+
+```bash
+launchpad project list --cluster prod
+launchpad project show auth-example --cluster prod
+launchpad project show auth-example --cluster prod --env pr-123
+```
+
+`project list` shows every base footprint and every marker-backed environment in the
+cluster, with service counts and node ids. `project show` drills into one footprint:
+services, image tags, domains, cron schedules, and which nodes each service is scheduled on.
+Named environments also show TTL/expiry and projected domains from the env marker.
+
+**Federated projects** (TOMLs declaring a `component` — see
+[configuration](configuration.md)): `project list` labels each footprint with its
+component (`shop · auth`, `shop · notes`), and `project show <project>` aggregates the
+whole logical project from the component registry — one panel per component, with
+`--env <name>` projecting every component's env footprint. Components with no deployed
+footprint for the requested env show as empty rather than erroring.
+
+---
+
 ## `cluster`
 
 Manage named clusters — scoped groups of nodes that share an edge (and optionally an AWS
@@ -761,12 +1011,16 @@ List locally configured clusters from `~/.launch-pad/config.toml`.
 
 ### `cluster show <name>`
 
-Show cluster config, AWS account/region, and member nodes.
+Show cluster config, AWS account/region, member nodes, every service scheduled on
+each node (from its published `desired.json` — the declarative source of truth, not live
+container status), and every named environment created by `deploy --env` with its
+services and node placement. Use [`status`](#status) when you need agent-reported health
+and image rollout state.
 
 ### `cluster set-edge <name> <nodeId>`
 
 Set the cluster's default edge (the Caddy router for its web services). The node must have
-role `edge` or `both`.
+role `edge`.
 
 ### `cluster use <name>` (aliases: `switch`, `target`)
 
@@ -779,8 +1033,8 @@ Show the cluster future commands will target (account, region, profile).
 
 ### `cluster pause <name>` / `cluster resume <name>`
 
-Stop every node in the cluster to save money / start them back up (edge first, then app
-nodes). Edge/both nodes keep their Elastic IP + disk. `--yes` skips confirmation.
+Stop or start every node in the cluster concurrently to save money / bring it back up.
+The edge keeps its Elastic IP + disk. `--yes` skips confirmation.
 
 ### `cluster destroy <name>`
 
@@ -796,9 +1050,9 @@ control-plane database to back up). `backup` exports a cluster's state to a loca
 `restore` re-uploads it.
 
 ```bash
-launch-pad backup                                  # export the default cluster's state
-launch-pad backup --cluster prod --out ./prod-backup
-launch-pad restore ./prod-backup --yes             # re-upload (overwrites existing state)
+launchpad backup                                  # export the default cluster's state
+launchpad backup --cluster prod --out ./prod-backup
+launchpad restore ./prod-backup --yes             # re-upload (overwrites existing state)
 ```
 
 | Command | Description |
@@ -820,10 +1074,10 @@ Estimate the cluster's **ongoing monthly cost** from its registry — the runnin
 on-demand EC2 + agent S3 polling — with an optional budget gate.
 
 ```bash
-launch-pad cost                              # estimate the current cluster
-launch-pad cost --cluster prod --budget 100  # warn + non-zero exit if over $100/mo
-launch-pad cost --idle-days 3                # flag nodes idle longer than 3 days
-launch-pad cost --json --budget 100          # machine-readable, for CI / scheduled checks
+launchpad cost                              # estimate the current cluster
+launchpad cost --cluster prod --budget 100  # warn + non-zero exit if over $100/mo
+launchpad cost --idle-days 3                # flag nodes idle longer than 3 days
+launchpad cost --json --budget 100          # machine-readable, for CI / scheduled checks
 ```
 
 | Flag | Description |
@@ -853,9 +1107,9 @@ Check the cluster's health and notify on problems — a probe you run on a sched
 GitHub Action) rather than a continuous control plane.
 
 ```bash
-launch-pad alerts check                                            # print any alerts; exit non-zero if any
-launch-pad alerts check --cluster prod --webhook "$SLACK_WEBHOOK"  # also POST to Slack/Discord
-launch-pad alerts check --json                                     # machine-readable
+launchpad alerts check                                            # print any alerts; exit non-zero if any
+launchpad alerts check --cluster prod --webhook "$SLACK_WEBHOOK"  # also POST to Slack/Discord
+launchpad alerts check --json                                     # machine-readable
 ```
 
 | Flag | Description |
@@ -884,9 +1138,9 @@ Print a shell-completion script for `launch-pad` / `lpd`, generated from the liv
 (so it never drifts from the real commands).
 
 ```bash
-launch-pad completions bash  >> ~/.bash_completion
-launch-pad completions zsh   > "${fpath[1]}/_launch-pad"   # then run: compinit
-launch-pad completions fish  > ~/.config/fish/completions/launch-pad.fish
+launchpad completions bash  >> ~/.bash_completion
+launchpad completions zsh   > "${fpath[1]}/_launch-pad"   # then run: compinit
+launchpad completions fish  > ~/.config/fish/completions/launch-pad.fish
 ```
 
 Completes top-level commands, their subcommands (e.g. `node create`, `cluster use`), and the

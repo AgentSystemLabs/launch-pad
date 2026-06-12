@@ -11,7 +11,7 @@ import {
   PutPublicAccessBlockCommand,
   type S3Client,
 } from "@aws-sdk/client-s3";
-import { bucketTags, CLUSTERS_PREFIX, clusterNodesPrefix } from "@agentsystemlabs/launch-pad-shared";
+import { bucketTags, CLUSTERS_PREFIX, clusterNodesPrefix, projectsPrefix } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 import { awsErrorName, awsStatusCode } from "./errors";
 import { ensureBucketTags } from "./tags";
@@ -275,6 +275,34 @@ export async function listClusterIds(s3: S3Client, bucket: string): Promise<stri
       if (value) {
         const id = value.slice(CLUSTERS_PREFIX.length, -1);
         if (id) ids.push(id);
+      }
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return ids;
+}
+
+/** List the footprint owners with per-project state in a cluster's `projects/` prefix. */
+export async function listProjectIds(s3: S3Client, bucket: string, clusterId: string): Promise<string[]> {
+  const prefix = projectsPrefix(clusterId);
+  const ids: string[] = [];
+  let token: string | undefined;
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        Delimiter: "/",
+        ContinuationToken: token,
+      }),
+    );
+    for (const cp of res.CommonPrefixes ?? []) {
+      const value = cp.Prefix;
+      if (value) {
+        const id = value.slice(prefix.length, -1);
+        // `_`-prefixed directories are registry internals (`projects/_index/`),
+        // never a footprint owner (LABEL_REGEX forbids underscores).
+        if (id && !id.startsWith("_")) ids.push(id);
       }
     }
     token = res.IsTruncated ? res.NextContinuationToken : undefined;

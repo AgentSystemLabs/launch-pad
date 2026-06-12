@@ -82,7 +82,13 @@ export function makeCli(opts: {
       exitCode: res.exitCode ?? 1,
     };
     if (!runOpts.allowFail && out.exitCode !== 0) {
-      throw new Error(`\`launch-pad ${args.join(" ")}\` exited ${out.exitCode}\n${out.stderr}`);
+      // Include stdout too: in --json mode the CLI emits its error object there
+      // (stderr is suppressed), so stderr alone can be empty on a real failure.
+      throw new Error(
+        `\`launchpad ${args.join(" ")}\` exited ${out.exitCode}\n${out.stderr}${
+          out.stdout ? `\n--- stdout ---\n${out.stdout}` : ""
+        }`,
+      );
     }
     return out;
   }
@@ -93,10 +99,28 @@ export function makeCli(opts: {
       return JSON.parse(res.stdout) as T;
     } catch {
       throw new Error(
-        `expected JSON from \`launch-pad ${args.join(" ")}\` but got:\n${res.stdout}\n--- stderr ---\n${res.stderr}`,
+        `expected JSON from \`launchpad ${args.join(" ")}\` but got:\n${res.stdout}\n--- stderr ---\n${res.stderr}`,
       );
     }
   }
 
   return { run, json };
+}
+
+/**
+ * The cluster's registered app-role node ids (`node list --json`), sorted. Node names
+ * are generated (`<noun>-<verb>-<adverb>`) rather than predictable `app-<n>` ids, so
+ * e2e flows discover them instead of hard-coding.
+ */
+export async function listAppNodeIds(cli: Cli, cluster: string): Promise<string[]> {
+  const nodes = await cli.json<Array<{ nodeId: string; role?: string; status?: string }>>([
+    "node",
+    "list",
+    "--cluster",
+    cluster,
+  ]);
+  return nodes
+    .filter((n) => n.role === "app")
+    .map((n) => n.nodeId)
+    .sort();
 }

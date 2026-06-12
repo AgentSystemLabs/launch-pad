@@ -11,7 +11,7 @@ import {
 /** CloudWatch Agent control binary + config paths on Amazon Linux 2023. */
 const CW_AGENT_CTL = "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl";
 const CW_BASE_CONFIG_PATH = "/opt/aws/amazon-cloudwatch-agent/etc/launch-pad-base.json";
-/** Empty placeholder owned by the launch-pad agent (it writes cw-agent-combined.json on tick). */
+/** Empty placeholder owned by the launchpad agent (it writes cw-agent-combined.json on tick). */
 const CW_CONTAINERS_FRAGMENT_PATH = "/etc/launch-pad/cw-agent-containers.json";
 
 /** Source systemd unit each shipped component's journald is forwarded from. */
@@ -54,12 +54,12 @@ WantedBy=multi-user.target
 
 /**
  * Bash that installs + enables the Amazon CloudWatch Agent with the node's **base**
- * config (system logs: agent journald, plus caddy on edge/both). Idempotent, so it is
+ * config (system logs: agent journald, plus caddy on the edge). Idempotent, so it is
  * safe to run again on an existing node via `node install-logging`. The launch-pad
  * agent supplements this with the dynamic per-container config on its next tick.
  *
  * Designed to be embedded inside a `set -euxo pipefail` script (user-data) — it assumes
- * /etc/launch-pad already exists.
+ * /etc/launchpad already exists.
  */
 export function renderCloudWatchInstall(params: CloudWatchInstallParams): string {
   const { clusterId, nodeId, role } = params;
@@ -91,7 +91,7 @@ cat > ${CW_BASE_CONFIG_PATH} <<'CWBASE'
 ${baseConfig}
 CWBASE
 
-# Agent-owned placeholder; the launch-pad agent writes cw-agent-combined.json each tick.
+# Agent-owned placeholder; the launchpad agent writes cw-agent-combined.json each tick.
 cat > ${CW_CONTAINERS_FRAGMENT_PATH} <<'CWFRAG'
 ${emptyFragment}
 CWFRAG

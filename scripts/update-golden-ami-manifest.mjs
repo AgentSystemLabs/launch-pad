@@ -2,10 +2,12 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const [packerManifestPath, cliManifestPath, agentVersion] = process.argv.slice(2);
+const [packerManifestPath, cliManifestPath, agentVersion, role] = process.argv.slice(2);
 
-if (!packerManifestPath || !cliManifestPath || !agentVersion) {
-  console.error("usage: update-golden-ami-manifest.mjs <packer-manifest> <cli-manifest> <agent-version>");
+if (!packerManifestPath || !cliManifestPath || !agentVersion || !["edge", "app"].includes(role ?? "")) {
+  console.error(
+    "usage: update-golden-ami-manifest.mjs <packer-manifest> <cli-manifest> <agent-version> <edge|app>",
+  );
   process.exit(1);
 }
 
@@ -28,17 +30,20 @@ const builtAt =
     ? new Date(build.build_time * 1000).toISOString()
     : new Date().toISOString();
 
-cli.schemaVersion = 1;
-cli.defaultAgentType = "ts";
+cli.schemaVersion = 2;
+cli.defaultAgentType = "rust";
 cli.amis ??= {};
-cli.amis[region] = {
+cli.amis.edge ??= {};
+cli.amis.app ??= {};
+cli.amis[role][region] = {
   amiId,
   region,
   architecture: "x86_64",
-  agentType: "ts",
+  role,
+  agentType: "rust",
   agentVersion,
   builtAt,
 };
 
 writeFileSync(resolve(cliManifestPath), `${JSON.stringify(cli, null, 2)}\n`);
-console.error(`updated ${cliManifestPath}: ${region} -> ${amiId}`);
+console.error(`updated ${cliManifestPath}: ${role}/${region} -> ${amiId}`);

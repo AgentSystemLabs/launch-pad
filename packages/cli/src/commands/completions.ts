@@ -2,8 +2,8 @@ import { Command } from "commander";
 import { commandTree, generateCompletion, type Shell, SUPPORTED_SHELLS } from "../completions/generate";
 import { CliError } from "../errors";
 
-/** The CLI's binary names (see package.json `bin`) — both get completions. */
-const BIN_NAMES = ["launch-pad", "lpd"];
+/** The CLI's binary names (see package.json `bin`) — all get completions. */
+const BIN_NAMES = ["launchpad", "launch-pad", "lpd"];
 
 function isShell(value: string): value is Shell {
   return (SUPPORTED_SHELLS as readonly string[]).includes(value);
@@ -17,12 +17,12 @@ export function registerCompletions(program: Command): void {
       "after",
       [
         "",
-        "Generates a completion script for launch-pad / lpd from the live command tree.",
+        "Generates a completion script for launchpad / lpd from the live command tree.",
         "Pipe it into the right place for your shell:",
         "",
-        "  bash:  launch-pad completions bash  >> ~/.bash_completion",
-        "  zsh:   launch-pad completions zsh   > \"${fpath[1]}/_launch-pad\"   # then: compinit",
-        "  fish:  launch-pad completions fish  > ~/.config/fish/completions/launch-pad.fish",
+        "  bash:  launchpad completions bash  >> ~/.bash_completion",
+        "  zsh:   launchpad completions zsh   > \"${fpath[1]}/_launchpad\"   # then: compinit",
+        "  fish:  launchpad completions fish  > ~/.config/fish/completions/launchpad.fish",
       ].join("\n"),
     )
     .action((shell: string) => {
