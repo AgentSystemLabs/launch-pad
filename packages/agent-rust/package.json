@@ -1,6 +1,6 @@
 {
   "name": "@agentsystemlabs/launch-pad-agent",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Launch Pad node agent — Rust edge/app binaries. `pnpm build:agent` (repo root) cross-compiles linux/amd64 binaries into dist/.",
   "files": [

@@ -1,6 +1,6 @@
 [package]
 name = "launch-pad-agent"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "Launch Pad node agent (Rust) — edge + app binaries, parity port of the retired TypeScript agent"
 publish = false
