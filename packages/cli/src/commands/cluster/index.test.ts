@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadLocalConfig, setDefaultCluster, upsertClusterTarget } from "../../config/local";
 import { CliError } from "../../errors";
-import { applyClusterUse, buildClusterListRows } from "./index";
+import { applyClusterUse, buildClusterListRows, resolveClusterCommandTarget } from "./index";
 
 let home: string;
 let prevHome: string | undefined;
@@ -74,5 +74,37 @@ describe("buildClusterListRows", () => {
     expect(buildClusterListRows({ clusters: {} }, [], undefined)).toEqual([
       { clusterId: "default", region: null, source: "implicit" },
     ]);
+  });
+});
+
+describe("resolveClusterCommandTarget", () => {
+  it("uses the positional cluster name when provided", () => {
+    expect(
+      resolveClusterCommandTarget(
+        "prod",
+        { cluster: "staging" },
+        { defaultCluster: "lower", clusters: {} },
+      ),
+    ).toBe("prod");
+  });
+
+  it("uses --cluster when the positional name is omitted", () => {
+    expect(
+      resolveClusterCommandTarget(
+        undefined,
+        { cluster: "staging" },
+        { defaultCluster: "lower", clusters: {} },
+      ),
+    ).toBe("staging");
+  });
+
+  it("uses the persisted default when no name or --cluster is provided", () => {
+    expect(
+      resolveClusterCommandTarget(undefined, {}, { defaultCluster: "prod", clusters: {} }),
+    ).toBe("prod");
+  });
+
+  it("falls back to the implicit default cluster", () => {
+    expect(resolveClusterCommandTarget(undefined, {}, { clusters: {} })).toBe("default");
   });
 });

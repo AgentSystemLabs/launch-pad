@@ -556,6 +556,14 @@ async function prepareClusterAws(name: string, opts: GlobalOpts): Promise<AwsEnv
   });
 }
 
+export function resolveClusterCommandTarget(
+  name: string | undefined,
+  opts: GlobalOpts,
+  local: LocalConfig = loadLocalConfig(),
+): string {
+  return name ?? effectiveCluster(opts, local).cluster;
+}
+
 /** Load every node registry entry in a cluster (skips malformed). */
 async function loadClusterNodes(aws: AwsEnv, name: string): Promise<NodeRegistryEntry[]> {
   const ids = await listNodeIds(aws.s3, aws.bucket, name);
@@ -841,11 +849,12 @@ export function registerCluster(program: Command): void {
   applyGlobalOptions(current);
 
   const pause = cluster
-    .command("pause <name>")
-    .description("Stop every node in a cluster to save money (the edge keeps its Elastic IP + disk)")
+    .command("pause [name]")
+    .description("Stop every node in the target cluster to save money (the edge keeps its Elastic IP + disk)")
     .option("--yes", "skip confirmation prompts")
-    .action(async (name: string, _opts, command: Command) => {
-      await runPause(name, mergedOpts<GroupOptions>(command));
+    .action(async (name: string | undefined, _opts, command: Command) => {
+      const opts = mergedOpts<GroupOptions>(command);
+      await runPause(resolveClusterCommandTarget(name, opts), opts);
     });
   applyGlobalOptions(pause);
 

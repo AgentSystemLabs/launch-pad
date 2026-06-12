@@ -1033,10 +1033,12 @@ default and reverts to the implicit cluster.
 
 Show the cluster future commands will target (account, region, profile).
 
-### `cluster pause <name>` / `cluster resume <name>`
+### `cluster pause [name]` / `cluster resume <name>`
 
 Stop or start every node in the cluster concurrently to save money / bring it back up.
-The edge keeps its Elastic IP + disk. `--yes` skips confirmation.
+When `cluster pause` omits `name`, it targets `--cluster`, then your saved default cluster,
+then the implicit `default` cluster, matching `deploy`. The edge keeps its Elastic IP + disk.
+`--yes` skips confirmation.
 
 ### `cluster destroy <name>`
 
