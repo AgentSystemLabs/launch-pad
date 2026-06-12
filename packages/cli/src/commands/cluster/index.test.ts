@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadLocalConfig, setDefaultCluster, upsertClusterTarget } from "../../config/local";
 import { CliError } from "../../errors";
-import { applyClusterUse } from "./index";
+import { applyClusterUse, buildClusterListRows } from "./index";
 
 let home: string;
 let prevHome: string | undefined;
@@ -52,5 +52,27 @@ describe("applyClusterUse", () => {
     expect((err as CliError).message).toContain("not configured locally");
     expect((err as CliError).hint).toContain("cluster create ghost");
     expect(loadLocalConfig().defaultCluster).toBe("prod");
+  });
+});
+
+describe("buildClusterListRows", () => {
+  it("always includes the implicit default cluster before named clusters", () => {
+    const rows = buildClusterListRows(
+      { clusters: { prod: { region: "us-west-2" } } },
+      ["lower"],
+      "us-east-1",
+    );
+
+    expect(rows).toEqual([
+      { clusterId: "default", region: "us-east-1", source: "implicit" },
+      { clusterId: "lower", region: "us-east-1", source: "s3" },
+      { clusterId: "prod", region: "us-west-2", source: "local" },
+    ]);
+  });
+
+  it("shows only the implicit default cluster when no named clusters exist", () => {
+    expect(buildClusterListRows({ clusters: {} }, [], undefined)).toEqual([
+      { clusterId: "default", region: null, source: "implicit" },
+    ]);
   });
 });

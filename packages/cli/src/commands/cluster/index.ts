@@ -32,6 +32,7 @@ import { getClusterConfig, putClusterConfig } from "../../cluster/store";
 import {
   clearDefaultCluster,
   effectiveCluster,
+  type LocalConfig,
   loadLocalConfig,
   localConfigPath,
   removeClusterTarget,
@@ -131,9 +132,42 @@ async function safeListClusterIds(aws: AwsEnv): Promise<string[]> {
   }
 }
 
+export type ClusterListSource = "implicit" | "local" | "s3" | "both";
+
+export interface ClusterListRow {
+  clusterId: string;
+  region: string | null;
+  source: ClusterListSource;
+}
+
+export function buildClusterListRows(
+  local: LocalConfig,
+  s3Ids: string[],
+  s3Region: string | undefined,
+): ClusterListRow[] {
+  const localNames = Object.keys(local.clusters);
+  const s3Set = new Set(s3Ids);
+  const named = [...new Set([...localNames, ...s3Ids])]
+    .filter((id) => id !== DEFAULT_CLUSTER)
+    .sort()
+    .map((id) => ({
+      clusterId: id,
+      region: local.clusters[id]?.region ?? (s3Set.has(id) ? s3Region : undefined) ?? null,
+      source: (local.clusters[id] && s3Set.has(id) ? "both" : local.clusters[id] ? "local" : "s3") as ClusterListSource,
+    }));
+
+  return [
+    {
+      clusterId: DEFAULT_CLUSTER,
+      region: s3Region ?? null,
+      source: "implicit",
+    },
+    ...named,
+  ];
+}
+
 async function runList(opts: GlobalOpts): Promise<void> {
   const local = loadLocalConfig();
-  const localNames = Object.keys(local.clusters);
 
   // S3 is the authoritative registry: surface clusters that exist there even when
   // they were created implicitly by `deploy --cluster X` and never written locally.
@@ -148,43 +182,39 @@ async function runList(opts: GlobalOpts): Promise<void> {
   } catch {
     s3Reachable = false; // no creds / no account — degrade to local-only.
   }
-  const s3Set = new Set(s3Ids);
 
-  const names = [...new Set([...localNames, ...s3Ids])].sort();
-  const regionOf = (id: string): string | undefined =>
-    local.clusters[id]?.region ?? (s3Set.has(id) ? s3Region : undefined);
-  const sourceOf = (id: string): "local" | "s3" | "both" =>
-    local.clusters[id] && s3Set.has(id) ? "both" : local.clusters[id] ? "local" : "s3";
+  const rows = buildClusterListRows(local, s3Ids, s3Region);
+  const activeDefault = local.defaultCluster ?? DEFAULT_CLUSTER;
 
   if (isJsonMode()) {
     printJson({
       defaultCluster: local.defaultCluster ?? null,
-      clusters: names.map((id) => ({
-        clusterId: id,
-        ...local.clusters[id],
-        region: regionOf(id) ?? null,
-        source: sourceOf(id),
+      clusters: rows.map((row) => ({
+        clusterId: row.clusterId,
+        ...local.clusters[row.clusterId],
+        region: row.region,
+        source: row.source,
       })),
     });
     return;
   }
-  if (names.length === 0) {
-    log.info("no clusters configured");
-    log.dim("  everything lives in the implicit `default` cluster");
-    log.dim("  create one with `launchpad cluster create <name> --region <region>`");
-    return;
-  }
   log.plain();
-  for (const id of names) {
+  for (const row of rows) {
+    const id = row.clusterId;
     const t = local.clusters[id];
     const where = t?.roleArn
       ? color.dim(`role ${t.roleArn}`)
       : t?.profile
         ? color.dim(`profile ${t.profile}`)
         : color.dim("ambient creds");
-    const mark = id === local.defaultCluster ? color.green(" (default)") : "";
-    const tag = sourceOf(id) === "s3" ? color.yellow(" (in S3 — not configured locally)") : "";
-    log.plain(`  ${color.cyan(id)}${mark}${tag}  ${color.dim(regionOf(id) ?? "region: inherited")}  ${where}`);
+    const mark = id === activeDefault ? color.green(" (default)") : "";
+    const tag =
+      row.source === "implicit"
+        ? color.dim(" (implicit)")
+        : row.source === "s3"
+          ? color.yellow(" (in S3 — not configured locally)")
+          : "";
+    log.plain(`  ${color.cyan(id)}${mark}${tag}  ${color.dim(row.region ?? "region: inherited")}  ${where}`);
   }
   if (!s3Reachable) {
     log.dim("  (couldn't reach S3 — showing locally-configured clusters only)");
@@ -315,8 +345,10 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
   ]);
   if (ids.length > 0) {
     const lines: string[] = [];
+    let missingRegistryCount = 0;
     for (const nodeId of ids) {
       const entry = registryById.get(nodeId);
+      if (!entry) missingRegistryCount += 1;
       const meta = entry
         ? `${color.cyan(nodeId)}  ${color.dim(`${entry.role} · ${entry.instanceType}`)}`
         : `${color.cyan(nodeId)}  ${color.yellow("no registry entry")}`;
@@ -329,6 +361,9 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
       }
     }
     panel("Nodes & services", lines);
+    if (missingRegistryCount > 0) {
+      log.dim(`  remove stale node state with \`launchpad node prune --yes --cluster ${name}\``);
+    }
   }
   if (envSummaries.length > 0) {
     const envLines: string[] = [];

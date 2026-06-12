@@ -1007,7 +1007,9 @@ compatibility.
 
 ### `cluster list`
 
-List locally configured clusters from `~/.launch-pad/config.toml`.
+List the implicit `default` cluster plus named clusters from local config / S3. `default`
+is always shown because it is the legacy un-prefixed cluster future commands target when no
+named default has been selected.
 
 ### `cluster show <name>`
 

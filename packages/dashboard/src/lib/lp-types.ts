@@ -33,7 +33,7 @@ export interface ClusterListJson {
   clusters: Array<{
     clusterId: string;
     region: string | null;
-    source: "local" | "s3" | "both";
+    source: "implicit" | "local" | "s3" | "both";
     profile?: string;
     roleArn?: string;
   }>;

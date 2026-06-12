@@ -78,7 +78,7 @@ const STATE_PATH = process.env.FAKE_LP_STATE || join(process.cwd(), ".fake-lp-st
 function defaultState(): FState {
   return {
     clusters: [
-      { clusterId: "default", region: "us-east-1", source: "s3" },
+      { clusterId: "default", region: "us-east-1", source: "implicit" },
       { clusterId: "prod", region: "us-east-1", source: "both" },
     ],
     defaultCluster: "prod",
