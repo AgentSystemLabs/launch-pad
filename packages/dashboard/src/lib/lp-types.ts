@@ -49,7 +49,7 @@ export interface ClusterServiceSummary {
   cron?: string;
 }
 
-/** `cluster show <name> --json` */
+/** `cluster show [name] --json` */
 export interface ClusterShowJson {
   cluster: ClusterConfig | null;
   account: string;

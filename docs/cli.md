@@ -766,7 +766,7 @@ unique within the cluster) is used, so you never have to invent node names.
 | ---- | ----------- |
 | `--instance-type <type>` | EC2 instance type (default `t3.small`) |
 | `--role <role>` | `app` or `edge` (default `app`) |
-| `--edge <nodeId>` | For an `app` node: the edge that routes to it |
+| `--edge <nodeId>` | For an `app` node: pin a specific edge (defaults to the cluster's edge) |
 | `--key-name <keypair>` | EC2 key pair for SSH (omit to disable SSH) |
 | `--ami <id>` | AMI id (default: Launch Pad golden AMI, falling back to latest Amazon Linux 2023) |
 | `--agent-version <semver>` | Agent version to install |
@@ -774,10 +774,13 @@ unique within the cluster) is used, so you never have to invent node names.
 | `--dry-run` | Show plan without creating anything |
 | `--yes` | Skip launch confirmation |
 
-An `app` node **needs an edge**: explicit `--edge` wins, else the cluster's `defaultEdge`
-(set via [`cluster set-edge`](#cluster-set-edge-name-nodeid)) — with neither, the create is
-refused. App nodes are VPC-private (no public IP); an `edge` node gets the public 80/443 +
-Elastic IP.
+An `app` node routes through an edge, resolved in order: explicit `--edge` → the cluster's
+`defaultEdge` (set via [`cluster set-edge`](#cluster-set-edge-name-nodeid)) → the cluster's
+single edge-role node. So in a cluster that already has an edge you don't pass `--edge` at
+all — the new app node auto-attaches to it. The create is refused only when the cluster has
+**no** edge yet (create one first with `--role edge`) or has **more than one** edge and no
+default (disambiguate with `--edge` or `cluster set-edge`). App nodes are VPC-private (no
+public IP); an `edge` node gets the public 80/443 + Elastic IP.
 
 ### `node list`
 
@@ -1011,18 +1014,21 @@ List the implicit `default` cluster plus named clusters from local config / S3. 
 is always shown because it is the legacy un-prefixed cluster future commands target when no
 named default has been selected.
 
-### `cluster show <name>`
+### `cluster show [name]`
 
 Show cluster config, AWS account/region, member nodes, every service scheduled on
 each node (from its published `desired.json` — the declarative source of truth, not live
 container status), and every named environment created by `deploy --env` with its
 services and node placement. Use [`status`](#status) when you need agent-reported health
-and image rollout state.
+and image rollout state. When `name` is omitted, it targets `--cluster`, then your saved
+default cluster, then the implicit `default` cluster, matching `deploy`.
 
-### `cluster set-edge <name> <nodeId>`
+### `cluster set-edge [name] <nodeId>`
 
 Set the cluster's default edge (the Caddy router for its web services). The node must have
-role `edge`.
+role `edge`. When `name` is omitted, it targets `--cluster`, then your saved default cluster,
+then the implicit `default` cluster. The implicit `default` cluster cannot store a default
+edge in `cluster.json`.
 
 ### `cluster use <name>` (aliases: `switch`, `target`)
 
@@ -1033,17 +1039,18 @@ default and reverts to the implicit cluster.
 
 Show the cluster future commands will target (account, region, profile).
 
-### `cluster pause [name]` / `cluster resume <name>`
+### `cluster pause [name]` / `cluster resume [name]`
 
 Stop or start every node in the cluster concurrently to save money / bring it back up.
-When `cluster pause` omits `name`, it targets `--cluster`, then your saved default cluster,
+When `name` is omitted, both commands target `--cluster`, then your saved default cluster,
 then the implicit `default` cluster, matching `deploy`. The edge keeps its Elastic IP + disk.
 `--yes` skips confirmation.
 
-### `cluster destroy <name>`
+### `cluster destroy [name]`
 
 Terminate every node, release IPs, and delete all the cluster's S3 state. Cannot target
-`default`. `--yes` skips confirmation.
+`default`. When `name` is omitted, it targets `--cluster`, then your saved default cluster,
+then the implicit `default` cluster. `--yes` skips confirmation.
 
 ---
 

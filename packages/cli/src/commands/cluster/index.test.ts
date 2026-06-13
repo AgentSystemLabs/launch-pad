@@ -1,10 +1,17 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadLocalConfig, setDefaultCluster, upsertClusterTarget } from "../../config/local";
 import { CliError } from "../../errors";
-import { applyClusterUse, buildClusterListRows, resolveClusterCommandTarget } from "./index";
+import {
+  applyClusterUse,
+  buildClusterListRows,
+  registerCluster,
+  resolveClusterCommandTarget,
+  resolveClusterSetEdgeArgs,
+} from "./index";
 
 let home: string;
 let prevHome: string | undefined;
@@ -77,6 +84,27 @@ describe("buildClusterListRows", () => {
   });
 });
 
+describe("registerCluster", () => {
+  function subcommand(name: string): Command {
+    const program = new Command();
+    registerCluster(program);
+    const cluster = program.commands.find((cmd) => cmd.name() === "cluster");
+    const command = cluster?.commands.find((cmd) => cmd.name() === name);
+    if (!command) throw new Error(`missing cluster ${name} command`);
+    return command;
+  }
+
+  it("lets target commands omit the cluster name", () => {
+    expect(subcommand("show").usage()).toContain("[name]");
+    expect(subcommand("resume").usage()).toContain("[name]");
+    expect(subcommand("destroy").usage()).toContain("[name]");
+  });
+
+  it("lets set-edge omit the cluster name while still requiring a node id", () => {
+    expect(subcommand("set-edge").usage()).toContain("[cluster] <nodeId>");
+  });
+});
+
 describe("resolveClusterCommandTarget", () => {
   it("uses the positional cluster name when provided", () => {
     expect(
@@ -106,5 +134,46 @@ describe("resolveClusterCommandTarget", () => {
 
   it("falls back to the implicit default cluster", () => {
     expect(resolveClusterCommandTarget(undefined, {}, { clusters: {} })).toBe("default");
+  });
+});
+
+describe("resolveClusterSetEdgeArgs", () => {
+  it("uses the active cluster when only a node id is provided", () => {
+    expect(
+      resolveClusterSetEdgeArgs(
+        "edge-1",
+        undefined,
+        {},
+        { defaultCluster: "prod", clusters: {} },
+      ),
+    ).toEqual({ cluster: "prod", nodeId: "edge-1" });
+  });
+
+  it("uses --cluster when only a node id is provided", () => {
+    expect(
+      resolveClusterSetEdgeArgs(
+        "edge-1",
+        undefined,
+        { cluster: "staging" },
+        { defaultCluster: "prod", clusters: {} },
+      ),
+    ).toEqual({ cluster: "staging", nodeId: "edge-1" });
+  });
+
+  it("uses the positional cluster name when cluster and node id are both provided", () => {
+    expect(
+      resolveClusterSetEdgeArgs(
+        "prod",
+        "edge-1",
+        { cluster: "staging" },
+        { defaultCluster: "lower", clusters: {} },
+      ),
+    ).toEqual({ cluster: "prod", nodeId: "edge-1" });
+  });
+
+  it("requires a node id", () => {
+    expect(() => resolveClusterSetEdgeArgs(undefined, undefined, {}, { clusters: {} })).toThrow(
+      CliError,
+    );
   });
 });

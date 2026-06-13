@@ -4,7 +4,6 @@ import {
   GetParametersCommand,
   type GetParametersCommandOutput,
   GetParametersByPathCommand,
-  type Parameter,
   PutParameterCommand,
   type SSMClient,
 } from "@aws-sdk/client-ssm";

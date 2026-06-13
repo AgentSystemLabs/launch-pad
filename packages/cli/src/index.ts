@@ -59,8 +59,8 @@ function commandPath(cmd: Command): string {
 /**
  * Commands that resolve their AWS target from the active cluster (`--cluster` →
  * `defaultCluster` → "default") get a one-line "cluster: <id>" banner so you always
- * know what you're targeting. `cluster` subcommands name their target explicitly (and
- * echo it themselves), and `init` is purely local — so neither shows the line.
+ * know what you're targeting. `cluster` subcommands either name or echo their target
+ * themselves, and `init` is purely local — so neither shows the line.
  */
 function showsClusterBanner(path: string): boolean {
   return (

@@ -564,6 +564,23 @@ export function resolveClusterCommandTarget(
   return name ?? effectiveCluster(opts, local).cluster;
 }
 
+export function resolveClusterSetEdgeArgs(
+  nameOrNodeId: string | undefined,
+  nodeId: string | undefined,
+  opts: GlobalOpts,
+  local: LocalConfig = loadLocalConfig(),
+): { cluster: string; nodeId: string } {
+  if (!nameOrNodeId) {
+    throw new CliError("missing required argument 'nodeId'", {
+      hint: "usage: launchpad cluster set-edge [cluster] <nodeId>",
+    });
+  }
+  if (nodeId === undefined) {
+    return { cluster: resolveClusterCommandTarget(undefined, opts, local), nodeId: nameOrNodeId };
+  }
+  return { cluster: resolveClusterCommandTarget(nameOrNodeId, opts, local), nodeId };
+}
+
 /** Load every node registry entry in a cluster (skips malformed). */
 async function loadClusterNodes(aws: AwsEnv, name: string): Promise<NodeRegistryEntry[]> {
   const ids = await listNodeIds(aws.s3, aws.bucket, name);
@@ -815,18 +832,24 @@ export function registerCluster(program: Command): void {
   applyGlobalOptions(list);
 
   const show = cluster
-    .command("show <name>")
+    .command("show [name]")
     .description("Show a cluster's config, account, member nodes, scheduled services, and preview environments")
-    .action(async (name: string, _opts, command: Command) => {
-      await runShow(name, mergedOpts(command));
+    .action(async (name: string | undefined, _opts, command: Command) => {
+      const opts = mergedOpts(command);
+      await runShow(resolveClusterCommandTarget(name, opts), opts);
     });
   applyGlobalOptions(show);
 
   const setEdge = cluster
-    .command("set-edge <name> <nodeId>")
+    .command("set-edge")
+    .argument("[nameOrNodeId]", "cluster name, or node id when using the active cluster")
+    .argument("[nodeId]", "edge node id when a cluster name is provided")
+    .usage("[cluster] <nodeId> [options]")
     .description("Set the cluster's default edge (the node whose Caddy fronts its web services)")
-    .action(async (name: string, nodeId: string, _opts, command: Command) => {
-      await runSetEdge(name, nodeId, mergedOpts(command));
+    .action(async (nameOrNodeId: string | undefined, nodeId: string | undefined, _opts, command: Command) => {
+      const opts = mergedOpts(command);
+      const target = resolveClusterSetEdgeArgs(nameOrNodeId, nodeId, opts);
+      await runSetEdge(target.cluster, target.nodeId, opts);
     });
   applyGlobalOptions(setEdge);
 
@@ -859,20 +882,22 @@ export function registerCluster(program: Command): void {
   applyGlobalOptions(pause);
 
   const resume = cluster
-    .command("resume <name>")
+    .command("resume [name]")
     .description("Start every paused node in a cluster back up")
     .option("--yes", "skip confirmation prompts")
-    .action(async (name: string, _opts, command: Command) => {
-      await runResume(name, mergedOpts<GroupOptions>(command));
+    .action(async (name: string | undefined, _opts, command: Command) => {
+      const opts = mergedOpts<GroupOptions>(command);
+      await runResume(resolveClusterCommandTarget(name, opts), opts);
     });
   applyGlobalOptions(resume);
 
   const destroy = cluster
-    .command("destroy <name>")
+    .command("destroy [name]")
     .description("Terminate every node in a cluster, release IPs, and delete all its S3 state")
     .option("--yes", "skip confirmation prompts")
-    .action(async (name: string, _opts, command: Command) => {
-      await runDestroy(name, mergedOpts<GroupOptions>(command));
+    .action(async (name: string | undefined, _opts, command: Command) => {
+      const opts = mergedOpts<GroupOptions>(command);
+      await runDestroy(resolveClusterCommandTarget(name, opts), opts);
     });
   applyGlobalOptions(destroy);
 }

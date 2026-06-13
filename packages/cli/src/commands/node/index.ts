@@ -13,6 +13,7 @@ import {
   isHeartbeatStale,
   LABEL_REGEX,
   type NodeRegistryEntry,
+  nodeFrontsIngress,
   nodePrefix,
   nodeRegistryKey,
   nodeUsesElasticIp,
@@ -46,6 +47,7 @@ import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
 import { provisionRoleOf, resolveNodeAmi, resolveNodeAmiByRole } from "../../provision/golden-ami";
 import { installLoggingOnNode } from "../../provision/install-logging";
 import { parseCreateAmount, planNodeCreateNames } from "./create-names";
+import { planEdgeForAppNode } from "./resolve-edge";
 import { registerMonitor } from "./monitor";
 import { type ResizeEvacuationPlan, planResizeEvacuation } from "./resize-evacuate";
 import { type RebalanceOptions, runRebalance } from "../rebalance";
@@ -73,6 +75,16 @@ async function loadNode(aws: AwsEnv, nodeId: string): Promise<NodeRegistryEntry>
     });
   }
   return parseNodeRegistryEntry(obj.raw);
+}
+
+/** Every edge-role node id registered in the cluster (S3-lexicographic order). */
+async function listEdgeRoleNodeIds(aws: AwsEnv): Promise<string[]> {
+  const ids: string[] = [];
+  for (const id of await listNodeIds(aws.s3, aws.bucket, aws.clusterId)) {
+    const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
+    if (obj && nodeFrontsIngress(parseNodeRegistryEntry(obj.raw).role)) ids.push(id);
+  }
+  return ids;
 }
 
 /** Human label for a node's live EC2 state. */
@@ -224,17 +236,18 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
     }
   }
 
-  // Resolve the edge for an app node: explicit --edge wins, else the cluster's default.
-  let edgeNodeId = role === "app" ? opts.edge : undefined;
-  if (role === "app" && !edgeNodeId && aws.clusterId !== DEFAULT_CLUSTER) {
-    edgeNodeId = (await getClusterConfig(aws, aws.clusterId))?.defaultEdge ?? undefined;
-  }
-  if (role === "app" && !edgeNodeId) {
-    throw new CliError("an app node needs an edge", {
-      hint:
-        aws.clusterId === DEFAULT_CLUSTER
-          ? "pass --edge <edge-node-id> (create the edge first)"
-          : `pass --edge, or set the cluster's default edge first: launchpad cluster set-edge ${aws.clusterId} <edge-node-id>`,
+  // Resolve the edge for an app node: explicit --edge → cluster default →
+  // the cluster's single edge-role node. The user shouldn't have to name an
+  // edge the cluster already defines (see planEdgeForAppNode). Only hit S3 for
+  // the cluster's edge when no explicit --edge short-circuits the lookup.
+  let edgeNodeId: string | undefined;
+  if (role === "app") {
+    const needsLookup = !opts.edge;
+    edgeNodeId = planEdgeForAppNode({
+      clusterId: aws.clusterId,
+      explicitEdge: opts.edge,
+      defaultEdge: needsLookup ? (await getClusterConfig(aws, aws.clusterId))?.defaultEdge : undefined,
+      edgeRoleNodeIds: needsLookup ? await listEdgeRoleNodeIds(aws) : [],
     });
   }
 
