@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   readServiceSecrets,
   registerServiceSecret,
+  registerServiceSecrets,
   unregisterServiceSecret,
 } from "./toml-secrets";
 
@@ -44,6 +45,31 @@ port = 3000
     expect(registerServiceSecret(dir, "api", "DATABASE_URL")).toBe(false);
     expect(unregisterServiceSecret(dir, "api", "DATABASE_URL")).toBe(true);
     expect(readServiceSecrets(dir, "api")).toEqual([]);
+  });
+
+  it("batch-registers many keys in one write and returns only the newly added", () => {
+    const dir = tempProject(`project = "my-app"
+
+[[service]]
+name = "api"
+cpu = 512
+memory = 512
+secrets = ["EXISTING_API_KEY"]
+`);
+
+    const added = registerServiceSecrets(dir, "api", [
+      "EXISTING_API_KEY",
+      "DATABASE_URL",
+      "STRIPE_KEY",
+    ]);
+    expect(added).toEqual(["DATABASE_URL", "STRIPE_KEY"]);
+    expect(readServiceSecrets(dir, "api")).toEqual([
+      "EXISTING_API_KEY",
+      "DATABASE_URL",
+      "STRIPE_KEY",
+    ]);
+    // Re-registering the same set is a no-op.
+    expect(registerServiceSecrets(dir, "api", ["DATABASE_URL", "STRIPE_KEY"])).toEqual([]);
   });
 
   it("updates only the selected service and stores key names, not values", () => {

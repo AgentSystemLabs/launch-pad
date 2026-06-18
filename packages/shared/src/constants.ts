@@ -19,7 +19,7 @@ export const PROTOCOL_VERSION = 2 as const;
  * Instance type for an auto-provisioned dedicated edge node. The edge only runs
  * Caddy (no app containers), so the smallest burstable type is plenty.
  */
-export const DEFAULT_EDGE_INSTANCE_TYPE = "t3.micro";
+export const DEFAULT_EDGE_INSTANCE_TYPE = "t3.nano";
 
 /**
  * Format version of the per-project `config-baseline.json` (see config-lock.ts).

@@ -125,7 +125,7 @@ const DEFAULT_CONVERGE_TIMEOUT_SECONDS = 180;
 
 /**
  * Name of the dedicated edge node auto-created when the cluster doesn't have one
- * yet. Every cluster runs exactly one Caddy edge on its own node (t3.micro by
+ * yet. Every cluster runs exactly one Caddy edge on its own node (t3.nano by
  * default), so every deploy needs at least 2 nodes: the edge + ≥1 app node.
  */
 const EDGE_BOOTSTRAP_NODE_ID = "edge-1";
@@ -1095,7 +1095,7 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
   });
 
   // The cluster's dedicated edge: cluster.json's defaultEdge, else the registry's
-  // single edge-role node, else a fresh `edge-1` auto-provisioned below (t3.micro).
+  // single edge-role node, else a fresh `edge-1` auto-provisioned below (t3.nano).
   // Caddy never co-locates with app containers, so this node is ALWAYS separate
   // from the app pool — a deploy needs at least 2 nodes (edge + app).
   let edgeNodeId = clusterCfg?.defaultEdge ?? null;
@@ -1918,7 +1918,7 @@ export function registerDeploy(program: Command): void {
         "Placement is automatic: the scheduler bin-packs services across the cluster's app",
         "nodes by free CPU/memory (spreads across empty nodes when possible; stacks when",
         "necessary), auto-adding app nodes when the pool is full. Web traffic always routes",
-        "through the cluster's dedicated edge node (Caddy on its own t3.micro by default) —",
+        "through the cluster's dedicated edge node (Caddy on its own t3.nano by default) —",
         "every cluster is at least 2 nodes: the edge + 1 app node. A service with",
         "[[service.volumes]] is sticky: it stays on the node it first landed on (its data",
         "lives on that node's disk). The resolved placement map prints on every deploy.",

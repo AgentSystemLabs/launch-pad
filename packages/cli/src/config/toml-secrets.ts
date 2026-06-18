@@ -29,15 +29,32 @@ export function readServiceSecrets(dir: string, serviceName: string): string[] {
 
 /** Append a secret key to a service's `secrets` array (no-op if already present). */
 export function registerServiceSecret(dir: string, serviceName: string, key: string): boolean {
+  return registerServiceSecrets(dir, serviceName, [key]).length > 0;
+}
+
+/**
+ * Append several secret keys to a service's `secrets` array in a single
+ * read-modify-write (no-op for keys already present). Returns the keys that were
+ * newly added. Used by `secret import` so a bulk import rewrites the TOML once and
+ * can't leave it half-updated.
+ */
+export function registerServiceSecrets(dir: string, serviceName: string, keys: string[]): string[] {
   const path = tomlPath(dir);
   const doc = parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   const svc = serviceArray(doc).find((s) => String(s.name) === serviceName);
   if (!svc) throw new Error(`service "${serviceName}" not found in launch-pad.toml`);
   const secrets = secretsOf(svc);
-  if (secrets.includes(key)) return false;
-  svc.secrets = [...secrets, key];
+  const present = new Set(secrets);
+  const added: string[] = [];
+  for (const key of keys) {
+    if (present.has(key)) continue;
+    present.add(key);
+    added.push(key);
+  }
+  if (added.length === 0) return [];
+  svc.secrets = [...secrets, ...added];
   writeFileSync(path, stringify(doc));
-  return true;
+  return added;
 }
 
 /** Remove a secret key from a service's `secrets` array. */

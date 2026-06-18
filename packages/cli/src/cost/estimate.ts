@@ -18,6 +18,7 @@ export const S3_PUT_PER_1K_REQUESTS_USD = 0.005;
  * so the UI can say "lookup required" instead of guessing.
  */
 export const INSTANCE_HOURLY_USD: Record<string, number> = {
+  "t3.nano": 0.0052,
   "t3.micro": 0.0104,
   "t3.small": 0.0208,
   "t3.medium": 0.0416,

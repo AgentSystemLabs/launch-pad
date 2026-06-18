@@ -206,7 +206,7 @@ before publishing, and waits for the agent to report convergence.
 Placement is **automatic**: the scheduler bin-packs services across the cluster's app nodes
 by free CPU/memory, and every web domain routes through the cluster's **dedicated edge node**
 (every cluster is at least 2 nodes — the edge + ≥1 app node). Deploy handles the node-pool
-gaps itself: it **bootstraps an empty cluster** (the `edge-1` edge, default `t3.micro`, plus
+gaps itself: it **bootstraps an empty cluster** (the `edge-1` edge, default `t3.nano`, plus
 a first auto-sized app node) and **auto-adds app nodes** (generated `<noun>-<verb>-<adverb>`
 names) when the current pool can't
 fit the deploy (e.g. after a replica scale-up) — both spend-gated like any provision, and
@@ -515,16 +515,43 @@ in `launch-pad.toml`; values never land in git or S3 `desired.json`.
 launchpad secret set DATABASE_URL --service api    # hidden prompt (or stdin / --value)
 launchpad secret list --service api                # names only, never values
 launchpad secret rm DATABASE_URL --service api
+launchpad secret import .env.prod --service api              # bulk-load (production / base)
+launchpad secret import .env.staging --service api --env staging
+cat .env.prod | launchpad secret import - --service api     # from stdin
 ```
 
 | Flag | Description |
 | ---- | ----------- |
-| `--service <name>` | Service from `launch-pad.toml` (`set` / `rm` require this) |
+| `--service <name>` | Service from `launch-pad.toml` (`set` / `rm` / `import` require this) |
 | `--env <name>` | Same footprint as `deploy --env` |
 | `--no-register` | SSM only — do not add/remove the key in `launch-pad.toml` |
-| `--value <value>` | Value inline (prefer the hidden prompt or stdin in scripts) |
+| `--value <value>` | (`set`) value inline (prefer the hidden prompt or stdin in scripts) |
+| `--dry-run` | (`import`) show what would be created/overwritten (names only) without writing |
 
-SSM path layout: `/launch-pad/<cluster>/<ownerProject>/<service>/<KEY>`
+SSM path layout: `/launch-pad/<cluster>/<ownerProject>/<service>/<KEY>` — `<cluster>` comes
+from the active `--cluster` and `<ownerProject>` is `<project>-<env>` (just `<project>` for the
+base/prod footprint), so **secrets are isolated per cluster and per environment automatically**.
+The same `DATABASE_URL` key holds a different value in each.
+
+### `secret import`
+
+Reads a `.env`-style file (`KEY=VALUE` per line; `#` comments, blank lines, and an `export `
+prefix are ignored) and writes every pair as a SecureString under the service's per-env SSM
+tree, registering each key in `launch-pad.toml` (skip with `--no-register`). This is the
+per-environment config mechanism: the TOML `[service.env]` table is shared across all envs,
+so to give an environment its own values you `import` its `.env.<env>` into that `--env`.
+
+- **Values can be any string** — URLs containing `#`, JSON, or multi-line private keys
+  (wrap multi-line / space-padded values in single or double quotes; unquoted values are taken
+  verbatim to end-of-line, so a `#` in a password is preserved). Only the **key** must be a
+  valid env-var name (`UPPER_SNAKE`).
+- **All-or-nothing:** the whole file is validated first; an invalid key, an empty value, or a
+  non-`KEY=VALUE` line aborts the import with a line-numbered list and writes nothing.
+- **Existing keys are overwritten** (import is a sync from the file); existing keys not in the
+  file are left untouched (it never deletes).
+- ⚠️ A key registered in `launch-pad.toml` is required by **every** environment's deploy (the
+  agent errors on a missing SSM ref). Keep the key set consistent across envs — import the
+  matching `.env.<env>` into each environment so every env's tree has the full set.
 
 After rotating a secret, roll containers without rebuilding:
 
@@ -784,8 +811,11 @@ public IP); an `edge` node gets the public 80/443 + Elastic IP.
 
 ### `node list`
 
-List registered nodes with capacity and heartbeat age. Prefixes in S3 with no `node.json`
-show as `missing node.json` — leftover state from a partial destroy or failed provision.
+List registered nodes with capacity, heartbeat age, and the `project/service` footprints
+scheduled on each node (replicas shown as `×N`, scheduled jobs tagged `(cron)`; app nodes
+with nothing placed show `no services`, as do edge nodes which never run containers). Prefixes
+in S3 with no `node.json` show as `missing node.json` — leftover state from a partial destroy
+or failed provision. `--json` adds a `services` array to each node entry.
 
 ### `node prune`
 

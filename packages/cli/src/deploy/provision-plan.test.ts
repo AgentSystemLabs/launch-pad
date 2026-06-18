@@ -77,7 +77,7 @@ describe("planEdgeAction", () => {
       kind: "create",
       nodeId: EDGE,
       role: "edge",
-      instanceType: "t3.micro",
+      instanceType: "t3.nano",
     });
   });
 });

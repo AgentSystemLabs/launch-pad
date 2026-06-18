@@ -22,10 +22,10 @@ platform**. Instead of depending on a third-party service like Heroku, Render, o
   tagged and inspectable. There is no vendor server in the loop and nothing to get locked
   into; it's just Docker + Caddy + systemd on machines you control.
 - **You pay cloud prices, not platform markup.** A side project runs on a `t3.small` app
-  node plus a `t3.micro` edge; `node pause` / `cluster pause` stop idle environments so you
+  node plus a `t3.nano` edge; `node pause` / `cluster pause` stop idle environments so you
   stop paying.
 - **It scales down to two boxes and up to a small fleet** — a tiny dedicated edge router
-  (t3.micro) fronting private app nodes with replicas and rolling deploys.
+  (t3.nano) fronting private app nodes with replicas and rolling deploys.
 
 AWS is the supported target today; the architecture (state in object storage, a reconciling
 agent per VM) is deliberately portable to other major clouds.

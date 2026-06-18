@@ -160,7 +160,7 @@ hash, **never `:latest`**) → capacity admission check → ownership-aware **me
 node's `desired.json` (never clobbers other projects' services) → conditional S3 write → watch
 `status.json` to convergence. It also **auto-provisions** missing/paused nodes referenced by
 the config before publishing (spend-gated: `--yes` / `--no-create` / `--dry-run`), including
-the cluster's **dedicated edge** (`edge-1`, `DEFAULT_EDGE_INSTANCE_TYPE` t3.micro) when the
+the cluster's **dedicated edge** (`edge-1`, `DEFAULT_EDGE_INSTANCE_TYPE` t3.nano) when the
 cluster doesn't have one — every deploy needs at least 2 nodes (edge + ≥1 app). Two no-build
 redeploy paths skip buildx and reuse an existing image, pinned to the published placement:
 `--restart` (republish the current image with a `restartAt` bump to roll containers for an
@@ -263,7 +263,7 @@ migration. State lives under `nodes/` (the machine is the durable identity), not
 ## Cross-cutting invariants (don't break these)
 
 - **Node roles** (`edge` | `app`): `edge` = the cluster's single dedicated Caddy router, no
-  containers, public 80/443 + Elastic IP (t3.micro by default). `app` = containers only,
+  containers, public 80/443 + Elastic IP (t3.nano by default). `app` = containers only,
   private (no public 80/443, no Elastic IP; reachable only by the edge's security group over
   the VPC at `privateIp`). **Caddy NEVER co-locates with app containers** — there is no
   `both` role; every cluster is at least 2 nodes (1 edge + ≥1 app), both auto-provisioned by

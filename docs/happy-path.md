@@ -62,7 +62,7 @@ npx @agentsystemlabs/launch-pad deploy --yes
 ```
 
 `deploy` builds your image, pushes it to ECR with an **immutable** content-addressed tag,
-**auto-provisions** the missing nodes — the cluster's dedicated edge (`edge-1`, a `t3.micro`
+**auto-provisions** the missing nodes — the cluster's dedicated edge (`edge-1`, a `t3.nano`
 Caddy router) plus an auto-sized app node (a confirmation prompt unless `--yes`) — publishes
 desired state, and waits for the agent to report convergence. Placement is automatic: the
 scheduler picks the app node(s); you never name machines in the TOML. It prints a

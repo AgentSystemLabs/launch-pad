@@ -85,9 +85,9 @@ Every cluster is at least 2 nodes, provisioned automatically by the first deploy
 with only its role's stack (the agent is a self-contained Rust binary — no Node.js on any
 node):
 
-- **Edge** (t3.micro by default): Caddy + the edge agent + CloudWatch/SSM agents. No
-  Docker — its only job is routing HTTPS to app nodes, and the slim stack keeps 1 GB
-  comfortable. (512 MB instances are not supported as a default.)
+- **Edge** (t3.nano by default): Caddy + the edge agent + CloudWatch/SSM agents. No
+  Docker — its only job is routing HTTPS to app nodes, and the slim stack keeps 512 MB
+  comfortable. (`t3.micro` or larger also works if you prefer more headroom.)
 - **App** (auto-sized, t3.small floor): Docker + the app agent + CloudWatch/SSM agents.
   No Caddy — app containers are reachable only by the edge over the VPC.
 

@@ -44,6 +44,32 @@ describe("ssm secret helpers", () => {
     expect(existing).toEqual(new Set(["/launch-pad/default/app/api/DATABASE_URL"]));
   });
 
+  it("batches existence checks by the 10-name GetParameters limit", async () => {
+    const paths = Array.from({ length: 23 }, (_, i) => `/launch-pad/default/app/api/KEY_${i}`);
+    const send = vi
+      .fn()
+      // Each call echoes back its own requested names as "found".
+      .mockImplementation((cmd: GetParametersCommand) =>
+        Promise.resolve({ Parameters: (cmd.input.Names ?? []).map((Name) => ({ Name })) }),
+      );
+
+    const existing = await getExistingSecretPaths({ send } as never, paths);
+
+    // 23 names → 10 + 10 + 3 → three calls, none exceeding the limit.
+    expect(send).toHaveBeenCalledTimes(3);
+    for (const call of send.mock.calls) {
+      expect((call[0] as GetParametersCommand).input.Names!.length).toBeLessThanOrEqual(10);
+    }
+    expect(existing).toEqual(new Set(paths));
+  });
+
+  it("returns an empty set without calling SSM when there are no paths", async () => {
+    const send = vi.fn();
+    const existing = await getExistingSecretPaths({ send } as never, []);
+    expect(send).not.toHaveBeenCalled();
+    expect(existing).toEqual(new Set());
+  });
+
   it("lists names only and never exposes returned values", async () => {
     const send = vi.fn().mockResolvedValue({
       Parameters: [

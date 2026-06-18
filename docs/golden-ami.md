@@ -22,9 +22,9 @@ node never runs containers and an app node never runs Caddy:
 
 No Node.js anywhere: the agent is a self-contained Rust binary (~11 MB static). Cutting
 Docker + Node.js from the edge frees the ~150–300 MB they idled at, so the default
-**t3.micro** edge (1 GB) runs with comfortable headroom — target steady state is **< 400 MB
-used** (OS + SSM + CloudWatch + Caddy + agent). t3.nano (512 MB) is still **not** a
-supported default and is not auto-provisioned.
+**t3.nano** edge (512 MB) runs with comfortable headroom — target steady state is **< 400 MB
+used** (OS + SSM + CloudWatch + Caddy + agent). `t3.micro` (1 GB) remains plenty of margin
+if you size up manually.
 
 Both AMIs build from the **standard** AL2023 base (not "minimal") — it ships the SSM agent
 that `launchpad node upgrade-agent` and `node monitor` depend on.

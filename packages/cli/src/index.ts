@@ -23,6 +23,7 @@ import { registerSecret } from "./commands/secret";
 import { registerSetup } from "./commands/setup";
 import { registerStatus } from "./commands/status";
 import { effectiveCluster } from "./config/local";
+import { applyProductionEnvAlias } from "./env";
 import { CliError } from "./errors";
 import type { GlobalOpts } from "./globals";
 import { isJsonMode, log, printJson, setJsonMode } from "./ui/log";
@@ -81,6 +82,8 @@ function showsClusterBanner(path: string): boolean {
 }
 
 program.hook("preAction", (_thisCommand, actionCommand) => {
+  applyProductionEnvAlias(actionCommand);
+
   const opts = actionCommand.optsWithGlobals() as GlobalOpts;
   // `--no-color` is intentionally read from the ROOT program opts, NOT from the
   // merged `opts` above — it's a root-only global (see globals.ts). Do NOT

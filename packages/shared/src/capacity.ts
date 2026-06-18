@@ -30,6 +30,7 @@ export interface InstanceCapacity {
 
 /** Common instance types, so the happy path needs no AWS call. */
 export const INSTANCE_CAPACITY_TABLE: Record<string, RawInstanceCapacity> = {
+  "t3.nano": { vcpu: 2, memoryMiB: 512 },
   "t3.micro": { vcpu: 2, memoryMiB: 1024 },
   "t3.small": { vcpu: 2, memoryMiB: 2048 },
   "t3.medium": { vcpu: 2, memoryMiB: 4096 },

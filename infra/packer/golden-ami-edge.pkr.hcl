@@ -35,7 +35,7 @@ locals {
 
 # EDGE golden AMI: Caddy + CloudWatch Agent + the Rust edge agent. Deliberately NO
 # Docker and NO Node.js — an edge node's only job is S3 upstream shards → Caddy, and
-# the slimmer footprint keeps a t3.micro comfortable (the standard AL2023 base is
+# the slimmer footprint keeps a t3.nano comfortable (the standard AL2023 base is
 # kept over "minimal" because it ships the SSM agent `node upgrade-agent` depends on).
 source "amazon-ebs" "launch_pad_golden_edge" {
   region          = var.region

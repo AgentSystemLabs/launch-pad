@@ -228,7 +228,7 @@ HTTPS, public 80/443, Elastic IP), so every cluster runs at least **2 nodes**: t
 security group on the host-port range.
 
 **Empty-cluster bootstrap:** the first deploy to a cluster with **no nodes yet** doesn't
-error — `deploy` auto-provisions the dedicated edge (`edge-1`, default `t3.micro`) and a
+error — `deploy` auto-provisions the dedicated edge (`edge-1`, default `t3.nano`) and a
 first app node (a generated `<noun>-<verb>-<adverb>` name, auto-sized to fit the footprint).
 This is spend-gated like any
 provision (confirm prompt, `--yes` in CI, `--no-create` to opt out). To use an existing
@@ -254,6 +254,10 @@ hard-error behavior).
 
 ## Environments (`--env`)
 
+Production is the **base footprint** — run `launchpad deploy` with no `--env`. Passing
+`--env prod` or `--env production` is treated the same (with a warning); those names do not
+create a separate `<project>-prod` footprint.
+
 `deploy --env staging` deploys the same config as a separate **footprint**
 (`<project>-<env>`): domains are projected through `domainPattern` (the `{env}` token is
 required so environments can't collide; without a pattern the domain's first label is
@@ -276,12 +280,23 @@ S3 `desired.json`. The TOML only registers key **names** under `secrets = [...]`
 
 ```bash
 launchpad secret set DATABASE_URL --service api   # prompts for value, registers key
+launchpad secret import .env.prod --service api   # bulk-load a whole .env file
 launchpad deploy --restart --service api          # roll containers to pick it up
 ```
 
-SSM path layout: `/launch-pad/<cluster>/<ownerProject>/<service>/<KEY>`. The agent resolves
-secrets at container start and merges them with `env` (plain `env` wins on collision). IAM
-details are in [cli.md](cli.md#secret).
+SSM path layout: `/launch-pad/<cluster>/<ownerProject>/<service>/<KEY>`. Because
+`<ownerProject>` is `<project>-<env>` and `<cluster>` is the active cluster, **secret values
+are isolated per environment and per cluster** — the same key carries a different value in
+`staging` than in production. The agent resolves secrets at container start and **injects them
+as the container's env vars**, merged with the TOML `env` table (plain `env` wins on
+collision).
+
+Because the TOML `[service.env]` table is one shared value across every environment, secrets
+are how you vary config **per environment**: keep a `.env.<env>` per environment and
+`launchpad secret import .env.<env> --service <svc> --env <env>` into each. A key registered in
+the TOML is required by every environment's deploy, so import the same key set everywhere
+(different values per env). See [`secret import`](cli.md#secret-import) for the import rules and
+IAM details.
 
 ## Config lock
 

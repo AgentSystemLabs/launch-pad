@@ -39,21 +39,28 @@ export async function getSecretParameter(ssm: SSMClient, name: string): Promise<
   }
 }
 
+/** SSM `GetParameters` accepts at most 10 names per call — batch larger lookups. */
+const GET_PARAMETERS_MAX = 10;
+
 /** Return parameter names that exist under the given full paths. */
 export async function getExistingSecretPaths(
   ssm: SSMClient,
   paths: string[],
 ): Promise<Set<string>> {
-  if (paths.length === 0) return new Set();
-  const res = await ssm.send(
-    new GetParametersCommand({
-      Names: paths,
-      WithDecryption: false,
-    }),
-  );
   const found = new Set<string>();
-  for (const p of res.Parameters ?? []) {
-    if (p.Name) found.add(p.Name);
+  // Chunk by the API's 10-name limit so a service (or a bulk `secret import`) with
+  // more than 10 keys doesn't trip a ValidationException.
+  for (let i = 0; i < paths.length; i += GET_PARAMETERS_MAX) {
+    const batch = paths.slice(i, i + GET_PARAMETERS_MAX);
+    const res = await ssm.send(
+      new GetParametersCommand({
+        Names: batch,
+        WithDecryption: false,
+      }),
+    );
+    for (const p of res.Parameters ?? []) {
+      if (p.Name) found.add(p.Name);
+    }
   }
   return found;
 }

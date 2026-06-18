@@ -74,7 +74,7 @@ describe("estimateProvisionCost", () => {
   it("aggregates EC2 and S3 for provisioned nodes", () => {
     const est = estimateProvisionCost([
       { nodeId: "app-1", role: "app", instanceType: "t3.small", billsEc2: true },
-      { nodeId: "edge-1", role: "edge", instanceType: "t3.micro", billsEc2: true },
+      { nodeId: "edge-1", role: "edge", instanceType: "t3.nano", billsEc2: true },
     ]);
 
     expect(est.ec2Lines).toHaveLength(2);

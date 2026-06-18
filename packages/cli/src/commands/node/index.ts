@@ -382,18 +382,45 @@ async function safeListNodeIds(aws: AwsEnv): Promise<string[]> {
   }
 }
 
-async function usedCapacity(aws: AwsEnv, nodeId: string): Promise<{ cpu: number; memory: number }> {
+interface NodeDesiredSummary {
+  cpu: number;
+  memory: number;
+  /** The (project, service) footprints scheduled on this node, in desired-state order. */
+  services: Array<{ project: string; service: string; replicas: number; cron: boolean }>;
+}
+
+/** Read a node's desired.json once and derive its used capacity + scheduled services. */
+async function nodeDesiredSummary(aws: AwsEnv, nodeId: string): Promise<NodeDesiredSummary> {
+  const empty: NodeDesiredSummary = { cpu: 0, memory: 0, services: [] };
   const obj = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, nodeId));
-  if (!obj) return { cpu: 0, memory: 0 };
+  if (!obj) return empty;
   try {
     const state = parseDesiredState(obj.raw);
     return {
       cpu: state.services.reduce((s, x) => s + x.cpu, 0),
       memory: state.services.reduce((s, x) => s + x.memory, 0),
+      services: state.services.map((s) => ({
+        project: s.project,
+        service: s.service,
+        replicas: s.replicas,
+        cron: Boolean(s.cron),
+      })),
     };
   } catch {
-    return { cpu: 0, memory: 0 };
+    return empty;
   }
+}
+
+/** Compact one-line summary of the services scheduled on a node for `node list`. */
+function formatNodeServices(services: NodeDesiredSummary["services"]): string {
+  if (services.length === 0) return color.dim("no services");
+  return services
+    .map((s) => {
+      const reps = s.replicas > 1 ? color.dim(`×${s.replicas}`) : "";
+      const cron = s.cron ? color.dim(" (cron)") : "";
+      return `${color.cyan(`${s.project}/${s.service}`)}${reps ? ` ${reps}` : ""}${cron}`;
+    })
+    .join(color.dim(" · "));
 }
 
 async function heartbeat(aws: AwsEnv, nodeId: string): Promise<string> {
@@ -451,6 +478,12 @@ async function runList(opts: GlobalOpts): Promise<void> {
     return obs ? planNodeDrift(e, obs, { allowRecreate: true }).drift : "none";
   };
 
+  // One desired.json read per node serves both the capacity line and the service list.
+  const summaries = new Map<string, NodeDesiredSummary>();
+  for (const e of entries) summaries.set(e.nodeId, await nodeDesiredSummary(aws, e.nodeId));
+  const summaryOf = (nodeId: string): NodeDesiredSummary =>
+    summaries.get(nodeId) ?? { cpu: 0, memory: 0, services: [] };
+
   if (isJsonMode()) {
     printJson(
       items.map((item) => {
@@ -465,6 +498,7 @@ async function runList(opts: GlobalOpts): Promise<void> {
           ...item.node,
           ec2State: obs ? ec2StateLabel(obs) : null,
           drift: driftOf(item.node),
+          services: summaryOf(item.node.nodeId).services,
         };
       }),
     );
@@ -491,7 +525,7 @@ async function runList(opts: GlobalOpts): Promise<void> {
       continue;
     }
     const node = item.node;
-    const used = await usedCapacity(aws, node.nodeId);
+    const used = summaryOf(node.nodeId);
     const beat = await heartbeat(aws, node.nodeId);
     const obs = observe(node);
     const where = node.instanceId
@@ -509,6 +543,7 @@ async function runList(opts: GlobalOpts): Promise<void> {
           (obs ? ` · ec2 ${ec2StateLabel(obs)}` : ""),
       )}`,
     );
+    log.plain(`    ${color.dim("services:")} ${formatNodeServices(used.services)}`);
   }
   log.plain();
 }

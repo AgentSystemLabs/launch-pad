@@ -74,7 +74,7 @@ keeps the legacy un-prefixed root so pre-cluster nodes need no migration.
 | `app` | Containers only. **Private** — no public IP; reachable only by its edge's security group over the VPC. |
 
 Every cluster has exactly **one dedicated edge node** — auto-provisioned as `edge-1`
-(default instance type `t3.micro`, `DEFAULT_EDGE_INSTANCE_TYPE` in
+(default instance type `t3.nano`, `DEFAULT_EDGE_INSTANCE_TYPE` in
 `shared/src/constants.ts`) on the first deploy, or chosen via `cluster.json`'s
 `defaultEdge` / `cluster set-edge`. Every deploy therefore needs at least **2 nodes**:
 the edge + ≥1 app node.

@@ -72,7 +72,7 @@ npx @agentsystemlabs/launch-pad deploy --dry-run
 Expect a panel like:
 
 ```
-+ create edge-1 edge · t3.micro
++ create edge-1 edge · t3.nano
 + create app-1  app · t3.small
 ```
 
