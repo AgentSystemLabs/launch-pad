@@ -1,6 +1,6 @@
 {
   "name": "@agentsystemlabs/launch-pad",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Deploy your apps to your own AWS infrastructure — one command.",
   "license": "MIT",
   "repository": {

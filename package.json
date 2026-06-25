@@ -1,6 +1,6 @@
 {
   "name": "launch-pad-monorepo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "bin": {
     "launchpad": "./packages/cli/scripts/run-source.mjs",
