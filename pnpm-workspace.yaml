@@ -6,10 +6,11 @@ packages:
   - "examples/*"
   - "e2e"
 
-allowBuilds:
-  esbuild: set this to true or false
-
 # esbuild ships a native binary built via a postinstall script; tsup/tsx/vitest
-# all depend on it, so this build must be allowed to run.
+# all depend on it, so this build must be allowed to run. pnpm 11 gates build
+# scripts behind an explicit allow/deny map (`allowBuilds`); without `esbuild: true`
+# a fresh `pnpm install` aborts with ERR_PNPM_IGNORED_BUILDS (e.g. in CI).
+allowBuilds:
+  esbuild: true
 onlyBuiltDependencies:
   - esbuild
