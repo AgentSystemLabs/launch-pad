@@ -44,6 +44,7 @@ agent per VM) is deliberately portable to other major clouds.
 - **Zero-downtime rolling updates** — health-gated surge/drain, even at 1 replica
 - **Web services and background workers** in one TOML file, multiple projects per node
 - **Auto-provisioning** — missing nodes are created from a prebaked golden AMI (fast boots)
+- **Bring your own server** — enroll existing Linux hosts as app or edge nodes with `launchpad node init` (no EC2 provisioned)
 - **Private app nodes** behind a dedicated edge router (no public IPs on app nodes)
 - **Clusters & auto-placement** — capacity-aware scheduling without naming nodes
 - **Environments** — `deploy --env staging` namespaces domains, images, logs, and secrets
@@ -76,6 +77,7 @@ Full prerequisites (Docker, AWS credentials, DNS) and a guided first deploy:
 | [docs/golden-ami.md](docs/golden-ami.md) | The Packer-built golden AMI and node provisioning/bootstrap |
 | [docs/dashboard.md](docs/dashboard.md) | The local web dashboard (work in progress) |
 | [docs/testing.md](docs/testing.md) | Unit tests, the real-AWS e2e harness, build processes, CI status |
+| [docs/releasing.md](docs/releasing.md) | Publishing the CLI to npm via GitHub Actions OIDC Trusted Publishing |
 | [docs/codebase-layout.md](docs/codebase-layout.md) | Map of the repo — where each concern lives, where to change what |
 | [docs/overview.md](docs/overview.md) | The north-star spec: end-to-end flows and wire contracts |
 | [examples/README.md](examples/README.md) | Runnable examples for every feature combination |
@@ -97,8 +99,9 @@ Details and a "where to change what" table: [docs/codebase-layout.md](docs/codeb
 ## Project status
 
 Working and verified end-to-end against real AWS (see [docs/testing.md](docs/testing.md)),
-pre-1.0. The **dashboard is a work in progress**, and there is **no CI pipeline yet** — tests
-run locally.
+pre-1.0. The **dashboard is a work in progress**. Tests run locally (no test CI yet); releases
+publish the CLI to npm via GitHub Actions OIDC Trusted Publishing — see
+[docs/releasing.md](docs/releasing.md).
 
 ## Development
 

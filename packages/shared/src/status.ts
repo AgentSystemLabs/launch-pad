@@ -43,6 +43,36 @@ export const CronRunStatusSchema = z
   })
   .strict();
 
+/** Per-logical-database result inside a database service's backup rollup. */
+export const DatabaseBackupEntrySchema = z
+  .object({
+    name: z.string(),
+    /** Completion time (UTC ISO) of the last successful dump, or null. */
+    lastSuccessAt: z.string().nullable(),
+    /** Size of the last uploaded dump in bytes, or null before any success. */
+    sizeBytes: z.number().int().min(0).nullable(),
+  })
+  .strict();
+
+/**
+ * Backup rollup for a managed database service. Present only when `[database.backup]`
+ * is configured. All-nullable so a freshly-deployed database (no run yet) parses, and
+ * optional on ServiceStatus so non-database services are unchanged.
+ */
+export const DatabaseBackupStatusSchema = z
+  .object({
+    /** Scheduled fire time (UTC ISO) of the most recent backup run, or null. */
+    lastRunAt: z.string().nullable(),
+    /** Completion time (UTC ISO) of the last run where ALL databases dumped, or null. */
+    lastSuccessAt: z.string().nullable(),
+    /** Error from the last run (any database failed / upload failed), or null. */
+    lastError: z.string().nullable(),
+    /** Next scheduled fire time (UTC ISO), or null. */
+    nextRunAt: z.string().nullable(),
+    databases: z.array(DatabaseBackupEntrySchema).default([]),
+  })
+  .strict();
+
 export const ServiceStatusSchema = z
   .object({
     project: z.string(),
@@ -62,6 +92,8 @@ export const ServiceStatusSchema = z
     runningReplicas: z.number().int().min(0).default(0),
     /** Present only for scheduled (`cron`) services. */
     cron: CronRunStatusSchema.optional(),
+    /** Present only for managed database services with backups enabled. */
+    backup: DatabaseBackupStatusSchema.optional(),
     updatedAt: z.string(),
   })
   .strict();
@@ -119,6 +151,8 @@ export const NodeStatusSchema = z
 
 export type HostSample = z.infer<typeof HostSampleSchema>;
 export type CronRunStatus = z.infer<typeof CronRunStatusSchema>;
+export type DatabaseBackupEntry = z.infer<typeof DatabaseBackupEntrySchema>;
+export type DatabaseBackupStatus = z.infer<typeof DatabaseBackupStatusSchema>;
 export type ReplicaStatus = z.infer<typeof ReplicaStatusSchema>;
 export type ServiceStatus = z.infer<typeof ServiceStatusSchema>;
 export type CaddyStatus = z.infer<typeof CaddyStatusSchema>;

@@ -13,6 +13,7 @@ import {
   renderRemoteUpgradeScript,
   ssmRunBashScript,
 } from "./agent-upgrade";
+import { parseSshHost, sshRunScript, type SshTarget } from "./ssh";
 
 /**
  * Lifetime of the presigned agent-binary URL used during an upgrade. Short on
@@ -25,7 +26,7 @@ const UPGRADE_PRESIGN_TTL_SECONDS = 900;
 /** Cap on SSM stdout/stderr echoed into an error message. */
 const SSM_ERROR_DETAIL_MAX = 400;
 
-export type UpgradeDelivery = "ssm" | "manual" | "upload-only";
+export type UpgradeDelivery = "ssm" | "ssh" | "manual" | "upload-only";
 
 export interface UpgradeAgentResult {
   nodeId: string;
@@ -42,6 +43,8 @@ export interface UpgradeAgentParams {
   agentVersion: string;
   /** Upload to S3 but do not restart the on-box agent. */
   uploadOnly?: boolean;
+  /** SSH target used for external (BYOS) nodes. Defaults to publicIp/advertiseIp when possible. */
+  ssh?: SshTarget;
   onProgress?: (text: string) => void;
 }
 
@@ -60,25 +63,25 @@ function requireRunningInstance(obs: Ec2Observation, nodeId: string): void {
   });
 }
 
-/** Upload the local agent bundle to S3 and install it on the node's EC2 instance. */
+function roleForUpgrade(entry: NodeRegistryEntry): "app" | "edge" {
+  return entry.role === "app" ? "app" : "edge";
+}
+
+function defaultExternalSshTarget(entry: NodeRegistryEntry): SshTarget | null {
+  const host = entry.publicIp ?? entry.advertiseIp;
+  if (!host) return null;
+  return { host };
+}
+
+/** Upload the local agent bundle to S3 and install it on the node. */
 export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<UpgradeAgentResult> {
   const { aws, entry, agentVersion } = p;
   const report = p.onProgress ?? (() => {});
   const { nodeId, clusterId } = entry;
 
-  if (!entry.instanceId) {
-    throw new CliError(`node "${nodeId}" has no EC2 instance yet`, {
-      hint: "provision it with `launchpad node create` or deploy with auto-create",
-    });
-  }
-
-  const obsMap = await describeInstancesById(aws.ec2, [entry.instanceId]);
-  const obs = obsMap.get(entry.instanceId) ?? { kind: "missing" as const };
-  requireRunningInstance(obs, nodeId);
-
   // The binary must match the node's role: edge nodes get the Caddy-routing edge
   // agent, app nodes the Docker-reconciling app agent.
-  const role = entry.role === "app" ? ("app" as const) : ("edge" as const);
+  const role = roleForUpgrade(entry);
   report(`uploading ${role} agent binary for ${nodeId}`);
   const bundleUrl = await uploadAndPresignAgent(
     aws.s3,
@@ -93,6 +96,47 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
     await updateRegistryAgentVersion(aws, entry, agentVersion);
     return { nodeId, instanceId: entry.instanceId, agentType: "rust", delivery: "upload-only", bundleUrl };
   }
+
+  if (entry.provisioning === "external") {
+    const target = p.ssh ?? defaultExternalSshTarget(entry);
+    if (!target) {
+      return {
+        nodeId,
+        instanceId: null,
+        agentType: entry.agentType,
+        delivery: "manual",
+        bundleUrl,
+        error: "no SSH target available; pass --host <user@host>",
+      };
+    }
+    const userHost = target.user ? `${target.user}@${target.host}` : target.host;
+    report(`installing on ${userHost} via SSH`);
+    try {
+      await sshRunScript(target, renderRemoteUpgradeScript(bundleUrl, role));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        nodeId,
+        instanceId: null,
+        agentType: entry.agentType,
+        delivery: "manual",
+        bundleUrl,
+        error: message,
+      };
+    }
+    await updateRegistryAgentVersion(aws, entry, agentVersion);
+    return { nodeId, instanceId: null, agentType: "rust", delivery: "ssh" };
+  }
+
+  if (!entry.instanceId) {
+    throw new CliError(`node "${nodeId}" has no EC2 instance yet`, {
+      hint: "provision it with `launchpad node create` or deploy with auto-create",
+    });
+  }
+
+  const obsMap = await describeInstancesById(aws.ec2, [entry.instanceId]);
+  const obs = obsMap.get(entry.instanceId) ?? { kind: "missing" as const };
+  requireRunningInstance(obs, nodeId);
 
   report(`installing on ${entry.instanceId} via SSM`);
   await ensureSsmManagedPolicyForNode(aws.iam, entry);
@@ -142,6 +186,7 @@ export function manualUpgradeHint(
   nodeId: string,
   bundleUrl: string,
   ttlSeconds = UPGRADE_PRESIGN_TTL_SECONDS,
+  delivery: "ec2" | "external" = "ec2",
 ): string {
   // Inline the real (quoted) URL into the curl line so the block is copy-paste
   // runnable as-is — the old `<presigned-url>` placeholder forced the operator to
@@ -155,7 +200,14 @@ export function manualUpgradeHint(
     "    # if this node still runs the legacy TypeScript agent, also update the systemd",
     "    # unit to `ExecStart=/opt/launch-pad/agent` (see docs/agent.md, migration) before restarting",
     "",
-    "  Connect with EC2 Instance Connect (console) or SSH if the node has port 22 open.",
+    delivery === "external"
+      ? "  Connect to the BYOS host over SSH, or re-run `launchpad node upgrade-agent <name> --host <user@host> --ssh-key <path>`."
+      : "  Connect with EC2 Instance Connect (console) or SSH if the node has port 22 open.",
     `  (Presigned URL valid for ~${Math.round(ttlSeconds / 60)} min.)`,
   ].join("\n");
+}
+
+export function sshTargetFromHost(host: string, port?: number, key?: string): SshTarget {
+  const parsed = parseSshHost(host);
+  return { host: parsed.host, user: parsed.user, port, key };
 }

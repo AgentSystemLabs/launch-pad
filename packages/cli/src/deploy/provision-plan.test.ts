@@ -10,12 +10,17 @@ function demand(over: Partial<NodeDemand> & { nodeId: string }): NodeDemand {
   };
 }
 
-function fakeEntry(nodeId: string, state: NodeState, role: NodeRole = "app"): NodeRegistryEntry {
+function fakeEntry(
+  nodeId: string,
+  state: NodeState,
+  role: NodeRole = "app",
+  provisioning: "ec2" | "external" = "ec2",
+): NodeRegistryEntry {
   return {
     nodeId,
     clusterId: "default",
-    instanceId: "i-123",
-    instanceType: "t3.small",
+    instanceId: provisioning === "external" ? null : "i-123",
+    instanceType: provisioning === "external" ? "external" : "t3.small",
     region: "us-east-1",
     availabilityZone: null,
     role,
@@ -28,9 +33,12 @@ function fakeEntry(nodeId: string, state: NodeState, role: NodeRole = "app"): No
     eipAllocationId: null,
     securityGroupId: null,
     iamInstanceProfile: null,
+    provisioning,
+    advertiseIp: provisioning === "external" ? "203.0.113.5" : null,
+    iamUserName: provisioning === "external" ? `launch-pad-node-default-${nodeId}` : null,
     agentId: `agent-${nodeId}`,
     agentVersion: null,
-    agentType: "ts",
+    agentType: provisioning === "external" ? "rust" : "ts",
     createdAt: "2026-01-01T00:00:00Z",
     createdBy: "tester",
     state,
@@ -80,6 +88,13 @@ describe("planEdgeAction", () => {
       instanceType: "t3.nano",
     });
   });
+
+  it("classifies an external (BYOS) edge node as ready even when its state is stopped", async () => {
+    const entry = fakeEntry(EDGE, "stopped", "edge", "external");
+    const action = await planEdgeAction({ edgeNodeId: EDGE, load: async () => entry, allowCreate: true });
+    // External hosts have no EC2 instance to resume — they always already exist.
+    expect(action).toEqual({ kind: "ready", nodeId: EDGE, entry });
+  });
 });
 
 describe("buildProvisionPlan", () => {
@@ -103,6 +118,18 @@ describe("buildProvisionPlan", () => {
       allowCreate: true,
     });
     expect(plan[0]?.kind).toBe("resume");
+  });
+
+  it("classifies an external (BYOS) node as ready, never resume, regardless of state", async () => {
+    const entry = fakeEntry("byos-1", "stopped", "app", "external");
+    const plan = await buildProvisionPlan({
+      demands: [demand({ nodeId: "byos-1" })],
+      edgeNodeId: EDGE,
+      load: async () => entry,
+      allowCreate: true,
+    });
+    // An external host always already exists — launchpad never resumes/creates it.
+    expect(plan).toEqual([{ kind: "ready", nodeId: "byos-1", entry }]);
   });
 
   it("auto-sizes a missing node into an app-role create fronted by the cluster edge", async () => {

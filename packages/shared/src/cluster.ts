@@ -18,6 +18,8 @@ export const ClusterConfigSchema = z
     createdBy: z.string(),
     /** Reactive autoscaling policy for the app pool, or null when not configured. */
     autoscale: AutoscalePolicySchema.nullable().default(null),
+    /** SNS topic ARN for deploy notifications, or null when SNS is not enabled. */
+    snsTopicArn: z.string().min(1).nullable().default(null),
   })
   .strict();
 

@@ -5,7 +5,10 @@ import {
   HEARTBEAT_STALE_MS,
   isHeartbeatStale,
   LABEL_REGEX,
+  type NodeRegistryEntry,
   type NodeStatus,
+  nodeRegistryKey,
+  parseNodeRegistryEntry,
   parseNodeStatus,
   type ServiceState,
   statusKey,
@@ -51,6 +54,7 @@ function stateColor(state: ServiceState): (s: string) => string {
 interface NodeView {
   id: string;
   status: NodeStatus | null;
+  registry: NodeRegistryEntry | null;
 }
 
 async function fetchNodes(aws: AwsEnv, nodeIds: string[]): Promise<NodeView[]> {
@@ -65,7 +69,16 @@ async function fetchNodes(aws: AwsEnv, nodeIds: string[]): Promise<NodeView[]> {
         status = null;
       }
     }
-    views.push({ id, status });
+    const regObj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
+    let registry: NodeRegistryEntry | null = null;
+    if (regObj) {
+      try {
+        registry = parseNodeRegistryEntry(regObj.raw);
+      } catch {
+        registry = null;
+      }
+    }
+    views.push({ id, status, registry });
   }
   return views;
 }
@@ -74,7 +87,14 @@ function render(views: NodeView[], filterProject?: string): void {
   const now = Date.now();
   for (const view of views) {
     if (!view.status) {
-      log.plain(`  ${color.cyan(view.id)}  ${color.dim("no agent status yet")}`);
+      const missingExternal =
+        view.registry?.provisioning === "external" &&
+        (view.registry.state === "ready" || view.registry.state === "provisioning");
+      log.plain(
+        `  ${color.cyan(view.id)}  ${
+          missingExternal ? color.yellow("stale (no heartbeat)") : color.dim("no agent status yet")
+        }`,
+      );
       continue;
     }
     const stale = isHeartbeatStale(view.status.lastSeen, now, HEARTBEAT_STALE_MS);

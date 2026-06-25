@@ -1,5 +1,7 @@
 import {
   type CapacityServiceDemand,
+  HEARTBEAT_STALE_MS,
+  isHeartbeatStale,
   type NodeRegistryEntry,
   type ServiceConfig,
   allocatableCpu,
@@ -10,6 +12,8 @@ import {
   parseDesiredState,
   parseDesiredStateOrEmpty,
   parseNodeRegistryEntry,
+  parseNodeStatus,
+  statusKey,
 } from "@agentsystemlabs/launch-pad-shared";
 import type { AwsEnv } from "../aws/context";
 import { getJson, listNodeIds } from "../aws/s3-state";
@@ -39,6 +43,17 @@ export interface CandidateNodes {
   candidateNodes: CandidateNode[];
 }
 
+async function externalNodeHasFreshHeartbeat(aws: AwsEnv, nodeId: string, nowMs: number): Promise<boolean> {
+  const obj = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, nodeId));
+  if (!obj) return false;
+  try {
+    const status = parseNodeStatus(obj.raw);
+    return !isHeartbeatStale(status.lastSeen, nowMs, HEARTBEAT_STALE_MS);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The cluster placement planner's view of every app node in the cluster, in
  * `listNodeIds` (S3-lexicographic) order. Shared by `deploy` and `rebalance` so a
@@ -51,7 +66,7 @@ export interface CandidateNodes {
 export async function buildCandidateNodes(
   aws: AwsEnv,
   ownerProject: string,
-  opts: { needsCapacitySnapshot: boolean },
+  opts: { needsCapacitySnapshot: boolean; nowMs?: number },
 ): Promise<CandidateNodes> {
   const nodes = new Map<string, NodeRegistryEntry>();
   const clusterAppNodeIds: string[] = [];
@@ -63,6 +78,15 @@ export async function buildCandidateNodes(
     const entry = parseNodeRegistryEntry(obj.raw);
     nodes.set(id, entry);
     if (!nodeHostsContainers(entry.role)) continue;
+    if (entry.provisioning === "external" && entry.state !== "ready" && entry.state !== "provisioning") {
+      continue;
+    }
+    if (
+      entry.provisioning === "external" &&
+      !(await externalNodeHasFreshHeartbeat(aws, id, opts.nowMs ?? Date.now()))
+    ) {
+      continue;
+    }
     clusterAppNodeIds.push(id);
 
     let steadyCpu = 0;

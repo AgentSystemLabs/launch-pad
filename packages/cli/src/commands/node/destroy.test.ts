@@ -2,7 +2,16 @@ import { DEFAULT_CLUSTER, type NodeRegistryEntry } from "@agentsystemlabs/launch
 import { describe, expect, it } from "vitest";
 import type { AwsEnv } from "../../aws/context";
 import { nodeProfileName, nodeRoleName } from "../../aws/iam";
-import { assessEvacuation, nodesThatWouldOrphan, parseNodeNames, teardownNode } from "./index";
+import {
+  assessEvacuation,
+  assessExternalReconcile,
+  nodesThatWouldOrphan,
+  parseNodeNames,
+  scheduledServicesFromDesired,
+  teardownNode,
+  volumeBearingTargets,
+} from "./index";
+import { emptyDesiredState, PROTOCOL_VERSION } from "@agentsystemlabs/launch-pad-shared";
 
 describe("parseNodeNames", () => {
   it("parses a single name", () => {
@@ -57,6 +66,107 @@ describe("nodesThatWouldOrphan", () => {
       { name: "b", services: [{ project: "p", service: "worker" }] },
     ]);
     expect(result.map((r) => r.name)).toEqual(["a", "b"]);
+  });
+});
+
+describe("volumeBearingTargets", () => {
+  // The data-loss gate keys on this helper: a node hosting a volume-bearing service
+  // (a Postgres/data service) is refused even with --force. Destroy only proceeds when
+  // it returns [] OR --delete-data is passed.
+
+  // The runDestroy gate is exactly: `volumeRisks.length > 0 && deleteData !== true`.
+  const refuses = (risks: ReturnType<typeof volumeBearingTargets>, deleteData: boolean): boolean =>
+    risks.length > 0 && deleteData !== true;
+
+  it("(a) flags a node hosting a volume-bearing service (refused even with --force)", () => {
+    const risks = volumeBearingTargets([
+      { name: "db-node", services: [{ project: "shop", service: "db", hasVolume: true }] },
+    ]);
+    expect(risks).toEqual([
+      { name: "db-node", services: [{ project: "shop", service: "db", hasVolume: true }] },
+    ]);
+    // --force does not bypass the gate — only --delete-data does, so it still refuses.
+    expect(refuses(risks, false)).toBe(true);
+  });
+
+  it("(b) --delete-data lets a volume-bearing node through the gate", () => {
+    const risks = volumeBearingTargets([
+      { name: "db-node", services: [{ project: "shop", service: "db", hasVolume: true }] },
+    ]);
+    // The gate no longer refuses once --delete-data acknowledges the loss.
+    expect(refuses(risks, true)).toBe(false);
+  });
+
+  it("(c) a node with no volumes is unaffected by the gate", () => {
+    const risks = volumeBearingTargets([
+      { name: "web-node", services: [{ project: "shop", service: "web", hasVolume: false }] },
+      { name: "worker-node", services: [{ project: "shop", service: "worker" }] }, // hasVolume absent
+    ]);
+    expect(risks).toEqual([]);
+    expect(refuses(risks, false)).toBe(false);
+  });
+
+  it("returns only the volume-bearing services on a mixed node", () => {
+    const risks = volumeBearingTargets([
+      {
+        name: "mixed",
+        services: [
+          { project: "shop", service: "web", hasVolume: false },
+          { project: "shop", service: "db", hasVolume: true },
+        ],
+      },
+    ]);
+    expect(risks).toEqual([
+      { name: "mixed", services: [{ project: "shop", service: "db", hasVolume: true }] },
+    ]);
+  });
+
+  it("flags every volume-bearing node when destroying many at once", () => {
+    const risks = volumeBearingTargets([
+      { name: "a", services: [{ project: "p", service: "pg", hasVolume: true }] },
+      { name: "b", services: [{ project: "p", service: "redis", hasVolume: true }] },
+      { name: "c", services: [{ project: "p", service: "web", hasVolume: false }] },
+    ]);
+    expect(risks.map((r) => r.name)).toEqual(["a", "b"]);
+  });
+});
+
+describe("scheduledServicesFromDesired", () => {
+  it("maps services and flags volume-bearing ones", () => {
+    const raw = {
+      ...emptyDesiredState("node-a", "2026-06-25T00:00:00.000Z"),
+      services: [
+        { project: "shop", service: "web", image: "img:1", cpu: 256, memory: 256, ingress: null },
+        {
+          project: "shop",
+          service: "primary",
+          image: "postgres:16",
+          cpu: 1024,
+          memory: 1024,
+          ingress: null,
+          volumes: [{ name: "data", path: "/var/lib/postgresql/data" }],
+        },
+      ],
+    };
+    const out = scheduledServicesFromDesired(raw);
+    expect(out).toEqual([
+      { project: "shop", service: "web", hasVolume: false },
+      { project: "shop", service: "primary", hasVolume: true },
+    ]);
+  });
+
+  it("fails CLOSED on an unparseable desired.json (synthetic volume-bearing service)", () => {
+    // A present-but-corrupt desired.json must NOT look service-free — that would let
+    // `node destroy` wipe a database volume without --delete-data.
+    const out = scheduledServicesFromDesired({ version: PROTOCOL_VERSION, garbage: true });
+    expect(out).toHaveLength(1);
+    expect(out[0]?.hasVolume).toBe(true);
+    // And the data-loss gate fires on it.
+    expect(volumeBearingTargets([{ name: "node-x", services: out }])).toHaveLength(1);
+  });
+
+  it("treats an empty desired.json as no services", () => {
+    expect(scheduledServicesFromDesired(emptyDesiredState("node-a", "2026-06-25T00:00:00.000Z"))).toEqual([]);
   });
 });
 
@@ -133,6 +243,40 @@ describe("assessEvacuation", () => {
     const a = assessEvacuation([{ name: "a", services: [] }], owner, clusterPlaced);
     expect(a.drainNodes).toEqual([]);
     expect(a.unmovable).toEqual([]);
+  });
+});
+
+describe("assessExternalReconcile", () => {
+  const now = Date.parse("2026-06-20T00:00:00.000Z");
+
+  it("marks a live external provisioning node ready", () => {
+    expect(
+      assessExternalReconcile(
+        { provisioning: "external", state: "provisioning" },
+        "2026-06-19T23:59:45.000Z",
+        now,
+      ),
+    ).toEqual({ heartbeat: "live", action: "mark-ready" });
+  });
+
+  it("flags stale external ready nodes for operator action", () => {
+    expect(
+      assessExternalReconcile(
+        { provisioning: "external", state: "ready" },
+        "2026-06-19T23:58:00.000Z",
+        now,
+      ),
+    ).toEqual({ heartbeat: "stale", action: "operator-action" });
+  });
+
+  it("ignores EC2 entries", () => {
+    expect(
+      assessExternalReconcile(
+        { provisioning: "ec2", state: "ready" },
+        "2026-06-19T23:58:00.000Z",
+        now,
+      ),
+    ).toEqual({ heartbeat: "stale", action: "noop" });
   });
 });
 
@@ -219,5 +363,27 @@ describe("teardownNode — per-node IAM cleanup", () => {
     // The other teardown steps still run; the call resolves rather than throwing.
     await expect(teardownNode(aws, node())).resolves.toBeUndefined();
     expect(sent.some((c) => c.client === "s3")).toBe(true);
+  });
+
+  it("cordons an external node before deleting its IAM user and S3 state", async () => {
+    const sent: SentCommand[] = [];
+    await teardownNode(
+      makeRecordingAws(sent),
+      node({
+        instanceId: null,
+        eipAllocationId: null,
+        securityGroupId: null,
+        provisioning: "external",
+        iamUserName: "launch-pad-node-default-node-1",
+        state: "ready",
+      }),
+    );
+
+    const s3 = sent.filter((c) => c.client === "s3");
+    const cordon = s3.find((c) => c.kind === "PutObjectCommand");
+    expect(cordon?.input.Key).toBe("nodes/node-1/node.json");
+    expect(JSON.parse(cordon?.input.Body as string).state).toBe("terminating");
+    expect(sent.map((c) => `${c.client}:${c.kind}`)).toContain("iam:DeleteUserCommand");
+    expect(sent.map((c) => `${c.client}:${c.kind}`)).toContain("s3:DeleteObjectsCommand");
   });
 });

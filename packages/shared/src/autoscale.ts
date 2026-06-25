@@ -81,6 +81,12 @@ export interface AutoscaleNodeObservation {
   state: string;
   /** Never pick as a scale-in victim (dedicated edge, the cluster's default edge, …). */
   protected?: boolean;
+  /**
+   * Provisioning mode. External (BYOS) nodes are real capacity — they count toward
+   * pool size / minNodes / utilization — but are NEVER drained as scale-in victims
+   * (the autoscaler doesn't own the operator's host). Defaults to "ec2".
+   */
+  provisioning?: "ec2" | "external";
   /** Host CPU busy % from the node's latest status.json sample, or null when absent/stale. */
   cpuPercent: number | null;
   /** Host memory used % from the node's latest status.json sample, or null when absent/stale. */
@@ -158,7 +164,9 @@ export function planAutoscale(input: {
         (n.memoryPercent as number) < policy.scaleInPercent,
     );
   if (pool.length > policy.minNodes && everyNodeCold) {
-    const candidates = pool.filter((n) => n.protected !== true);
+    const candidates = pool.filter(
+      (n) => n.protected !== true && (n.provisioning ?? "ec2") !== "external",
+    );
     if (candidates.length === 0) {
       return { action: "none", reason: "pool is cold but every node is protected (edge/default-edge)" };
     }

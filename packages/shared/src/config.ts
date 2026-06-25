@@ -1,5 +1,15 @@
 import { z } from "zod";
-import { LAUNCH_PAD_ENVIRONMENT } from "./constants";
+import {
+  DEFAULT_BACKUP_RETENTION_DAYS,
+  DEFAULT_DATABASE_CPU,
+  DEFAULT_DATABASE_MEMORY,
+  DEFAULT_POSTGRES_VERSION,
+  LAUNCH_PAD_ENVIRONMENT,
+  POSTGRES_DATA_PATH,
+  POSTGRES_IMAGE_REPO,
+  POSTGRES_PASSWORD_SECRET,
+  POSTGRES_VOLUME_NAME,
+} from "./constants";
 import { cronExpressionError, nextCronFire, parseCronExpression } from "./cron";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import { SECRET_KEY_HINT, SECRET_KEY_REGEX } from "./secrets";
@@ -90,7 +100,22 @@ const DEPRECATED_SERVICE_KEYS: ReadonlyMap<string, string> = new Map([
   ],
 ]);
 
-const SUPPORTED_TOP_LEVEL_KEYS = new Set(["project", "component", "domainPattern", "service"]);
+const SUPPORTED_TOP_LEVEL_KEYS = new Set(["project", "component", "domainPattern", "service", "database"]);
+
+/** Keys allowed in a `[[database]]` block — rejects typos before Zod runs. */
+const SUPPORTED_DATABASE_KEYS = new Set([
+  "name",
+  "engine",
+  "version",
+  "storage",
+  "cpu",
+  "memory",
+  "databases",
+  "backup",
+]);
+
+/** Keys allowed in a `[database.backup]` block. */
+const SUPPORTED_BACKUP_KEYS = new Set(["schedule", "retentionDays"]);
 
 const SUPPORTED_SERVICE_KEYS = new Set([
   "name",
@@ -122,6 +147,26 @@ export function assertSupportedLaunchPadConfigRaw(input: unknown): void {
     if (!SUPPORTED_TOP_LEVEL_KEYS.has(key)) {
       throw new Error(`(root).${key}: unsupported key "${key}"`);
     }
+  }
+
+  const databases = root.database;
+  if (Array.isArray(databases)) {
+    databases.forEach((raw, i) => {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
+      for (const key of Object.keys(raw)) {
+        if (!SUPPORTED_DATABASE_KEYS.has(key)) {
+          throw new Error(`database[${i}].${key}: unsupported key "${key}"`);
+        }
+      }
+      const backup = (raw as Record<string, unknown>).backup;
+      if (typeof backup === "object" && backup !== null && !Array.isArray(backup)) {
+        for (const key of Object.keys(backup)) {
+          if (!SUPPORTED_BACKUP_KEYS.has(key)) {
+            throw new Error(`database[${i}].backup.${key}: unsupported key "${key}"`);
+          }
+        }
+      }
+    });
   }
 
   const services = root.service;
@@ -183,6 +228,116 @@ export const VolumeDeclSchema = z
   .strict();
 export type VolumeDecl = z.infer<typeof VolumeDeclSchema>;
 
+/** Database engines a `[[database]]` block can run. Postgres only for now. */
+export const DATABASE_ENGINES = ["postgres"] as const;
+export const DatabaseEngineSchema = z.enum(DATABASE_ENGINES);
+export type DatabaseEngine = z.infer<typeof DatabaseEngineSchema>;
+
+/** A Postgres image tag like "16" or "15.6". */
+export const POSTGRES_VERSION_REGEX = /^[0-9]+(\.[0-9]+)?$/;
+
+/**
+ * Unquoted SQL identifier for a logical database name (the directory each db's
+ * backups land in). Looser than a DNS label — Postgres identifiers allow uppercase,
+ * underscores, and `$` — but slash-free so it's a safe single S3 path segment.
+ */
+export const LOGICAL_DB_NAME_REGEX = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
+const logicalDbName = z
+  .string()
+  .regex(
+    LOGICAL_DB_NAME_REGEX,
+    "logical database name must be a valid postgres identifier (letters, digits, underscore, $; start with a letter or underscore)",
+  );
+
+/**
+ * `[database.backup]` — turns on the built-in S3 backup sidecar for a managed
+ * database. The agent runs `pg_dump` per logical database on the `schedule` (a
+ * 5-field UTC cron) and uploads a gzip dump to the cluster's backups bucket, then
+ * prunes dumps older than `retentionDays` for that database. Operational, not
+ * identity: schedule + retention may change after the first deploy.
+ */
+export const BackupDeclSchema = z
+  .object({
+    /** 5-field UTC cron expression for the daily/periodic backup run. */
+    schedule: z.string(),
+    /** Days of dumps retained per database; older ones are pruned after each run. */
+    retentionDays: z
+      .number()
+      .int()
+      .min(1, "retentionDays must be >= 1")
+      .max(3650, "retentionDays must be <= 3650 (10 years)")
+      .default(DEFAULT_BACKUP_RETENTION_DAYS),
+  })
+  .strict();
+export type BackupDecl = z.infer<typeof BackupDeclSchema>;
+
+/**
+ * One `[[database]]` block: a managed, persisted database the CLI desugars into a
+ * worker `[[service]]` (the engine image + a sticky data volume) plus an optional
+ * S3 backup sidecar. There is NO user-facing build for it — the image is pinned by
+ * `engine`/`version`. See `expandDatabaseServices` and `docs/configuration.md`.
+ */
+export const DatabaseDeclSchema = z
+  .object({
+    /** Becomes the service name (and container/ECR-free identity) — a DNS label. */
+    name: label("database name"),
+    engine: DatabaseEngineSchema.default("postgres"),
+    version: z
+      .string()
+      .regex(POSTGRES_VERSION_REGEX, 'version must be a postgres image tag like "16" or "15.6"')
+      .default(DEFAULT_POSTGRES_VERSION),
+    /** Advisory storage hint (e.g. "20Gi") — sizes node-disk expectation; not a hard cap. */
+    storage: z.string().min(1).optional(),
+    cpu: z
+      .number()
+      .int()
+      .min(SERVICE_NUMERIC_FIELD_MIN.cpu, "cpu must be a positive integer (vCPU shares, 1024 = 1 vCPU)")
+      .default(DEFAULT_DATABASE_CPU),
+    memory: z
+      .number()
+      .int()
+      .min(SERVICE_NUMERIC_FIELD_MIN.memory, "memory must be a positive integer (MB)")
+      .default(DEFAULT_DATABASE_MEMORY),
+    /**
+     * Logical databases to back up. Empty → the backup sidecar enumerates every
+     * non-template database at run time. (LaunchPad does NOT create these — manage
+     * them with migrations/psql; this only scopes which ones get dumped.)
+     */
+    databases: z.array(logicalDbName).default([]),
+    backup: BackupDeclSchema.optional(),
+  })
+  .strict()
+  .superRefine((db, ctx) => {
+    if (db.backup !== undefined) {
+      const exprErr = cronExpressionError(db.backup.schedule);
+      if (exprErr) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: exprErr, path: ["backup", "schedule"] });
+      } else if (nextCronFire(parseCronExpression(db.backup.schedule), Date.now()) === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "backup schedule never fires (no matching date within a year)",
+          path: ["backup", "schedule"],
+        });
+      }
+    }
+  });
+export type DatabaseDecl = z.infer<typeof DatabaseDeclSchema>;
+
+/**
+ * Marker attached to a desugared database service so the agent knows to run the
+ * engine image (no build) and how to drive `pg_dump`. Carried on the wire in
+ * desired.json; frozen identity in the config lock (a version bump is a migration).
+ */
+export const ServiceDatabaseSchema = z
+  .object({
+    engine: DatabaseEngineSchema,
+    version: z.string().regex(POSTGRES_VERSION_REGEX),
+    /** Logical databases to back up (empty → enumerate at run time). */
+    databases: z.array(logicalDbName).default([]),
+  })
+  .strict();
+export type ServiceDatabase = z.infer<typeof ServiceDatabaseSchema>;
+
 /** One `[[service]]` block in launch-pad.toml. */
 export const ServiceDeclSchema = z
   .object({
@@ -215,9 +370,41 @@ export const ServiceDeclSchema = z
     rollout: RolloutSchema.default({}),
     /** Persistent named volumes mounted into this service's container(s). */
     volumes: z.array(VolumeDeclSchema).default([]),
+    /**
+     * Managed-database marker. Set only by `expandDatabaseServices` (the desugar of
+     * a `[[database]]` block) — not authorable directly in `[[service]]`, which is
+     * why `database`/`backup` are absent from `SUPPORTED_SERVICE_KEYS`.
+     */
+    database: ServiceDatabaseSchema.optional(),
+    /** S3 backup config for a managed database service (set by the desugar). */
+    backup: BackupDeclSchema.optional(),
   })
   .strict()
   .superRefine((s, ctx) => {
+    if (s.database !== undefined) {
+      const isWeb = s.domain !== undefined && s.port !== undefined;
+      if (isWeb || s.cron !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "a managed database service can't serve a domain or run on a cron",
+          path: ["database"],
+        });
+      }
+      if (s.volumes.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "a managed database service must declare a persistent volume",
+          path: ["volumes"],
+        });
+      }
+    }
+    if (s.backup !== undefined && s.database === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "`backup` is only valid on a managed database service",
+        path: ["backup"],
+      });
+    }
     if ((s.domain === undefined) !== (s.port === undefined)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -319,6 +506,12 @@ export const LaunchPadConfigSchema = z
     /** Project-wide default `domainPattern` (per-service `domainPattern` overrides it). */
     domainPattern: z.string().min(1).optional(),
     service: z.array(ServiceDeclSchema).min(1, "at least one [[service]] is required"),
+    /**
+     * Managed databases — desugared into worker services + backup sidecars at deploy.
+     * Optional (not defaulted) so existing `LaunchPadConfig` literals/call sites that
+     * predate databases keep type-checking; new readers use `?? []`.
+     */
+    database: z.array(DatabaseDeclSchema).optional(),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -354,6 +547,18 @@ export const LaunchPadConfigSchema = z
       }
       seen.add(s.name);
     });
+    // A `[[database]]` desugars into a service named after it, so its name shares the
+    // service namespace — reject collisions and duplicate database names up front.
+    (cfg.database ?? []).forEach((db, i) => {
+      if (seen.has(db.name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `database name "${db.name}" collides with an existing service or database name`,
+          path: ["database", i, "name"],
+        });
+      }
+      seen.add(db.name);
+    });
   });
 
 export type ServiceDecl = z.infer<typeof ServiceDeclSchema>;
@@ -368,6 +573,49 @@ export function parseLaunchPadConfig(input: unknown): LaunchPadConfig {
 /** True when the service declares ingress (web) rather than being a worker. */
 export function isWebService(s: ServiceDecl): boolean {
   return s.domain !== undefined && s.port !== undefined;
+}
+
+/** Pinned engine image for a managed database — pulled, never built. */
+export function databaseImage(db: { engine: DatabaseEngine; version: string }): string {
+  // Only postgres today; keep the switch so a new engine is a compile error to forget.
+  switch (db.engine) {
+    case "postgres":
+      return `${POSTGRES_IMAGE_REPO}:${db.version}`;
+  }
+}
+
+/** True when a desugared service is a managed database (runs a pinned engine image, not a build). */
+export function isDatabaseService(s: Pick<ServiceDecl, "database">): boolean {
+  return s.database !== undefined;
+}
+
+/**
+ * Desugar every `[[database]]` block into an appended worker `[[service]]` (engine
+ * image + sticky data volume + POSTGRES_PASSWORD secret + database/backup markers),
+ * returning a config whose `database` array is cleared. The single point where the
+ * managed-database concept becomes ordinary services — everything downstream
+ * (placement, capacity, merge, config-lock, the agent) sees only services.
+ */
+export function expandDatabaseServices(config: LaunchPadConfig): LaunchPadConfig {
+  const databases = config.database ?? [];
+  if (databases.length === 0) return config;
+  const dbServices = databases.map((db) =>
+    ServiceDeclSchema.parse({
+      name: db.name,
+      cpu: db.cpu,
+      memory: db.memory,
+      secrets: [POSTGRES_PASSWORD_SECRET],
+      volumes: [{ name: POSTGRES_VOLUME_NAME, path: POSTGRES_DATA_PATH }],
+      database: { engine: db.engine, version: db.version, databases: db.databases },
+      ...(db.backup !== undefined ? { backup: db.backup } : {}),
+    }),
+  );
+  return { ...config, service: [...config.service, ...dbServices], database: [] };
+}
+
+/** All managed-database service names in a parsed (pre-expansion) config. */
+export function databaseServiceNames(config: LaunchPadConfig): string[] {
+  return (config.database ?? []).map((db) => db.name);
 }
 
 /**

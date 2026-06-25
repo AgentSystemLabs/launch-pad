@@ -22,6 +22,31 @@ export const PROTOCOL_VERSION = 2 as const;
 export const DEFAULT_EDGE_INSTANCE_TYPE = "t3.nano";
 
 /**
+ * Managed-database defaults. A `[[database]]` block desugars into a worker service
+ * running the official Postgres image with a persistent volume at the data dir, plus
+ * (optionally) an agent-run backup to S3. The image comes from the public ECR mirror,
+ * NOT Docker Hub, because the agent's NAT IP gets rate-limited (429) by Docker Hub.
+ */
+export const DEFAULT_POSTGRES_VERSION = "16";
+export const POSTGRES_IMAGE_REPO = "public.ecr.aws/docker/library/postgres";
+/** Container path the Postgres data volume mounts at (PGDATA's parent). */
+export const POSTGRES_DATA_PATH = "/var/lib/postgresql/data";
+/** Volume name the desugar gives a database service's data volume. */
+export const POSTGRES_VOLUME_NAME = "data";
+/** Conventional secret key holding the Postgres superuser password (POSTGRES_PASSWORD env). */
+export const POSTGRES_PASSWORD_SECRET = "POSTGRES_PASSWORD";
+/** Default CPU shares / memory (MB) for a managed database service. */
+export const DEFAULT_DATABASE_CPU = 1024;
+export const DEFAULT_DATABASE_MEMORY = 1024;
+/** Default days of daily backups retained per database before the sidecar prunes them. */
+export const DEFAULT_BACKUP_RETENTION_DAYS = 7;
+/**
+ * Cron-fire state key namespace for database backups, so a backup schedule's last-fire
+ * anchor never collides with a same-named `cron` service in the agent's state.
+ */
+export const BACKUP_STATE_KEY_PREFIX = "backup:";
+
+/**
  * Format version of the per-project `config-baseline.json` (see config-lock.ts).
  * This is the config-lock file format, NOT the wire protocol — it happens to also
  * be 1 right now, but it is a SEPARATE number from PROTOCOL_VERSION and the two

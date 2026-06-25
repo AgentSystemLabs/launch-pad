@@ -9,6 +9,12 @@ export interface AgentConfig {
   region: string;
   clusterId: string;
   role: NodeRole;
+  /**
+   * External (BYOS) nodes only: the IP the edge dials to reach this node's container
+   * host ports. The agent advertises this in its upstream shard instead of the
+   * EC2-metadata private IP. EC2 nodes omit it (rendering is unchanged for them).
+   */
+  advertiseIp?: string;
 }
 
 export interface UserDataParams {

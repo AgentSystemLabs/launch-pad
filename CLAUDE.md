@@ -260,6 +260,13 @@ launch-pad-state-<acct>-<region>/
 The `default` cluster keeps the legacy un-prefixed `nodes/` root so pre-cluster nodes need no
 migration. State lives under `nodes/` (the machine is the durable identity), not `agents/`.
 
+Database backups live in a **separate** account+region bucket (auto-created + hardened on first
+DB deploy), always cluster-prefixed (even `default`):
+
+```
+launch-pad-backups-<acct>-<region>/<cluster>/<owner>/<service>/<database>/<timestamp>.sql.gz
+```
+
 ## Cross-cutting invariants (don't break these)
 
 - **Node roles** (`edge` | `app`): `edge` = the cluster's single dedicated Caddy router, no
@@ -311,6 +318,19 @@ migration. State lives under `nodes/` (the machine is the durable identity), not
   (`ingress.edge` = its node id, required on the wire). Deploy must clean a vacated node's
   desired.json when placement moves (skipped for `--service`/`--changed` partials), and
   `deploy --restart` pins to the published footprint so a re-plan can't move services.
+- **Managed databases** (`[[database]]`): pure CLI sugar — `expandDatabaseServices` (shared
+  `config.ts`) desugars each block into ONE worker `[[service]]` (pinned `public.ecr.aws` postgres
+  image, no build; sticky data volume at `/var/lib/postgresql/data`; `POSTGRES_PASSWORD` secret)
+  carrying optional `database` + `backup` markers on the wire. Everything downstream sees only
+  services. Config-lock **freezes** `database.engine`+`version` (a version bump is a migration);
+  the backup `schedule`/`retentionDays`/target `databases` stay mutable. Backups are **agent-run,
+  not a separate container**: the app agent runs `pg_dump -Z` via `docker exec` into the DB
+  container on the cron schedule and uploads to the separate backups bucket using its instance
+  role (no AWS creds in the container), then prunes per `retentionDays`. The object timestamp is
+  derived from the scheduled `fire_ms` (idempotent crash-retry). `node destroy` refuses a node
+  holding ANY volume-bearing service unless `--delete-data` (NOT bypassable by `--force`;
+  unparseable desired.json fails closed). No app↔DB service discovery in v1 (a DB has no published
+  port). Backup IAM (`buildAppPolicy`) is cluster-prefix-scoped, app-only.
 - **Partial (subset) deploys** (`deploy --service` / `deploy --changed`, and the `scale`/`config
   set` edits that wrap a single-service deploy): the per-node publish must **upsert** the
   project's services (`mergeProjectServicesPartial`), never replace its whole footprint. A subset

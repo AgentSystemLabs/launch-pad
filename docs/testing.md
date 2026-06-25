@@ -167,10 +167,19 @@ the agent or baked dependencies change. Details: [golden-ami.md](golden-ami.md).
 
 ## CI status
 
-There are **no GitHub Actions workflows yet** — typecheck, unit tests, the e2e run, and
-golden AMI builds are all run locally via the commands above. When CI lands, the intended
-gates are `pnpm typecheck` + `pnpm test` on every push, with the e2e harness and AMI build
-as manually-triggered jobs (they need real AWS credentials and spend).
+Two GitHub Actions workflows are checked in:
+
+- `.github/workflows/byos-bootstrap.yml` runs the BYOS external bootstrap renderer tests on
+  Ubuntu 22.04, Ubuntu 24.04, and Amazon Linux 2023 (via container) so the `dnf` and `apt-get`
+  bootstrap branches stay covered.
+- `.github/workflows/release.yml` publishes the `@agentsystemlabs/launch-pad` CLI to npm via
+  OIDC Trusted Publishing on a `v*` tag (typecheck + test gate the publish). See
+  [releasing.md](releasing.md).
+
+Broader repo gates are still local for now: `pnpm typecheck`, `pnpm test`, the e2e harness,
+and golden AMI builds are run via the commands above. Future CI should add `pnpm typecheck` +
+`pnpm test` on every push, with the e2e harness and AMI build as manually-triggered jobs
+(they need real AWS credentials and spend).
 
 ## Other conventions
 

@@ -11,7 +11,13 @@ import {
   PutPublicAccessBlockCommand,
   type S3Client,
 } from "@aws-sdk/client-s3";
-import { bucketTags, CLUSTERS_PREFIX, clusterNodesPrefix, projectsPrefix } from "@agentsystemlabs/launch-pad-shared";
+import {
+  backupsBucketName,
+  bucketTags,
+  CLUSTERS_PREFIX,
+  clusterNodesPrefix,
+  projectsPrefix,
+} from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 import { awsErrorName, awsStatusCode } from "./errors";
 import { ensureBucketTags } from "./tags";
@@ -31,12 +37,20 @@ export class PreconditionFailedError extends Error {
   }
 }
 
-/** Idempotently ensure the state bucket exists with sane defaults. */
-export async function ensureBucket(
+/**
+ * Idempotently create-or-adopt a bucket with the hardening every launch-pad bucket
+ * shares: a HeadBucket probe (tag + return when it already exists), CreateBucket with
+ * the region LocationConstraint for non-us-east-1, BucketAlreadyOwnedByYou tolerance,
+ * an all-true PublicAccessBlock, AES256 default encryption, versioning, and tags.
+ * `kind` only flavors the 403 error message (state vs. backups). Shared by
+ * {@link ensureBucket} and {@link ensureBackupsBucket} so they can't drift.
+ */
+async function ensureHardenedBucket(
   s3: S3Client,
   bucket: string,
   region: string,
   clusterId: string,
+  kind: "state" | "backups",
 ): Promise<void> {
   const tags = bucketTags({ clusterId });
 
@@ -48,7 +62,7 @@ export async function ensureBucket(
     const status = awsStatusCode(error);
     const name = awsErrorName(error);
     if (status === 403 || name === "Forbidden") {
-      throw new CliError(`the state bucket ${bucket} exists but is not accessible (403)`, {
+      throw new CliError(`the ${kind} bucket ${bucket} exists but is not accessible (403)`, {
         hint: "it may be owned by another AWS account, or your IAM user lacks s3:ListBucket",
       });
     }
@@ -104,6 +118,31 @@ export async function ensureBucket(
     }),
   );
   await ensureBucketTags(s3, bucket, tags);
+}
+
+/** Idempotently ensure the state bucket exists with sane defaults. */
+export async function ensureBucket(
+  s3: S3Client,
+  bucket: string,
+  region: string,
+  clusterId: string,
+): Promise<void> {
+  await ensureHardenedBucket(s3, bucket, region, clusterId, "state");
+}
+
+/**
+ * Idempotently ensure the dedicated database-backups bucket
+ * (`launch-pad-backups-<acct>-<region>`) exists, hardened identically to the state
+ * bucket (private + encrypted + versioned + tagged). Called once per deploy that has
+ * a backup-bearing managed database, before publishing the service's backup config.
+ */
+export async function ensureBackupsBucket(
+  s3: S3Client,
+  accountId: string,
+  region: string,
+  clusterId: string,
+): Promise<void> {
+  await ensureHardenedBucket(s3, backupsBucketName(accountId, region), region, clusterId, "backups");
 }
 
 /** Read + JSON-decode an object, or null if it doesn't exist. */

@@ -26,6 +26,11 @@ pub struct AgentConfig {
     /// REQUIRED — matches the TS `AgentConfigSchema`. The legacy "both" still
     /// parses (enum keeps it) but the binaries refuse to run with it.
     pub role: NodeRole,
+    /// External (BYOS) nodes: the IP the edge dials to reach this node's
+    /// container host ports. Absent on managed EC2 nodes (the agent falls back
+    /// to the IMDS private IP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_ip: Option<String>,
 }
 
 /// Parse + validate the agent config JSON. Mirrors `AgentConfigSchema.parse`.
@@ -64,8 +69,26 @@ mod tests {
                 region: "us-east-1".into(),
                 cluster_id: "lower".into(),
                 role: NodeRole::Edge,
+                advertise_ip: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_an_external_node_advertise_ip() {
+        let json = r#"{
+            "nodeId": "n1", "agentId": "a1", "bucket": "b", "region": "us-east-1",
+            "role": "app", "advertiseIp": "10.0.2.42"
+        }"#;
+        let cfg = parse_agent_config(json).unwrap();
+        assert_eq!(cfg.advertise_ip.as_deref(), Some("10.0.2.42"));
+    }
+
+    #[test]
+    fn defaults_advertise_ip_to_none_when_absent() {
+        let json = r#"{ "nodeId": "n1", "agentId": "a1", "bucket": "b", "region": "us-east-1", "role": "app" }"#;
+        let cfg = parse_agent_config(json).unwrap();
+        assert_eq!(cfg.advertise_ip, None);
     }
 
     #[test]

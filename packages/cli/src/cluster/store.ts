@@ -28,6 +28,7 @@ export async function ensureClusterConfig(aws: AwsEnv, clusterId: string): Promi
     createdAt: new Date().toISOString(),
     createdBy: aws.callerArn,
     autoscale: null,
+    snsTopicArn: null,
   };
   await putClusterConfig(aws, config);
   return config;

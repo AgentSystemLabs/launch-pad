@@ -16,18 +16,23 @@ import {
   type ServiceConfig,
   type ServiceDecl,
   assertConfigLockAllowed,
+  backupServicePrefix,
+  backupsBucketName,
   baselineFromDeployedFootprints,
   buildDeployEvent,
   CONFIG_LOCK_MUTABLE_HINT,
+  type ConfigLockCompareOptions,
   checkCapacity,
   configBaselineKey,
   deployEventKey,
   type DeployKind,
   containerEnvForDeploy,
+  databaseImage,
   findCrossComponentServiceConflicts,
   findEnvSecretConflicts,
   desiredKey,
   ecrRepositoryName,
+  isDatabaseService,
   remoteBuildContextKey,
   parseEcrImageUri,
   parseConfigBaseline,
@@ -61,8 +66,9 @@ import { getExistingSecretPaths } from "../aws/ssm-secrets";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import { describeInstancesById, getDefaultVpcId } from "../aws/ec2";
 import { ensureRepository, getEcrAuth, imageExists } from "../aws/ecr";
-import { getJson, PreconditionFailedError, putJson } from "../aws/s3-state";
-import { adoptEdgeIfUnset, getClusterConfig } from "../cluster/store";
+import { ensureBackupsBucket, getJson, PreconditionFailedError, putJson } from "../aws/s3-state";
+import { createOrGetTopic, publishDeployNotification } from "../aws/sns";
+import { adoptEdgeIfUnset, getClusterConfig, putClusterConfig } from "../cluster/store";
 import { loadConfig } from "../config/load";
 import { loadProjectIndex, upsertProjectIndex } from "../project/registry";
 import { rememberClusterTarget } from "../config/local";
@@ -155,6 +161,8 @@ export interface DeployOptions extends GlobalOpts {
   remoteBuild?: boolean;
   /** Env TTL (`30m` / `72h` / `7d`) — arms `destroy --prune-expired` teardown. Requires --env. */
   ttl?: string;
+  /** Allow new [[service]] blocks in launch-pad.toml (adding services to an existing footprint). */
+  allowNewServices?: boolean;
 }
 
 interface BuiltService {
@@ -199,6 +207,9 @@ function synthesizeEntry(aws: AwsEnv, a: Extract<NodeAction, { kind: "create" }>
     eipAllocationId: null,
     securityGroupId: null,
     iamInstanceProfile: null,
+    provisioning: "ec2",
+    advertiseIp: null,
+    iamUserName: null,
     agentId: agentIdForNode(a.nodeId),
     agentVersion: null,
     agentType: DEFAULT_AGENT_TYPE,
@@ -283,6 +294,23 @@ export function toServiceConfig(
     volumes: b.decl.volumes.map((v) => ({ ...v })),
   };
   if (b.decl.cron !== undefined) cfg.cron = b.decl.cron;
+  // Managed database: carry the engine/version marker (the agent runs the pinned image
+  // instead of building one) and, when a backup is configured, the resolved S3 target.
+  if (b.decl.database !== undefined) {
+    cfg.database = {
+      engine: b.decl.database.engine,
+      version: b.decl.database.version,
+      databases: b.decl.database.databases,
+    };
+    if (b.decl.backup !== undefined) {
+      cfg.backup = {
+        schedule: b.decl.backup.schedule,
+        retentionDays: b.decl.backup.retentionDays,
+        bucket: backupsBucketName(aws.accountId, aws.region),
+        prefix: backupServicePrefix(aws.clusterId, project, b.decl.name),
+      };
+    }
+  }
   if (restart) cfg.restartAt = nowIso();
   return cfg;
 }
@@ -685,6 +713,7 @@ export async function resolveConfigLockOutcome(
   aws: AwsEnv,
   config: LaunchPadConfig,
   ownerProject: string,
+  lockOpts?: Pick<ConfigLockCompareOptions, "allowNewServices">,
 ): Promise<ConfigLockOutcome> {
   const deployed = await loadLockBaseline(aws, ownerProject, {
     project: config.project,
@@ -700,6 +729,7 @@ export async function resolveConfigLockOutcome(
   try {
     assertConfigLockAllowed(deployed.baseline, current, {
       baselineFromDesired: deployed.fromDesired,
+      allowNewServices: lockOpts?.allowNewServices,
     });
   } catch (error) {
     configLockError(error);
@@ -836,6 +866,8 @@ async function recordPreviewState(
 async function runRemoteBuilds(aws: AwsEnv, built: BuiltService[], ownerProject: string): Promise<void> {
   const pending: BuiltService[] = [];
   for (const b of built) {
+    // A managed database runs a pinned engine image — nothing to build or push.
+    if (isDatabaseService(b.decl)) continue;
     if (await imageExists(aws.ecr, b.repoName, b.tag)) {
       log.step(`${color.cyan(b.decl.name)}: image ${color.dim(b.tag)} already in ECR — skipping build`);
       continue;
@@ -952,8 +984,11 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     } catch (error) {
       throw new CliError((error as Error).message);
     }
+    // A managed database has no build inputs (it runs a pinned engine image), so it can
+    // never be "changed" by a code diff — exclude it from the changed-selection candidates.
+    const buildableServices = config.service.filter((s) => !isDatabaseService(s));
     const changedNames = new Set(
-      selectChangedServices(buildServiceBuildPaths(config.service, dir, repoRoot), [...changedPaths]),
+      selectChangedServices(buildServiceBuildPaths(buildableServices, dir, repoRoot), [...changedPaths]),
     );
     services = services.filter((s) => changedNames.has(s.name));
     if (services.length === 0) {
@@ -1022,8 +1057,10 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
       });
     }
     // A remote build ships ONLY the context tarball, so the dockerfile must live
-    // inside it. Fail fast — before any AWS call or node provisioning.
+    // inside it. Fail fast — before any AWS call or node provisioning. A managed
+    // database has no Dockerfile (it runs a pinned engine image), so skip it.
     for (const s of services) {
+      if (isDatabaseService(s)) continue;
       if (dockerfileInContext(resolve(dir, s.context), resolve(dir, s.dockerfile)) === null) {
         throw new CliError(
           `service "${s.name}": dockerfile "${s.dockerfile}" is outside its build context "${s.context}"`,
@@ -1054,7 +1091,9 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     log.step(`remote build mode ${color.dim("(images build on AWS CodeBuild — no local docker needed)")}`);
   }
 
-  const lockOutcome = await resolveConfigLockOutcome(aws, config, ownerProject);
+  const lockOutcome = await resolveConfigLockOutcome(aws, config, ownerProject, {
+    allowNewServices: opts.allowNewServices === true,
+  });
   void lockOutcome;
 
   // Cross-component service-name uniqueness, BEFORE any build. A project's
@@ -1085,6 +1124,26 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
   // Resolve the cluster's app pool + its dedicated edge. Every deploy goes through
   // the scheduler, so the candidate snapshot is always built.
   const clusterCfg = aws.clusterId === DEFAULT_CLUSTER ? null : await getClusterConfig(aws, aws.clusterId);
+
+  // Create/get SNS topic for deploy notifications (graceful failure if SNS unavailable).
+  let snsTopicArn: string | null = clusterCfg?.snsTopicArn ?? null;
+  if (!opts.dryRun && snsTopicArn === null) {
+    try {
+      snsTopicArn = await createOrGetTopic(aws.sns, aws.clusterId, aws.region, aws.accountId);
+      // Persist topic ARN to cluster config for future deploys.
+      if (clusterCfg) {
+        await putClusterConfig(aws, { ...clusterCfg, snsTopicArn });
+      }
+      if (!isJsonMode()) {
+        log.info(`deploy notifications enabled (SNS topic: ${snsTopicArn})`);
+      }
+    } catch (error) {
+      if (!isJsonMode()) {
+        log.warn(`failed to create SNS topic — deploy notifications disabled (agents will poll): ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
   // Auto-add app nodes on capacity pressure is on by default (off for --restart/
   // --image, which re-roll a published placement, and --no-create).
   const autoAddEnabled = !reuseExistingImages && opts.create !== false;
@@ -1508,6 +1567,22 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     const repoName = ecrRepositoryName(config.project, decl.name);
     const contextDir = resolve(dir, decl.context);
     const domain = resolved.get(decl.name)?.domain;
+    // A managed database runs a pinned engine image (postgres:<version>) — there is
+    // nothing to build or push. Pin the image and leave the ECR repo/tag fields empty so
+    // the build loop, --changed, and --remote-build all skip it (it has no Dockerfile).
+    if (decl.database !== undefined) {
+      built.push({
+        decl,
+        repoName: "",
+        repoUri: "",
+        tag: "",
+        image: databaseImage(decl.database),
+        contextDir,
+        dockerfilePath: resolve(dir, decl.dockerfile),
+        domain,
+      });
+      continue;
+    }
     if (reuseImages) {
       built.push({
         decl,
@@ -1621,6 +1696,8 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
         throw error;
       }
       for (const b of built) {
+        // A managed database runs a pinned engine image — nothing to build or push.
+        if (isDatabaseService(b.decl)) continue;
         if (await imageExists(aws.ecr, b.repoName, b.tag)) {
           log.step(`${color.cyan(b.decl.name)}: image ${color.dim(b.tag)} already in ECR — skipping build`);
           continue;
@@ -1639,6 +1716,20 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
           throw error;
         }
       }
+    }
+  }
+
+  // A managed database with a backup config dumps to the dedicated backups bucket —
+  // ensure it exists (hardened: private + encrypted + versioned) once before publishing
+  // the service's backup config (which names this bucket). Skipped on a dry run.
+  if (!opts.dryRun && built.some((b) => b.decl.backup !== undefined)) {
+    const spin = spinner("ensuring the database-backups bucket…").start();
+    try {
+      await ensureBackupsBucket(aws.s3, aws.accountId, aws.region, aws.clusterId);
+      spin.succeed(`backups bucket ${color.cyan(backupsBucketName(aws.accountId, aws.region))} ready`);
+    } catch (error) {
+      if (spin.isSpinning) spin.fail("could not set up the database-backups bucket");
+      throw error;
     }
   }
 
@@ -1670,6 +1761,21 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     );
     await publishDesired(aws, id, node, ownerProject, incoming, partialDeploy);
     log.success(`published desired state → ${color.cyan(id)}`);
+
+    // Notify agent immediately via SNS (graceful failure if unavailable).
+    if (snsTopicArn && !opts.dryRun) {
+      try {
+        const now = new Date().toISOString();
+        await publishDeployNotification(aws.sns, snsTopicArn, {
+          type: "config-changed",
+          cluster: aws.clusterId,
+          timestamp: now,
+          version: 1,
+        });
+      } catch (error) {
+        log.warn(`SNS publish failed for node ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 
   // Cleanup AFTER the additions: transient over-provisioning beats a window where
@@ -1687,6 +1793,21 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     }
     await publishDesired(aws, id, entry, ownerProject, []);
     log.success(`removed ${color.cyan(ownerProject)} from ${color.cyan(id)} (no longer placed there)`);
+
+    // Notify agent immediately via SNS (graceful failure if unavailable).
+    if (snsTopicArn && !opts.dryRun) {
+      try {
+        const now = new Date().toISOString();
+        await publishDeployNotification(aws.sns, snsTopicArn, {
+          type: "config-changed",
+          cluster: aws.clusterId,
+          timestamp: now,
+          version: 1,
+        });
+      } catch (error) {
+        log.warn(`SNS publish failed for node ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 
   if (!opts.dryRun) {
@@ -1894,6 +2015,10 @@ export function registerDeploy(program: Command): void {
     .option("--dry-run", "do everything except push images, write state, or create nodes")
     .option("--ami <id>", "AMI id for auto-provisioned/recreated nodes")
     .option("--restart", "skip build/push and roll containers (picks up secret/env changes)")
+    .option(
+      "--allow-new-services",
+      "permit new [[service]] blocks in launch-pad.toml (e.g. adding admin to an existing footprint)",
+    )
     .option(
       "--image <uri>",
       "skip build/push and redeploy an existing ECR tag of one --service (rollback / promote)",

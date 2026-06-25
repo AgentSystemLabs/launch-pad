@@ -96,6 +96,8 @@ mod tests {
                 }),
                 rollout: Rollout::default(),
                 volumes: vec![],
+                database: None,
+                backup: None,
             }],
         }
     }

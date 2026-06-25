@@ -4,12 +4,13 @@ import {
   DEFAULT_CLUSTER,
   footprintOwner,
   LABEL_REGEX,
+  nodeFrontsIngress,
   nodeRegistryKey,
   parseNodeRegistryEntry,
 } from "@agentsystemlabs/launch-pad-shared";
 import type { AwsEnv } from "../aws/context";
 import { prepareAws } from "../aws/context";
-import { getJson } from "../aws/s3-state";
+import { getJson, listNodeIds } from "../aws/s3-state";
 import { getClusterConfig } from "../cluster/store";
 import { findConfigPath, loadConfig } from "../config/load";
 import { classifyDns, type DnsObservation, type DnsVerdict, isIpv4 } from "../dns/classify";
@@ -45,11 +46,21 @@ async function resolveDomain(domain: string): Promise<DnsObservation> {
   return { a, aaaa, cname: cname[0] ?? null };
 }
 
-/** The cluster's default edge, or null for the default cluster / no edge configured. */
+/** The cluster's default edge, or the single edge-role node when no cluster default is stored. */
 async function clusterDefaultEdge(aws: AwsEnv): Promise<string | null> {
-  if (aws.clusterId === DEFAULT_CLUSTER) return null;
-  const cfg = await getClusterConfig(aws, aws.clusterId);
-  return cfg?.defaultEdge ?? null;
+  const cfg = aws.clusterId === DEFAULT_CLUSTER ? null : await getClusterConfig(aws, aws.clusterId);
+  if (cfg?.defaultEdge) return cfg.defaultEdge;
+  const edgeIds: string[] = [];
+  for (const id of await listNodeIds(aws.s3, aws.bucket, aws.clusterId)) {
+    const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
+    if (!obj) continue;
+    try {
+      if (nodeFrontsIngress(parseNodeRegistryEntry(obj.raw).role)) edgeIds.push(id);
+    } catch {
+      /* malformed nodes surface elsewhere */
+    }
+  }
+  return edgeIds.length === 1 ? edgeIds[0]! : null;
 }
 
 /** Read a node's Elastic IP from the cluster registry, or null when absent/unreadable. */

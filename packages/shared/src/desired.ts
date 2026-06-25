@@ -1,8 +1,28 @@
 import { z } from "zod";
-import { VolumeDeclSchema } from "./config";
+import { ServiceDatabaseSchema, VolumeDeclSchema } from "./config";
 import { PROTOCOL_VERSION } from "./constants";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import { SecretRefSchema } from "./secrets";
+
+/**
+ * Where (and how often) the agent ships a managed database's `pg_dump` backups.
+ * The CLI computes `bucket`/`prefix` (it knows account/region/cluster/owner); the
+ * agent appends `<database>/<timestamp>.sql.gz`. Present only on a database service
+ * with backups enabled. Optional/undefaulted so non-database services parse unchanged.
+ */
+export const ServiceBackupConfigSchema = z
+  .object({
+    /** 5-field UTC cron — when a backup run fires. */
+    schedule: z.string().min(1),
+    /** Days of dumps kept per database; older objects are pruned after each run. */
+    retentionDays: z.number().int().min(1),
+    /** Backups bucket name (`launch-pad-backups-<acct>-<region>`). */
+    bucket: z.string().min(1),
+    /** Key prefix for this service: `<cluster>/<owner>/<service>/`. */
+    prefix: z.string().min(1),
+  })
+  .strict();
+export type ServiceBackupConfig = z.infer<typeof ServiceBackupConfigSchema>;
 
 /**
  * Web ingress. Two states only:
@@ -56,6 +76,14 @@ export const ServiceConfigSchema = z
      * it first landed on), so the volume's data has a stable home on that node's disk.
      */
     volumes: z.array(VolumeDeclSchema).default([]),
+    /**
+     * Managed-database marker (engine/version + logical backup targets). Present →
+     * the agent runs the engine image (no build) and can drive `pg_dump`. Optional so
+     * non-database services parse unchanged.
+     */
+    database: ServiceDatabaseSchema.optional(),
+    /** S3 backup config; present → the agent runs scheduled backups for this database. */
+    backup: ServiceBackupConfigSchema.optional(),
   })
   .strict();
 

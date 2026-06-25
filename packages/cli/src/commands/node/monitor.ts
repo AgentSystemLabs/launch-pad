@@ -1,16 +1,20 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { Command } from "commander";
 import {
+  buildStatsLine,
   footprintOwner,
   hostMemoryPercent,
   LABEL_REGEX,
   type NodeRegistryEntry,
   nodeRegistryKey,
+  type NodeStatus,
   parseNodeRegistryEntry,
+  parseNodeStatus,
   parseStatsLine,
   type ServiceStats,
   STATS_EVENT,
   type StatsLine,
+  statusKey,
   systemLogGroupName,
 } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../../aws/context";
@@ -131,10 +135,12 @@ function renderView(
   samples: StatsSample[],
   filter: { project: string; service: string } | undefined,
   windowLabel: string,
+  sourceLabel?: string,
 ): string[] {
   const lines: string[] = [];
+  const label = sourceLabel ? `${windowLabel} · ${sourceLabel}` : windowLabel;
   lines.push(
-    `${color.cyan(`Monitor ${nodeId}`)}  ${color.dim(`(cluster ${clusterId} · ${windowLabel} · ${samples.length} sample${samples.length === 1 ? "" : "s"})`)}`,
+    `${color.cyan(`Monitor ${nodeId}`)}  ${color.dim(`(cluster ${clusterId} · ${label} · ${samples.length} sample${samples.length === 1 ? "" : "s"})`)}`,
   );
   lines.push("");
 
@@ -297,6 +303,28 @@ async function sampleOverSsm(aws: AwsEnv, instanceId: string, script: string[]):
   return null;
 }
 
+export function sampleFromNodeStatus(status: NodeStatus): StatsSample | null {
+  if (!status.host) return null;
+  const line = buildStatsLine({
+    nodeId: status.nodeId,
+    ts: status.host.sampledAt,
+    host: {
+      cpuPercent: status.host.cpuPercent,
+      memoryUsedMb: status.host.memoryUsedMb,
+      memoryTotalMb: status.host.memoryTotalMb,
+    },
+    services: [],
+  });
+  const ts = Date.parse(line.ts);
+  return { ...line, epochMillis: Number.isNaN(ts) ? Date.parse(status.lastSeen) : ts };
+}
+
+async function sampleFromStatusJson(aws: AwsEnv, nodeId: string): Promise<StatsSample | null> {
+  const obj = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, nodeId));
+  if (!obj) return null;
+  return sampleFromNodeStatus(parseNodeStatus(obj.raw));
+}
+
 function clearScreen(): void {
   process.stderr.write("\x1b[2J\x1b[3J\x1b[H");
 }
@@ -307,10 +335,18 @@ async function runWatch(
   opts: MonitorOptions,
   filter: { project: string; service: string } | undefined,
 ): Promise<void> {
-  const obs = (await describeInstancesById(aws.ec2, entry.instanceId ? [entry.instanceId] : [])).get(
-    entry.instanceId ?? "",
-  ) ?? { kind: "missing" as const };
-  const instanceId = requireSsmTarget(entry, obs);
+  const useHeartbeatSample = entry.provisioning === "external";
+  if (useHeartbeatSample && filter) {
+    throw new CliError("live --service monitoring is not available for external (BYOS) nodes", {
+      hint: "status.json carries host CPU/memory only; drop --service or use historic mode with --since",
+    });
+  }
+  const obs = useHeartbeatSample
+    ? null
+    : ((await describeInstancesById(aws.ec2, entry.instanceId ? [entry.instanceId] : [])).get(
+        entry.instanceId ?? "",
+      ) ?? { kind: "missing" as const });
+  const instanceId = obs ? requireSsmTarget(entry, obs) : null;
 
   const intervalS = opts.interval ? Number.parseInt(opts.interval, 10) : DEFAULT_WATCH_INTERVAL_S;
   if (!Number.isInteger(intervalS) || intervalS < 1) {
@@ -318,7 +354,7 @@ async function runWatch(
   }
   const windowMs = parseSince(opts.window ?? DEFAULT_WINDOW);
   const capacity = Math.max(2, Math.ceil(windowMs / (intervalS * 1000)));
-  const script = ssmRunBashScript(renderStatsSampleScript(entry.nodeId));
+  const script = useHeartbeatSample ? null : ssmRunBashScript(renderStatsSampleScript(entry.nodeId));
 
   const ring: StatsSample[] = [];
   let running = true;
@@ -337,15 +373,23 @@ async function runWatch(
     }
   }
 
-  log.dim("  sampling over SSM — press Ctrl+C to stop");
+  log.dim(
+    useHeartbeatSample
+      ? "  sampling from status.json heartbeat — press Ctrl+C to stop"
+      : "  sampling live over SSM — press Ctrl+C to stop",
+  );
   while (running) {
     let errorLine: string | null = null;
     try {
-      const sample = await sampleOverSsm(aws, instanceId, script);
+      const sample = useHeartbeatSample
+        ? await sampleFromStatusJson(aws, entry.nodeId)
+        : await sampleOverSsm(aws, instanceId!, script!);
       if (sample) {
         ring.push(sample);
         while (ring.length > capacity) ring.shift();
         if (isJsonMode()) process.stdout.write(`${JSON.stringify(sample)}\n`);
+      } else if (useHeartbeatSample) {
+        errorLine = "status.json has no host sample yet";
       }
     } catch (error) {
       errorLine = error instanceof Error ? error.message : String(error);
@@ -359,6 +403,7 @@ async function runWatch(
         ring,
         filter,
         `live · ${intervalS}s · window ${opts.window ?? DEFAULT_WINDOW}`,
+        useHeartbeatSample ? "from heartbeat" : "live over SSM",
       );
       process.stderr.write(`\n${lines.join("\n")}\n`);
       if (errorLine) process.stderr.write(`\n${color.yellow(`  last sample failed: ${errorLine}`)}\n`);
@@ -401,8 +446,9 @@ export function registerMonitor(node: Command): void {
       [
         "",
         "Historic mode reads the node's system log group for `launchpad.stats` lines the",
-        "agent emits every ~60s (needs logs:FilterLogEvents). Live mode samples the node",
-        "directly over SSM every few seconds — the instance must be running and SSM-managed.",
+        "agent emits every ~60s (needs logs:FilterLogEvents). Live mode samples EC2 nodes",
+        "directly over SSM; external (BYOS) nodes read the latest status.json host sample",
+        "from the agent heartbeat instead.",
         "",
         "Examples:",
         "  $ launchpad node monitor node-prod-1 --since 1h",

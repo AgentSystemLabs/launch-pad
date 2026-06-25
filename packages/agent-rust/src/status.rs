@@ -11,8 +11,8 @@ use crate::config::AgentConfig;
 use crate::cron::{next_cron_fire, parse_cron_expression};
 use crate::docker::ManagedReplica;
 use crate::types::{
-    service_key, CaddyStatus, CronRunStatus, DesiredState, HostSample, NodeStatus, ReplicaStatus,
-    ServiceConfig, ServiceState, ServiceStatus,
+    service_key, CaddyStatus, CronRunStatus, DatabaseBackupStatus, DesiredState, HostSample,
+    NodeStatus, ReplicaStatus, ServiceConfig, ServiceState, ServiceStatus,
 };
 
 /// A Caddy outcome that means "this node does not manage Caddy" — app nodes never
@@ -133,6 +133,11 @@ fn cron_service_view(
 }
 
 /// Build the NodeStatus to publish after a reconcile pass.
+///
+/// `backups` carries the per-service backup rollup the reconciler computed on the
+/// LAST backup run/skip — it is NOT recomputed here every tick (which would churn
+/// `nextRunAt` and the write-on-change fingerprint). A database service whose key is
+/// absent from the map simply has no backup rollup yet.
 #[allow(clippy::too_many_arguments)]
 pub fn build_status(
     config: &AgentConfig,
@@ -140,6 +145,7 @@ pub fn build_status(
     desired: &DesiredState,
     live: &BTreeMap<String, Vec<ManagedReplica>>,
     errors: &BTreeMap<String, String>,
+    backups: &BTreeMap<String, DatabaseBackupStatus>,
     caddy: &CaddyStatus,
     host: Option<HostSample>,
     now: &str,
@@ -154,6 +160,7 @@ pub fn build_status(
             let key = service_key(&d.project, &d.service);
             let reps = live.get(&key).unwrap_or(&empty);
             let error = errors.get(&key);
+            let backup = backups.get(&key).cloned();
 
             let replicas: Vec<ReplicaStatus> = reps
                 .iter()
@@ -194,6 +201,8 @@ pub fn build_status(
                     desired_replicas: d.replicas,
                     replicas,
                     cron: Some(view.cron),
+                    // A cron service is never a managed database — no backup rollup.
+                    backup: None,
                     updated_at: now.to_string(),
                 };
             }
@@ -216,6 +225,9 @@ pub fn build_status(
                 desired_replicas: d.replicas,
                 replicas,
                 cron: None,
+                // Present only for a managed database with backups enabled; the
+                // reconciler fills `backups` on a run/skip, otherwise absent.
+                backup,
                 updated_at: now.to_string(),
             }
         })
@@ -269,6 +281,7 @@ mod tests {
             region: "us-east-1".into(),
             cluster_id: "default".into(),
             role: NodeRole::App,
+            advertise_ip: None,
         }
     }
 
@@ -292,6 +305,8 @@ mod tests {
             health_check: None,
             rollout: Rollout::default(),
             volumes: vec![],
+            database: None,
+            backup: None,
         }
     }
 
@@ -389,6 +404,7 @@ mod tests {
             &desired(vec![svc(1)]),
             &live("blog/web", vec![rep(0, "running")]),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &caddy(),
             None,
             "2026-06-05T00:00:00.000Z",
@@ -419,6 +435,7 @@ mod tests {
             &desired(vec![svc(1)]),
             &live("blog/web", vec![rep(0, "exited")]),
             &errors,
+            &BTreeMap::new(),
             &caddy(),
             None,
             "t",
@@ -436,6 +453,7 @@ mod tests {
             "1",
             &desired(vec![svc(2)]),
             &live("blog/web", vec![rep(0, "running"), rep(1, "created")]),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &caddy(),
             None,
@@ -457,6 +475,7 @@ mod tests {
             &config(),
             "1",
             &desired(vec![cron_svc("*/5 * * * *")]),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &caddy(),
@@ -482,6 +501,7 @@ mod tests {
             &desired(vec![cron_svc("*/5 * * * *")]),
             &live("blog/job", vec![cron_run(fire, "exited", Some(0))]),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &caddy(),
             None,
             "t",
@@ -506,6 +526,7 @@ mod tests {
             &desired(vec![cron_svc("*/5 * * * *")]),
             &live("blog/job", vec![cron_run(fire, "exited", Some(3))]),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &caddy(),
             None,
             "t",
@@ -525,6 +546,7 @@ mod tests {
             "1",
             &desired(vec![cron_svc("*/5 * * * *")]),
             &live("blog/job", vec![cron_run(fire, "running", None)]),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &caddy(),
             None,
@@ -547,6 +569,7 @@ mod tests {
             &desired(vec![cron_svc("*/5 * * * *")]),
             &BTreeMap::new(),
             &errors,
+            &BTreeMap::new(),
             &caddy(),
             None,
             "t",
@@ -574,6 +597,7 @@ mod tests {
             &desired(vec![]),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             &caddy(),
             Some(host.clone()),
             "t",
@@ -588,6 +612,7 @@ mod tests {
             &config(),
             "1",
             &desired(vec![]),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &caddy(),

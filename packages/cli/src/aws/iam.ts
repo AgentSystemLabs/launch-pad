@@ -1,18 +1,28 @@
 import {
   AddRoleToInstanceProfileCommand,
   AttachRolePolicyCommand,
+  CreateAccessKeyCommand,
   CreateInstanceProfileCommand,
   CreateRoleCommand,
+  CreateUserCommand,
+  DeleteAccessKeyCommand,
   DeleteInstanceProfileCommand,
   DeleteRoleCommand,
   DeleteRolePolicyCommand,
+  DeleteUserCommand,
+  DeleteUserPolicyCommand,
   DetachRolePolicyCommand,
   GetInstanceProfileCommand,
+  GetUserCommand,
   type IAMClient,
+  ListAccessKeysCommand,
   PutRolePolicyCommand,
+  PutUserPolicyCommand,
   RemoveRoleFromInstanceProfileCommand,
+  TagUserCommand,
 } from "@aws-sdk/client-iam";
 import {
+  backupsBucketName,
   desiredKey,
   nodePrefix,
   nodeResourceTags,
@@ -103,6 +113,15 @@ export function nodeProfileName(clusterId: string, nodeId: string): string {
   return `launch-pad-node-profile-${iamSlug(clusterId, nodeId)}`.slice(0, 64);
 }
 
+/**
+ * Per-node IAM USER name for external (BYOS) nodes. Mirrors {@link nodeRoleName}'s
+ * naming + 64-char truncation — see the role/profile truncation warning above for the
+ * long-id collision caveat (IAM user names cap at 64 too).
+ */
+export function nodeUserName(clusterId: string, nodeId: string): string {
+  return `launch-pad-node-${iamSlug(clusterId, nodeId)}`.slice(0, 64);
+}
+
 export interface EnsureNodeIamParams {
   clusterId: string;
   nodeId: string;
@@ -166,6 +185,32 @@ function ecrStatements(region: string, accountId: string): object[] {
   ];
 }
 
+/**
+ * App-only write+prune to the database-backups bucket, scoped to THIS cluster's prefix
+ * (`<backupsBucket>/<clusterId>/*`). The agent runs `pg_dump` and uploads/prunes dumps;
+ * scoping by cluster (not node) lets any app node back up its own databases while keeping
+ * the grant off other clusters' backups. Compiled into the app policy only — an edge runs
+ * no containers and never backs up data.
+ */
+function backupStatements(clusterId: string, region: string, accountId: string): object[] {
+  const backupsBucket = backupsBucketName(accountId, region);
+  return [
+    {
+      Sid: "BackupWrite",
+      Effect: "Allow",
+      Action: ["s3:PutObject", "s3:DeleteObject"],
+      Resource: [`arn:aws:s3:::${backupsBucket}/${clusterId}/*`],
+    },
+    {
+      Sid: "BackupList",
+      Effect: "Allow",
+      Action: ["s3:ListBucket"],
+      Resource: [`arn:aws:s3:::${backupsBucket}`],
+      Condition: { StringLike: { "s3:prefix": [`${clusterId}/*`] } },
+    },
+  ];
+}
+
 /** App agent: read own desired, write own status + upstream shards for edges. */
 export function buildAppPolicy(
   bucket: string,
@@ -211,6 +256,7 @@ export function buildAppPolicy(
       ...cloudWatchLogsStatements(region, accountId, clusterId),
       ...ecrStatements(region, accountId),
       ...ssmReadStatements(region, accountId, clusterId),
+      ...backupStatements(clusterId, region, accountId),
     ],
   });
 }
@@ -418,4 +464,149 @@ export async function deleteNodeIam(iam: IAMClient, clusterId: string, nodeId: s
     iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: NODE_POLICY_NAME })),
   );
   await ignoreMissing(() => iam.send(new DeleteRoleCommand({ RoleName: roleName })));
+}
+
+/**
+ * Ensure the IAM USER backing an external (BYOS) node. An external host has no EC2
+ * instance-profile, so it authenticates with long-lived access keys delivered into
+ * `/etc/launch-pad/agent.env`. The user carries the SAME least-privilege inline policy
+ * an EC2 node's role would ({@link buildNodePolicy}), so a BYOS node is scoped exactly
+ * like a managed one (read own desired, write own status, app-only upstream shards).
+ *
+ * Idempotent on the user (tolerates EntityAlreadyExists) and the policy. The returned
+ * `secretAccessKey` is the ONLY time AWS reveals it — callers must capture it now.
+ */
+export async function ensureExternalNodeIam(
+  iam: IAMClient,
+  params: EnsureNodeIamParams,
+): Promise<{ userName: string; userArn: string; accessKeyId: string; secretAccessKey: string }> {
+  const userName = nodeUserName(params.clusterId, params.nodeId);
+
+  let userArn: string | undefined;
+  try {
+    const created = await iam.send(new CreateUserCommand({ UserName: userName }));
+    userArn = created.User?.Arn;
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error;
+    // Already exists — fetch its ARN for the return value.
+    const got = await iam.send(new GetUserCommand({ UserName: userName }));
+    userArn = got.User?.Arn;
+  }
+  // Fall back to constructing the ARN if neither call surfaced one.
+  userArn ??= `arn:aws:iam::${params.accountId}:user/${userName}`;
+
+  await iam.send(
+    new PutUserPolicyCommand({
+      UserName: userName,
+      PolicyName: NODE_POLICY_NAME,
+      PolicyDocument: buildNodePolicy(params),
+    }),
+  );
+
+  await iam.send(
+    new TagUserCommand({
+      UserName: userName,
+      Tags: nodeResourceTags({
+        clusterId: params.clusterId,
+        nodeId: params.nodeId,
+        role: params.role,
+      }).map((t) => ({ Key: t.Key, Value: t.Value })),
+    }),
+  );
+
+  const { accessKeyId, secretAccessKey } = await createExternalNodeAccessKey(iam, userName);
+
+  return { userName, userArn, accessKeyId, secretAccessKey };
+}
+
+async function deleteInactiveAccessKeys(iam: IAMClient, userName: string): Promise<void> {
+  const keys = await iam.send(new ListAccessKeysCommand({ UserName: userName }));
+  for (const meta of keys.AccessKeyMetadata ?? []) {
+    if (!meta.AccessKeyId || meta.Status !== "Inactive") continue;
+    await iam.send(new DeleteAccessKeyCommand({ UserName: userName, AccessKeyId: meta.AccessKeyId }));
+  }
+}
+
+export async function createExternalNodeAccessKey(
+  iam: IAMClient,
+  userName: string,
+): Promise<{ accessKeyId: string; secretAccessKey: string }> {
+  await deleteInactiveAccessKeys(iam, userName);
+  const keys = await iam.send(new ListAccessKeysCommand({ UserName: userName }));
+  const activeCount = (keys.AccessKeyMetadata ?? []).filter((k) => k.Status !== "Inactive").length;
+  if (activeCount >= 2) {
+    throw new CliError(`can't create a new access key for external node user "${userName}"`, {
+      hint: "IAM allows max 2 active access keys per user; delete a stale key or run node rotate-creds after the host is reachable",
+    });
+  }
+
+  const key = await iam.send(new CreateAccessKeyCommand({ UserName: userName }));
+  const accessKeyId = key.AccessKey?.AccessKeyId;
+  const secretAccessKey = key.AccessKey?.SecretAccessKey;
+  if (!accessKeyId || !secretAccessKey) {
+    throw new CliError(`failed to create access key for external node user "${userName}"`, {
+      hint: "check the IAM access-key-per-user limit (max 2) and retry",
+    });
+  }
+  return { accessKeyId, secretAccessKey };
+}
+
+export async function deleteExternalNodeAccessKeysExcept(
+  iam: IAMClient,
+  userName: string,
+  keepAccessKeyId: string,
+): Promise<string[]> {
+  const keys = await iam.send(new ListAccessKeysCommand({ UserName: userName }));
+  const deleted: string[] = [];
+  for (const meta of keys.AccessKeyMetadata ?? []) {
+    const accessKeyId = meta.AccessKeyId;
+    if (!accessKeyId || accessKeyId === keepAccessKeyId) continue;
+    await iam.send(new DeleteAccessKeyCommand({ UserName: userName, AccessKeyId: accessKeyId }));
+    deleted.push(accessKeyId);
+  }
+  return deleted;
+}
+
+export async function deleteExternalNodeAccessKey(
+  iam: IAMClient,
+  userName: string,
+  accessKeyId: string,
+): Promise<void> {
+  await iam.send(new DeleteAccessKeyCommand({ UserName: userName, AccessKeyId: accessKeyId }));
+}
+
+/**
+ * Delete an external (BYOS) node's IAM user (best-effort, idempotent). Mirrors
+ * {@link deleteNodeIam}'s tolerant style: delete every access key, the inline policy,
+ * then the user. Tolerant of anything already gone. Called by node teardown for
+ * external nodes (there is no role/instance-profile to remove).
+ */
+export async function deleteExternalNodeIam(
+  iam: IAMClient,
+  clusterId: string,
+  nodeId: string,
+): Promise<void> {
+  const userName = nodeUserName(clusterId, nodeId);
+  const ignoreMissing = async (op: () => Promise<unknown>): Promise<void> => {
+    try {
+      await op();
+    } catch (error) {
+      if (!isNoSuchEntity(error)) throw error;
+    }
+  };
+
+  // Access keys must be deleted before the user can be removed.
+  await ignoreMissing(async () => {
+    const keys = await iam.send(new ListAccessKeysCommand({ UserName: userName }));
+    for (const meta of keys.AccessKeyMetadata ?? []) {
+      if (!meta.AccessKeyId) continue;
+      await ignoreMissing(() =>
+        iam.send(new DeleteAccessKeyCommand({ UserName: userName, AccessKeyId: meta.AccessKeyId })),
+      );
+    }
+  });
+  await ignoreMissing(() =>
+    iam.send(new DeleteUserPolicyCommand({ UserName: userName, PolicyName: NODE_POLICY_NAME })),
+  );
+  await ignoreMissing(() => iam.send(new DeleteUserCommand({ UserName: userName })));
 }

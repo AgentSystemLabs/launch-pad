@@ -22,6 +22,12 @@ pub fn s3_client(conf: &SdkConfig) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::new(conf)
 }
 
+/// CloudWatch Logs — both roles (direct log shipping).
+#[cfg(any(feature = "app", feature = "edge"))]
+pub fn cloudwatch_logs_client(conf: &SdkConfig) -> aws_sdk_cloudwatchlogs::Client {
+    aws_sdk_cloudwatchlogs::Client::new(conf)
+}
+
 /// ECR — app role only (image pulls).
 #[cfg(feature = "app")]
 pub fn ecr_client(conf: &SdkConfig) -> aws_sdk_ecr::Client {

@@ -22,12 +22,15 @@ pub mod docker;
 pub mod logs;
 pub mod runtime;
 pub mod s3;
+pub mod sqs;
 pub mod stats;
 pub mod status;
 pub mod status_write;
 pub mod types;
 
 // App role only — the Docker/ECR/SSM reconciler half.
+#[cfg(feature = "app")]
+pub mod backup;
 #[cfg(feature = "app")]
 pub mod ecr;
 #[cfg(feature = "app")]
@@ -36,6 +39,8 @@ pub mod health;
 pub mod metadata;
 #[cfg(feature = "app")]
 pub mod reconcile;
+#[cfg(feature = "app")]
+pub mod s3_backup;
 #[cfg(feature = "app")]
 pub mod secrets;
 #[cfg(feature = "app")]

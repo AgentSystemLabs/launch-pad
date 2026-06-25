@@ -72,6 +72,11 @@ export async function planEdgeAction(args: {
         { hint: "set the cluster's default edge to an edge-role node: launchpad cluster set-edge" },
       );
     }
+    // External (BYOS) nodes are operator-owned hosts — launchpad never resumes them
+    // (there is no EC2 instance to start); they always already exist.
+    if (entry.provisioning === "external") {
+      return { kind: "ready", nodeId: args.edgeNodeId, entry };
+    }
     return entry.state === "stopped"
       ? { kind: "resume", nodeId: args.edgeNodeId, entry }
       : { kind: "ready", nodeId: args.edgeNodeId, entry };
@@ -105,6 +110,12 @@ export async function buildProvisionPlan(args: BuildProvisionPlanArgs): Promise<
   for (const d of args.demands) {
     const entry = await args.load(d.nodeId);
     if (entry) {
+      // External (BYOS) nodes are operator-owned hosts — launchpad never resumes them
+      // (there is no EC2 instance to start); they always already exist.
+      if (entry.provisioning === "external") {
+        actions.push({ kind: "ready", nodeId: d.nodeId, entry });
+        continue;
+      }
       actions.push(
         entry.state === "stopped"
           ? { kind: "resume", nodeId: d.nodeId, entry }

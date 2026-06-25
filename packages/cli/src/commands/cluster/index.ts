@@ -101,6 +101,7 @@ async function runCreate(name: string, opts: CreateOptions): Promise<void> {
         createdAt: nowIso(),
         createdBy: aws.callerArn,
         autoscale: null,
+        snsTopicArn: null,
       };
   await putClusterConfig(aws, config);
 

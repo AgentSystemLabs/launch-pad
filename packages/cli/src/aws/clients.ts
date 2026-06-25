@@ -3,6 +3,8 @@ import { EC2Client } from "@aws-sdk/client-ec2";
 import { ECRClient } from "@aws-sdk/client-ecr";
 import { IAMClient } from "@aws-sdk/client-iam";
 import { S3Client } from "@aws-sdk/client-s3";
+import { SNSClient } from "@aws-sdk/client-sns";
+import { SQSClient } from "@aws-sdk/client-sqs";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
 import { CliError } from "../errors";
@@ -17,6 +19,8 @@ export interface AwsClients {
   iam: IAMClient;
   ssm: SSMClient;
   logs: CloudWatchLogsClient;
+  sns: SNSClient;
+  sqs: SQSClient;
 }
 
 /**
@@ -54,5 +58,7 @@ export async function createClients(opts: GlobalOpts): Promise<AwsClients> {
     iam: new IAMClient(config),
     ssm: new SSMClient(config),
     logs: new CloudWatchLogsClient(config),
+    sns: new SNSClient(config),
+    sqs: new SQSClient(config),
   };
 }

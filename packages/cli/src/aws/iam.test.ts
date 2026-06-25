@@ -61,6 +61,29 @@ describe("node IAM least privilege", () => {
     );
   });
 
+  it("grants app nodes cluster-scoped write+prune to the backups bucket", () => {
+    const policy = JSON.parse(buildAppPolicy(bucket, "lower", "app-1", region, accountId)) as {
+      Statement: Statement[];
+    };
+    const backupsBucket = `launch-pad-backups-${accountId}-${region}`;
+
+    const write = policy.Statement.find((s) => s.Sid === "BackupWrite");
+    expect(write?.Action).toEqual(["s3:PutObject", "s3:DeleteObject"]);
+    expect(write?.Resource).toEqual([`arn:aws:s3:::${backupsBucket}/lower/*`]);
+
+    const list = policy.Statement.find((s) => s.Sid === "BackupList");
+    expect(list?.Action).toEqual(["s3:ListBucket"]);
+    expect(list?.Resource).toEqual([`arn:aws:s3:::${backupsBucket}`]);
+    expect(list?.Condition).toEqual({ StringLike: { "s3:prefix": ["lower/*"] } });
+  });
+
+  it("does not grant the edge any backups-bucket access", () => {
+    const policy = JSON.parse(buildEdgePolicy(bucket, "lower", "edge-1", region, accountId)) as {
+      Statement: Statement[];
+    };
+    expect(policy.Statement.some((s) => s.Sid === "BackupWrite" || s.Sid === "BackupList")).toBe(false);
+  });
+
   it("scopes edge policy to own upstream prefix, status, and CloudWatch Logs", () => {
     const policy = JSON.parse(buildEdgePolicy(bucket, "lower", "edge-1", region, accountId)) as {
       Statement: Statement[];

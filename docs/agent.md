@@ -27,8 +27,8 @@ Docker — a wrong-AMI-for-role provisioning mistake surfaces at first tick, not
    cached ~6h via the instance role (`ecr.rs`).
 5. Publish this node's **upstream shard** (its private IP + backend list) into the edge's
    `upstream/` S3 prefix — the routing signal the edge consumes. App nodes never run Caddy.
-6. Sample stats, write `status.json` + heartbeat (`status.rs`, `status_write.rs`), sync the
-   CloudWatch Agent config.
+6. Sample stats, write `status.json` + heartbeat (`status.rs`, `status_write.rs`), and ship
+   new log-file lines directly to CloudWatch Logs.
 
 The agent is **idempotent and crash-safe**: running it twice against the same desired state
 is a no-op; per-action errors are isolated and the next tick retries from scratch. Local
@@ -66,6 +66,33 @@ logs) remain inspectable; `status.json` carries a per-service `cron` rollup
 `running` — a failed run surfaces via the rollup and message, not state `error`, so a
 deploy's convergence watch can't be wedged by one bad run.
 
+## Database backups (app)
+
+A managed-database service (a `[[database]]` block — a long-running Postgres worker with a
+`backup` config) layers a **scheduled S3 backup** on top of its normal container reconcile.
+`plan_backup_service` reuses the cron evaluator (`due_cron_fire`) against a `backup:<key>`
+anchor in `state.json` (namespaced so it never collides with a same-named cron service,
+seeded at first sight) and only fires when the DB container is **running** (otherwise it
+leaves the anchor untouched and retries next tick — a never-up DB is never silently skipped).
+
+On a fire the agent, per target database (the `databases` list, else every non-template DB
+enumerated from the engine — each name re-validated as a Postgres identifier before it can
+reach an S3 key): runs `pg_dump -Z 6` (gzip-compressed, **no shell pipe** — so a `pg_dump`
+failure is a real non-zero exit, never masked) **inside** the DB container via `docker exec`,
+streaming to a `0600` temp file in a `0700` work dir; uploads it with the node's instance
+role (no AWS creds ever enter the container; `PGPASSWORD` is passed via the docker process's
+env, never argv) to
+`launch-pad-backups-<acct>-<region>/<cluster>/<owner>/<service>/<db>/<timestamp>.sql.gz`; then
+deletes the temp file and prunes objects older than `retentionDays` under that db's prefix.
+The object **timestamp is derived from the scheduled fire** (not wall-clock), so a crash
+between upload and recording the fire re-runs and **overwrites** the same keys instead of
+duplicating. The fire is recorded **after** the attempt (a DB-up attempt advances the anchor
+even if a per-db dump failed — failures surface in the `status.json` `backup` rollup
+`lastError`, not as a replayed run). A heartbeat is emitted between databases so a multi-DB
+backup doesn't flap the node stale; the backup is still synchronous on the tick, so a very
+large dump delays that node's other reconcile work until it finishes. Backup code is compiled
+**only into the app binary**.
+
 ## Zero-downtime rollouts
 
 `rollout_service` surges a new replica (pull → run → wait for consecutive health-check
@@ -95,9 +122,13 @@ it (no PUT storm), so a fresh sample reaches S3 with the next change or liveness
   `[[service.volumes]]` as docker named volumes (`launchpadvol_<project>_<service>_<name>`,
   index-independent so the data is re-mounted across rollouts). A `docker rm` leaves the
   named volume intact, so the data outlives a container replacement.
-- **Logs** (`cloudwatch_logs.rs`): reconciles the Amazon CloudWatch Agent config
-  (write-on-change) so container stdout ships to per-service log groups; degraded-safe —
-  logging failures never break reconciliation. The edge ships agent + caddy system logs.
+- **Logs** (`cloudwatch_logs.rs`): tails Docker json-file logs plus the forwarded
+  journald files under `/var/log/launch-pad` and writes batches directly to CloudWatch Logs
+  with the Rust SDK. It keeps the same per-service groups and `node/replica` streams that
+  `launchpad logs` already reads, applies 7-day retention on first write, and is
+  degraded-safe — logging failures never break reconciliation. BYOS nodes get the small
+  journald forwarder during `node init`; older nodes without it can still be inspected with
+  `journalctl -u launch-pad-agent` until upgraded/re-enrolled.
 - **Stats** (`stats.rs`): samples host CPU/memory (`/proc`) and per-container usage,
   emitting `launchpad.stats` JSON lines (~60s) that reach CloudWatch via the system log
   group — the data behind `launchpad node monitor`. The latest host sample is also
@@ -127,7 +158,8 @@ The agent is **not on npm**. `pnpm build:agent` cross-compiles both binaries for
 linux/amd64 (static musl, ~11 MB each); the CLI uploads the role-appropriate one to
 `nodes/<id>/agent` in S3, where cloud-init curls it via presigned URL on full bootstrap (or
 the [golden AMI](golden-ami.md) pre-bakes it). `launchpad node upgrade-agent` publishes a
-fresh binary and restarts agents via SSM.
+fresh binary and restarts EC2 agents via SSM; named external (BYOS) app nodes use SSH with the
+same install script.
 
 **Migrating a live TS-agent cluster** (no re-provision needed):
 

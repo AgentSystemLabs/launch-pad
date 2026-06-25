@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { ZodError } from "zod";
 import {
+  expandDatabaseServices,
   type LaunchPadConfig,
   parseLaunchPadConfig,
 } from "@agentsystemlabs/launch-pad-shared";
@@ -53,7 +54,12 @@ export function loadConfig(startDir: string = process.cwd()): LoadedConfig {
   }
 
   try {
-    return { config: parseLaunchPadConfig(raw), path, dir: dirname(path) };
+    // Desugar every `[[database]]` block into an appended worker service BEFORE any
+    // command sees the config — so placement, capacity, merge, config-lock, secrets,
+    // and the build path all treat a managed database as an ordinary service. This is
+    // the single central config-load path (`loadConfig`), so every command inherits it.
+    const config = expandDatabaseServices(parseLaunchPadConfig(raw));
+    return { config, path, dir: dirname(path) };
   } catch (error) {
     if (error instanceof ZodError) {
       throw new CliError(`invalid ${CONFIG_FILENAME}:\n${formatZodError(error)}`);

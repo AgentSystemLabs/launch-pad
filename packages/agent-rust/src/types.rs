@@ -27,7 +27,9 @@ pub const HEARTBEAT_STALE_MS: i64 = 60_000;
 pub const LIVENESS_HEARTBEAT_MS: i64 = 30_000;
 
 /// Default poll interval in ms (`constants.ts`).
-pub const DEFAULT_POLL_INTERVAL_MS: i64 = 10_000;
+/// Raised from 10s to 60s when SNS/SQS notifications are available (agents receive
+/// immediate signals instead of polling frequently).
+pub const DEFAULT_POLL_INTERVAL_MS: i64 = 60_000;
 
 /// Docker label keys launch-pad stamps on managed containers (`constants.ts` `LABELS`).
 pub mod labels {
@@ -185,6 +187,40 @@ pub struct VolumeDecl {
     pub path: String,
 }
 
+/// Managed-database marker (`ServiceDatabaseSchema`, shared `config.ts`). Present on a
+/// service desugared from a `[[database]]` block — tells the agent it runs the engine
+/// image (no build) and can drive `pg_dump`. Optional so non-database services parse
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceDatabase {
+    /// Database engine (postgres for now).
+    pub engine: String,
+    /// Engine version (image tag).
+    pub version: String,
+    /// Logical databases to back up; empty → the agent enumerates at run time.
+    #[serde(default)]
+    pub databases: Vec<String>,
+}
+
+/// Where (and how often) the agent ships a managed database's `pg_dump` backups
+/// (`ServiceBackupConfigSchema`, shared `desired.ts`). The CLI computes
+/// `bucket`/`prefix` (it knows account/region/cluster/owner); the agent appends
+/// `<database>/<timestamp>.sql.gz`. Present only on a database service with backups
+/// enabled; optional so non-database services parse unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceBackupConfig {
+    /// 5-field UTC cron — when a backup run fires.
+    pub schedule: String,
+    /// Days of dumps kept per database; older objects are pruned after each run.
+    pub retention_days: i64,
+    /// Backups bucket name (`launch-pad-backups-<acct>-<region>`).
+    pub bucket: String,
+    /// Key prefix for this service: `<cluster>/<owner>/<service>/`.
+    pub prefix: String,
+}
+
 /// One service inside a node's `desired.json` (`ServiceConfigSchema`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -216,6 +252,15 @@ pub struct ServiceConfig {
     /// Persistent named volumes (defaulted so pre-volumes documents parse).
     #[serde(default)]
     pub volumes: Vec<VolumeDecl>,
+    /// Managed-database marker (engine/version + logical backup targets). Present →
+    /// this service runs an engine image (no build). Optional so non-database
+    /// services parse unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<ServiceDatabase>,
+    /// S3 backup config; present → the agent runs scheduled backups for this database.
+    /// Optional so non-database services parse unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<ServiceBackupConfig>,
 }
 
 /// Fingerprint of runtime config the agent stamps on containers. Uses secret ref
@@ -361,6 +406,37 @@ pub struct CronRunStatus {
     pub next_run_at: Option<String>,
 }
 
+/// Per-logical-database result inside a database service's backup rollup
+/// (`DatabaseBackupEntrySchema`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseBackupEntry {
+    pub name: String,
+    /// Completion time (UTC ISO) of the last successful dump, or null.
+    pub last_success_at: Option<String>,
+    /// Size of the last uploaded dump in bytes, or null before any success.
+    pub size_bytes: Option<i64>,
+}
+
+/// Backup rollup for a managed database service (`DatabaseBackupStatusSchema`).
+/// Present only when `[database.backup]` is configured; all-nullable so a
+/// freshly-deployed database (no run yet) parses, and optional on ServiceStatus so
+/// non-database services are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseBackupStatus {
+    /// Scheduled fire time (UTC ISO) of the most recent backup run, or null.
+    pub last_run_at: Option<String>,
+    /// Completion time (UTC ISO) of the last run where ALL databases dumped, or null.
+    pub last_success_at: Option<String>,
+    /// Error from the last run (any database failed / upload failed), or null.
+    pub last_error: Option<String>,
+    /// Next scheduled fire time (UTC ISO), or null.
+    pub next_run_at: Option<String>,
+    #[serde(default)]
+    pub databases: Vec<DatabaseBackupEntry>,
+}
+
 /// One service's rolled-up status (`ServiceStatusSchema`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -382,6 +458,9 @@ pub struct ServiceStatus {
     /// Present only for scheduled (`cron`) services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<CronRunStatus>,
+    /// Present only for managed database services with backups enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<DatabaseBackupStatus>,
     pub updated_at: String,
 }
 
@@ -513,6 +592,8 @@ mod tests {
                     name: "data".into(),
                     path: "/data".into(),
                 }],
+                database: None,
+                backup: None,
             }],
         };
         let json = serde_json::to_string(&desired).unwrap();
@@ -624,10 +705,13 @@ mod tests {
             desired_replicas: 1,
             running_replicas: 1,
             cron: None,
+            backup: None,
             updated_at: "t".into(),
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(!json.contains("\"cron\""));
+        // backup is omitted for non-database services (Option::is_none skip).
+        assert!(!json.contains("\"backup\""));
 
         let with_cron = ServiceStatus {
             cron: Some(CronRunStatus {
@@ -640,6 +724,72 @@ mod tests {
         let json = serde_json::to_string(&with_cron).unwrap();
         let parsed: ServiceStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.cron, with_cron.cron);
+    }
+
+    #[test]
+    fn database_and_backup_round_trip_and_default_for_non_database_services() {
+        // A non-database desired.json (no database/backup keys) parses with None.
+        let json = r#"{
+            "version": 2, "nodeId": "n1", "updatedAt": "t",
+            "services": [{ "project": "p", "service": "web", "image": "img", "cpu": 256, "memory": 256, "ingress": null }]
+        }"#;
+        let desired = parse_desired_state(json).unwrap();
+        assert_eq!(desired.services[0].database, None);
+        assert_eq!(desired.services[0].backup, None);
+
+        // A managed-database service with backup config round-trips through camelCase JSON.
+        let db_json = r#"{
+            "version": 2, "nodeId": "n1", "updatedAt": "t",
+            "services": [{
+                "project": "p", "service": "db", "image": "public.ecr.aws/docker/library/postgres:16",
+                "cpu": 512, "memory": 512, "ingress": null,
+                "database": { "engine": "postgres", "version": "16", "databases": ["app"] },
+                "backup": { "schedule": "0 3 * * *", "retentionDays": 7, "bucket": "launch-pad-backups-acct-region", "prefix": "default/p/db/" }
+            }]
+        }"#;
+        let desired = parse_desired_state(db_json).unwrap();
+        let svc = &desired.services[0];
+        let database = svc.database.as_ref().expect("database present");
+        assert_eq!(database.engine, "postgres");
+        assert_eq!(database.version, "16");
+        assert_eq!(database.databases, vec!["app".to_string()]);
+        let backup = svc.backup.as_ref().expect("backup present");
+        assert_eq!(backup.schedule, "0 3 * * *");
+        assert_eq!(backup.retention_days, 7);
+        assert_eq!(backup.bucket, "launch-pad-backups-acct-region");
+        assert_eq!(backup.prefix, "default/p/db/");
+
+        // database.databases defaults to empty when omitted.
+        let no_dbs = r#"{
+            "version": 2, "nodeId": "n1", "updatedAt": "t",
+            "services": [{
+                "project": "p", "service": "db", "image": "img", "cpu": 512, "memory": 512, "ingress": null,
+                "database": { "engine": "postgres", "version": "16" }
+            }]
+        }"#;
+        let desired = parse_desired_state(no_dbs).unwrap();
+        assert!(desired.services[0].database.as_ref().unwrap().databases.is_empty());
+
+        // Status backup rollup serializes camelCase to match the strict CLI zod schema.
+        let backup_status = DatabaseBackupStatus {
+            last_run_at: Some("2026-06-25T03:00:00.000Z".into()),
+            last_success_at: Some("2026-06-25T03:00:05.000Z".into()),
+            last_error: None,
+            next_run_at: Some("2026-06-26T03:00:00.000Z".into()),
+            databases: vec![DatabaseBackupEntry {
+                name: "app".into(),
+                last_success_at: Some("2026-06-25T03:00:05.000Z".into()),
+                size_bytes: Some(4096),
+            }],
+        };
+        let json = serde_json::to_string(&backup_status).unwrap();
+        assert!(json.contains("\"lastRunAt\""));
+        assert!(json.contains("\"lastSuccessAt\""));
+        assert!(json.contains("\"lastError\":null"));
+        assert!(json.contains("\"nextRunAt\""));
+        assert!(json.contains("\"sizeBytes\":4096"));
+        let parsed: DatabaseBackupStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, backup_status);
     }
 
     fn stamp_config() -> ServiceConfig {
@@ -658,6 +808,8 @@ mod tests {
             health_check: None,
             rollout: Rollout::default(),
             volumes: vec![],
+            database: None,
+            backup: None,
         }
     }
 

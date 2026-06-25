@@ -228,6 +228,11 @@ describe("findConfigLockViolations (baseline file)", () => {
       ],
     });
     expect(findConfigLockViolations(baseline(), added).some((v) => v.path === "service.worker")).toBe(true);
+    expect(
+      findConfigLockViolations(baseline(), added, { allowNewServices: true }).some(
+        (v) => v.path === "service.worker",
+      ),
+    ).toBe(false);
 
     const removed = baseline();
     const current = { ...removed, services: [] };

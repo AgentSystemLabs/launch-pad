@@ -1,6 +1,9 @@
 import { z } from "zod";
 import {
+  DatabaseEngineSchema,
   type LaunchPadConfig,
+  POSTGRES_VERSION_REGEX,
+  type ServiceDatabase,
   type ServiceDecl,
   ServiceTopologySchema,
   type VolumeDecl,
@@ -63,6 +66,14 @@ export const ConfigBaselineSchema = z
             // Locked identity: a service's persistent volumes can't change after the
             // first deploy. Defaulted so baselines written before volumes existed parse.
             volumes: z.array(VolumeDeclSchema).default([]),
+            // Locked identity for a managed database: engine + version. A major-version
+            // change is a migration, not a config tweak. (The backup-target `databases`
+            // list and the backup schedule/retention are operational and NOT snapshotted,
+            // so they stay freely mutable.) Optional so non-database baselines parse.
+            database: z
+              .object({ engine: DatabaseEngineSchema, version: z.string().regex(POSTGRES_VERSION_REGEX) })
+              .strict()
+              .optional(),
           })
           .strict(),
       )
@@ -98,6 +109,9 @@ function serviceSnapshot(decl: ServiceDecl): ConfigBaseline["services"][number] 
     rollout: { ...decl.rollout },
     secrets: [...(decl.secrets ?? [])],
     volumes: decl.volumes.map((v) => ({ ...v })),
+    ...(decl.database !== undefined
+      ? { database: { engine: decl.database.engine, version: decl.database.version } }
+      : {}),
   };
 }
 
@@ -140,6 +154,8 @@ export interface DeployedFootprint {
   volumes: VolumeDecl[];
   /** Cron expression for a scheduled job (carried by desired.json). */
   cron?: string | undefined;
+  /** Managed-database marker (engine/version), carried by desired.json. */
+  database?: ServiceDatabase | undefined;
 }
 
 export interface ConfigLockCompareOptions {
@@ -151,6 +167,8 @@ export interface ConfigLockCompareOptions {
    * again from the next deploy onward, once the baseline file exists.
    */
   baselineFromDesired?: boolean;
+  /** Permit new [[service]] blocks (e.g. adding admin to an existing footprint). */
+  allowNewServices?: boolean;
 }
 
 /**
@@ -235,6 +253,9 @@ export function baselineFromDeployedFootprints(
         rollout: { ...f.rollout },
         secrets: [...f.secrets],
         volumes: f.volumes.map((v) => ({ ...v })),
+        ...(f.database !== undefined
+          ? { database: { engine: f.database.engine, version: f.database.version } }
+          : {}),
       }))
       .sort((a, b) => a.name.localeCompare(b.name)),
     lockedAt,
@@ -298,6 +319,7 @@ function analyzeConfigChange(
 
   for (const name of curByName.keys()) {
     if (!baseByName.has(name)) {
+      if (opts?.allowNewServices) continue;
       preServiceViolations.push({
         path: `service.${name}`,
         message: `service "${name}" was added — ${CONFIG_LOCK_MUTABLE_HINT}`,

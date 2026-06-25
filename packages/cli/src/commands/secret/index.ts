@@ -13,6 +13,7 @@ import { type AwsEnv, prepareAws } from "../../aws/context";
 import {
   deleteSecretParameter,
   getExistingSecretPaths,
+  getSecretParameter,
   listSecretsByPrefix,
   putSecretParameter,
 } from "../../aws/ssm-secrets";
@@ -29,6 +30,11 @@ import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
 import { isJsonMode, log, printJson } from "../../ui/log";
 import { promptSecret } from "../../ui/prompt";
 import { color } from "../../ui/theme";
+import {
+  formatSecretOutput,
+  parseSecretFormat,
+  type SecretOutputFormat,
+} from "./format";
 
 interface SecretOptions extends GlobalOpts {
   service?: string;
@@ -39,6 +45,11 @@ interface SecretOptions extends GlobalOpts {
 
 interface SecretImportOptions extends SecretOptions {
   dryRun?: boolean;
+}
+
+interface SecretGetOptions extends SecretOptions {
+  format?: string;
+  quiet?: boolean;
 }
 
 interface SecretContext {
@@ -176,6 +187,56 @@ async function runSet(key: string, opts: SecretOptions): Promise<void> {
     log.dim(`  already registered — run ${color.cyan("launchpad deploy")} to apply`);
   }
   log.dim(`  rotate with ${color.cyan(`launchpad deploy --restart --service ${ctx.service}`)}`);
+}
+
+function assertSecretFormat(raw: string | undefined): SecretOutputFormat {
+  try {
+    return parseSecretFormat(raw);
+  } catch {
+    throw new CliError(`invalid --format "${raw}"`, {
+      hint: "use value, shell, or json",
+    });
+  }
+}
+
+async function runGet(key: string, opts: SecretGetOptions): Promise<void> {
+  assertSecretKey(key);
+  const ctx = await resolveSecretContext(opts, true);
+  const format = assertSecretFormat(opts.format);
+  const path = secretParameterPath({
+    clusterId: ctx.aws.clusterId,
+    ownerProject: ctx.ownerProject,
+    service: ctx.service,
+    key,
+  });
+
+  const value = await getSecretParameter(ctx.aws.ssm, path);
+  if (value === null) {
+    throw new CliError(`secret ${key} is not set for service ${ctx.service}`, {
+      hint: `set it with ${color.cyan(`launchpad secret set ${key} --service ${ctx.service}`)}`,
+    });
+  }
+
+  const output = formatSecretOutput(key, value, format);
+  if (opts.quiet !== true && format === "value" && !isJsonMode()) {
+    log.warn(
+      `printing secret value to stdout — avoid logs/CI artifacts; prefer --format shell in scripts`,
+    );
+  }
+
+  if (isJsonMode()) {
+    printJson({
+      key,
+      service: ctx.service,
+      ownerProject: ctx.ownerProject,
+      path,
+      format,
+      value,
+    });
+    return;
+  }
+
+  process.stdout.write(`${output}\n`);
 }
 
 async function runList(opts: SecretOptions): Promise<void> {
@@ -451,6 +512,18 @@ export function registerSecret(program: Command): void {
       await runList(mergedOpts<SecretOptions>(command));
     });
   applyGlobalOptions(list);
+
+  const get = secret
+    .command("get <key>")
+    .description("Print a decrypted secret value (for local scripting — never log stdout)")
+    .requiredOption("--service <name>", "service name from launch-pad.toml")
+    .option("--env <name>", "environment footprint (same as deploy --env)")
+    .option("--format <mode>", "output: value (default), shell (export KEY=…), or json", "value")
+    .option("--quiet", "skip the stdout warning when printing raw values")
+    .action(async (key: string, _opts, command: Command) => {
+      await runGet(key, mergedOpts<SecretGetOptions>(command));
+    });
+  applyGlobalOptions(get);
 
   const rm = secret
     .command("rm <key>")

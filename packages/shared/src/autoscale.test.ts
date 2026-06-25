@@ -251,6 +251,49 @@ describe("planAutoscale — utilization scale-in", () => {
   });
 });
 
+describe("planAutoscale — external (BYOS) nodes are never scale-in victims", () => {
+  // External nodes are real capacity (count toward pool size / minNodes / utilization)
+  // but the autoscaler doesn't own the operator's host, so it must never drain one.
+  it("never picks an external node as the victim — drains the EC2 node instead", () => {
+    const d = planAutoscale({
+      policy: policy({ minNodes: 1, maxNodes: 3, scaleInPercent: 30 }),
+      nodes: [
+        // External node is the coldest (would be the natural victim) but is off-limits.
+        node({ nodeId: "byos-1", provisioning: "external", cpuPercent: 1, memoryPercent: 1 }),
+        node({ nodeId: "app-1", provisioning: "ec2", cpuPercent: 20, memoryPercent: 20 }),
+      ],
+      nowMs: NOW,
+    });
+    expect(d).toMatchObject({ action: "scale-in", victim: "app-1" });
+  });
+
+  it("does nothing when the external node is the only non-protected candidate", () => {
+    const d = planAutoscale({
+      policy: policy({ minNodes: 1, maxNodes: 3, scaleInPercent: 30 }),
+      nodes: [
+        node({ nodeId: "app-1", protected: true, cpuPercent: 1, memoryPercent: 1 }),
+        node({ nodeId: "byos-1", provisioning: "external", cpuPercent: 1, memoryPercent: 1 }),
+      ],
+      nowMs: NOW,
+    });
+    expect(d.action).toBe("none");
+  });
+
+  it("counts an external node toward pool size so the cold EC2 node stays above minNodes", () => {
+    // Pool size 2 (external + ec2) > minNodes 1, both cold, ec2 is the only drainable
+    // candidate ⇒ the ec2 node IS drained (external keeps the pool from falling under min).
+    const d = planAutoscale({
+      policy: policy({ minNodes: 1, maxNodes: 3, scaleInPercent: 30 }),
+      nodes: [
+        node({ nodeId: "byos-1", provisioning: "external", cpuPercent: 5, memoryPercent: 5 }),
+        node({ nodeId: "app-1", provisioning: "ec2", cpuPercent: 5, memoryPercent: 5 }),
+      ],
+      nowMs: NOW,
+    });
+    expect(d).toMatchObject({ action: "scale-in", victim: "app-1" });
+  });
+});
+
 
 describe("planAutoscale — scale-in reservation feasibility", () => {
   // The e2e found this live: utilization said "scale in" but the survivors couldn't

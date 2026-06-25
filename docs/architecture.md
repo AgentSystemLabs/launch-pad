@@ -89,6 +89,60 @@ Shards are re-published at **every rollout surge/drain step**, and the drain wai
 at the edge's poll cadence — otherwise the edge would keep routing to stopped replicas and a
 rolling deploy would 502.
 
+### External (BYOS) nodes
+
+A node can be either a managed EC2 instance Launch Pad provisions, or an **operator-owned
+host** you bring yourself (BYOS). The registry entry (`shared/src/registry.ts`) records this
+as `provisioning: "ec2" | "external"`. [`node init`](cli.md#node-init) enrolls one: it
+provisions only AWS credentials, SSHes in once to bootstrap, and writes an `external` registry
+entry — no EC2 is ever created. App hosts install Docker and publish upstream shards; edge
+hosts install Caddy and reconcile routes from those shards.
+
+**Reaching an app box (`advertiseIp`).** An EC2 app node advertises its VPC `privateIp` to the
+edge; an external box has no such address Launch Pad controls, so it advertises an
+**`advertiseIp`** — the IP the edge dials to reach the box's container host ports. `node init`
+auto-detects this from the host's default IPv4 route over SSH when the flag is omitted, then
+asks the operator to confirm; passing `--advertise-ip` overrides detection for VPN/VPC/peered
+addresses. The agent resolves it in priority order: env `LAUNCHPAD_ADVERTISE_IP` →
+`agent.json`'s `advertiseIp` → the host's IMDS private IP. `advertiseIp` is stored in **both**
+`agent.json` (so the agent embeds it in its shard) and `node.json` (so the CLI sees it).
+External nodes leave
+`instanceId`, `securityGroupId`, `iamInstanceProfile`, `availabilityZone`, `privateIp`, and
+`eipAllocationId` **null** — there is no EC2 resource behind them. External edge nodes omit
+`advertiseIp` and instead record the stable, operator-managed `publicIp` users point DNS at.
+
+**Credentials: IAM user vs. instance profile.** An EC2 node authenticates via its **instance
+profile** (the agent picks up role credentials from IMDS). An external box has no instance
+profile, so `node init` creates a per-node IAM **user** with the *same* least-privilege node
+policy — `buildAppPolicy` / `buildEdgePolicy` via `buildNodePolicy` in `cli/src/aws/iam.ts`,
+identical scope to the EC2 path: read its own `desired.json`, write its own `status.json`,
+(app) write its upstream shard, ECR pull account-wide, SSM secrets for its services. The
+access key is created once and written to `/etc/launch-pad/agent.env` on the box (loaded by
+the systemd unit's `EnvironmentFile`). `node destroy` deletes that IAM user (keys + policy)
+and the S3 prefix, and makes **no EC2 calls** — the host is yours to tear down.
+
+**Operator responsibilities (the FR-7 networking contract).** Because Launch Pad doesn't own
+the box's network, the operator must satisfy what auto-provisioning would otherwise guarantee:
+
+- **App nodes** — the edge must be able to reach `advertiseIp` over **TCP 20000–29999** (the
+  container host-port range, `HOST_PORT_MIN`..`HOST_PORT_MAX`), or routed traffic and active
+  health checks fail. A NAT **hairpin** (edge and box behind the same NAT, dialing the box's
+  public IP) commonly breaks health checks — advertise an address the edge can reach directly
+  (a private/VPC IP or a peered address).
+  `node init` best-effort verifies this by opening a one-shot listener on TCP 20000 over SSH
+  and asking the EC2 edge to connect over SSM; `doctor` probes live external host ports once a
+  web service is running.
+- **Edge nodes** — must expose public **80/443**, have **DNS** pointing at the stable
+  `--public-ip` recorded in `node.json`, and put **no CDN/proxy in front** of the ACME
+  HTTP/TLS challenges (Caddy's Let's Encrypt issuance requires the domain to resolve directly
+  to the box).
+- **Secrets & images** — the app box needs outbound **HTTPS to SSM and ECR** in the cluster's
+  region to resolve secrets and pull images.
+
+No `PROTOCOL_VERSION` bump was needed: the new registry fields are additive (`.default()`),
+and `node.json` is CLI-side state the agent doesn't parse — the only wire-visible addition,
+`advertiseIp` in `agent.json`, is an optional field old documents simply lack.
+
 ## Zero-downtime rolling updates
 
 For each service, one at a time: **surge** a new replica (pull, start, wait for its health
@@ -124,14 +178,21 @@ agent resolves values at container start via the node's instance role. Rotation 
 
 ## Observability
 
-- **Logs:** the agent reconciles an Amazon CloudWatch Agent config so container stdout is
-  shipped to CloudWatch Logs (`/launch-pad/<cluster>/<project>/<service>` groups,
-  `<node>/<replica>` streams). `launchpad logs` merges streams across nodes/replicas.
+- **Logs:** the agent tails Docker json-file logs and its forwarded system log files, then
+  writes batches directly to CloudWatch Logs (`/launch-pad/<cluster>/<project>/<service>`
+  groups, `<node>/<replica>` streams). `launchpad logs` merges streams across nodes/replicas.
 - **Stats:** the agent samples host + per-container CPU/memory and emits `launchpad.stats`
   lines (~60s) that land in CloudWatch via the system log group. `launchpad node monitor`
-  graphs them (historic) or samples live over SSM (`--watch`).
+  graphs them (historic), samples EC2 nodes live over SSM (`--watch`), or polls an external
+  node's `status.json.host` heartbeat sample when SSM is unavailable.
 - **Heartbeats:** the agent publishes `status.json` on meaningful change, plus a liveness
   heartbeat every 30s; the CLI flags a node stale after 60s without one.
+
+BYOS Phase 1 note: external app nodes do not need the separate CloudWatch Agent; `node init`
+installs a tiny journald forwarder and the Rust agent ships service + agent logs through the
+same CloudWatch Logs groups as EC2 nodes. External nodes also carry `instanceType: "external"`
+for registry purposes but are not counted as EC2 compute in cost rollups; only their agent S3
+polling is estimated.
 
 ## Cross-cutting invariants
 

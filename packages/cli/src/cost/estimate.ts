@@ -67,7 +67,7 @@ export interface Ec2LineItem {
 export interface ProvisionCostEstimate {
   ec2Lines: Ec2LineItem[];
   ec2TotalUsd: number | null;
-  s3ByNode: Array<{ nodeId: string; role: NodeRole; s3: AgentS3Estimate }>;
+  s3ByNode: Array<{ nodeId: string; role: NodeRole; billsEc2: boolean; s3: AgentS3Estimate }>;
   s3GetObjectsPerMonth: number;
   s3PutObjectsPerMonth: number;
   s3GetTotalUsd: number;
@@ -165,6 +165,7 @@ export function estimateProvisionCost(nodes: NodeCostInput[]): ProvisionCostEsti
   const s3ByNode = nodes.map((n) => ({
     nodeId: n.nodeId,
     role: n.role,
+    billsEc2: n.billsEc2 !== false,
     s3: estimateAgentS3Monthly(n.role),
   }));
 
@@ -234,8 +235,9 @@ export function formatProvisionCostLines(
 
   if (estimate.s3ByNode.length > 0) {
     lines.push(color.bold("S3 agent polling (steady state)"));
-    for (const { nodeId, role, s3 } of estimate.s3ByNode) {
-      lines.push(`  ${nodeId} (${role})`);
+    for (const { nodeId, role, billsEc2, s3 } of estimate.s3ByNode) {
+      const billing = billsEc2 ? "" : color.dim(" · external (no EC2 cost)");
+      lines.push(`  ${nodeId} (${role})${billing}`);
       lines.push(
         `    GetObject  ${formatCount(s3.getObjectsPerMonth)}/mo  ${color.dim("→")} ${formatUsd(s3.getCostUsd, { minFractionDigits: 2 })}/mo`,
       );
@@ -277,10 +279,11 @@ export interface ClusterCostSummary {
 }
 
 /**
- * Roll up a cluster's *ongoing* monthly cost from its registry. Running nodes
- * (ready/provisioning) bill EC2 + agent S3; stopped nodes are counted separately (their
- * agent is off and compute isn't charged, but their EBS volume + Elastic IP still cost — not
- * estimated here, same as the provision-time estimate); terminated/terminating are excluded.
+ * Roll up a cluster's *ongoing* monthly cost from its registry. Running EC2 nodes
+ * (ready/provisioning) bill EC2 + agent S3; running external nodes contribute only
+ * agent S3. Stopped nodes are counted separately (their agent is off and compute isn't
+ * charged, but their EBS volume + Elastic IP still cost — not estimated here, same as the
+ * provision-time estimate); terminated/terminating are excluded.
  */
 export function summarizeClusterCost(entries: NodeRegistryEntry[]): ClusterCostSummary {
   const running = entries.filter((e) => e.state === "ready" || e.state === "provisioning");
@@ -289,6 +292,7 @@ export function summarizeClusterCost(entries: NodeRegistryEntry[]): ClusterCostS
     nodeId: e.nodeId,
     role: e.role,
     instanceType: e.instanceType,
+    billsEc2: e.provisioning !== "external",
   }));
   return { estimate: estimateProvisionCost(inputs), runningNodes: running.length, pausedNodes: paused.length };
 }

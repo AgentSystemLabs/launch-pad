@@ -231,6 +231,7 @@ launchpad deploy [options]
 | `--dry-run` | Plan only — no image push, S3 writes, or node creation |
 | `--ami <id>` | AMI id for auto-provisioned/recreated nodes |
 | `--restart` | Skip build/push; re-publish desired state and roll containers |
+| `--allow-new-services` | Permit new `[[service]]` blocks (e.g. add `admin` to an existing footprint) |
 | `--image <uri>` | Skip build/push; redeploy an existing ECR tag of one `--service` (rollback / promote) |
 | `--remote-build` | Build images on AWS CodeBuild instead of local docker (slim CI runners) |
 
@@ -244,6 +245,7 @@ launchpad deploy --env pr-123 --ttl 72h --yes  # PR preview that auto-expires
 launchpad deploy --yes               # CI
 launchpad deploy --dry-run
 launchpad deploy --restart --service api   # roll containers after a secret rotation
+launchpad deploy --allow-new-services --service admin   # add a new service to an existing footprint
 launchpad deploy --service web --image <uri>   # redeploy an existing tag (rollback)
 ```
 
@@ -492,6 +494,11 @@ run surfaces through the exit code and message, not an `error` state).
 Stream a service's logs from CloudWatch, merged across all nodes/replicas. Run from the
 project directory (`launch-pad.toml` resolves the project).
 
+BYOS nodes enrolled with `node init` use the Rust agent's direct CloudWatch Logs shipper; no
+separate CloudWatch Agent is required. Older external nodes enrolled before direct logging can
+still be inspected locally with `journalctl -u launch-pad-agent` and `docker logs` until they
+are upgraded/re-enrolled with the journald forwarder.
+
 ```bash
 launchpad logs <service> [options]
 ```
@@ -514,6 +521,7 @@ in `launch-pad.toml`; values never land in git or S3 `desired.json`.
 ```bash
 launchpad secret set DATABASE_URL --service api    # hidden prompt (or stdin / --value)
 launchpad secret list --service api                # names only, never values
+launchpad secret get DATABASE_URL --service api    # decrypt for local scripting (see below)
 launchpad secret rm DATABASE_URL --service api
 launchpad secret import .env.prod --service api              # bulk-load (production / base)
 launchpad secret import .env.staging --service api --env staging
@@ -526,6 +534,8 @@ cat .env.prod | launchpad secret import - --service api     # from stdin
 | `--env <name>` | Same footprint as `deploy --env` |
 | `--no-register` | SSM only — do not add/remove the key in `launch-pad.toml` |
 | `--value <value>` | (`set`) value inline (prefer the hidden prompt or stdin in scripts) |
+| `--format <mode>` | (`get`) `value` (default), `shell` (`export KEY=…`), or `json` |
+| `--quiet` | (`get`) skip the warning when printing raw secret values |
 | `--dry-run` | (`import`) show what would be created/overwritten (names only) without writing |
 
 SSM path layout: `/launch-pad/<cluster>/<ownerProject>/<service>/<KEY>` — `<cluster>` comes
@@ -558,6 +568,19 @@ After rotating a secret, roll containers without rebuilding:
 ```bash
 launchpad deploy --restart --service api
 ```
+
+### `secret get`
+
+Decrypts one SSM SecureString and prints it to **stdout** for local scripting (e.g.
+`eval "$(launchpad secret get DATABASE_URL --service api --format shell)"` before
+`pnpm db:seed`). Avoid CI logs and shared terminals — anyone with your operator IAM can
+already read these values in the AWS console.
+
+| Flag | Description |
+| ---- | ----------- |
+| `--format value` | Raw value only (default; prints a warning unless `--quiet`) |
+| `--format shell` | `export KEY='…'` safe for `eval` |
+| `--format json` | `{"key":"…","value":"…"}` |
 
 **Operator IAM** (not auto-provisioned): your local AWS profile needs `ssm:PutParameter`,
 `ssm:GetParameter`, `ssm:GetParameters`, `ssm:GetParametersByPath`, `ssm:DeleteParameter`,
@@ -781,7 +804,168 @@ in CI. Every `deploy` now also prints a **DNS panel** with each domain's A-recor
 
 ## `node`
 
-Manage EC2 nodes — the machines that run your services.
+Manage EC2 nodes — the machines that run your services. Most nodes are managed EC2
+instances Launch Pad provisions for you; you can also **bring your own server** (BYOS) and
+enroll an existing Linux host with [`node init`](#node-init).
+
+### `node init`
+
+Enroll an **operator-owned** server you already have (a VPS, a bare-metal box, an EC2
+instance you manage yourself) as a Launch Pad node, without Launch Pad ever provisioning any
+EC2. The CLI provisions only AWS *credentials* for the box (a per-node IAM **user** with the
+same least-privilege node policy an EC2 node gets via its instance profile), SSHes in once to
+bootstrap it (install Docker for `app` or Caddy for `edge`, drop the agent binary + `agent.json` + an `EnvironmentFile`
+with the AWS keys, register a `launch-pad-agent` systemd unit), and writes an `external`
+[node registry](architecture.md#external-byos-nodes) entry. From then on an external app box
+polls S3, reconciles Docker, and publishes its upstream shard to the cluster's edge; an
+external edge box polls upstream shards and reconciles Caddy.
+
+The box must be Linux with **systemd** and a `dnf` or `apt-get` package manager, reachable over
+SSH with passwordless `sudo`. External edge hosts must expose public TCP `80`/`443` and have a
+stable `--public-ip`; Launch Pad records that IP for DNS guidance but does not allocate or
+manage it.
+
+| Flag | Description |
+| ---- | ----------- |
+| `--host <user@host>` | **(required)** SSH target for the box, e.g. `ubuntu@203.0.113.10` |
+| `--role <role>` | `app` (default) or `edge` |
+| `--edge <nodeId>` | Pin a specific edge for this app node (required for external app nodes; omitted for edge nodes) |
+| `--advertise-ip <ip>` | The IP the edge dials to reach this app box's container host ports (auto-detected over SSH when omitted) |
+| `--public-ip <ip>` | **(required for edge)** Stable public IP users point DNS at; optional display IP for app nodes |
+| `--cpu <shares>` | Schedulable CPU shares (1024 = 1 vCPU) |
+| `--memory <mb>` | Schedulable memory in MB |
+| `--name <id>` | Node id (generated `<noun>-<verb>-<adverb>` when omitted) |
+| `--ssh-key <path>` | Identity file for SSH (`-i`) |
+| `--ssh-port <port>` | SSH port (default 22) |
+| `--agent-version <semver>` | Agent version to install |
+| `--timeout <seconds>` | Bootstrap timeout (default `180`) |
+| `--show-secrets` | Print the generated IAM access key (otherwise redacted as `***`) |
+| `--dry-run` | Show the plan (IAM + bootstrap) without changing anything |
+| `--yes` | Skip the confirmation prompt |
+
+The generated IAM access key is **shown only once, at creation**. It is **redacted by
+default** (and in `--json`); pass `--show-secrets` to print it. It is also written onto the
+box (`/etc/launch-pad/agent.env`, mode 600) so the agent can authenticate.
+
+Before creating the IAM user/access key, `node init` runs an SSH preflight:
+`sudo -n true` over the provided SSH target. This catches a wrong key/user, unreachable host,
+or sudo that would prompt for a password before Launch Pad creates long-lived credentials.
+After the IAM user is created, `node init` writes the `provisioning` `node.json` entry before
+running the bootstrap so a partial failure can still be cleaned up with `node destroy`.
+
+```bash
+# Enroll an existing Ubuntu box as an app node in the prod cluster
+launchpad node init --host ubuntu@203.0.113.10 \
+  --cpu 2048 --memory 4096 \
+  --cluster prod --yes
+
+# Override the detected address when the edge must dial a private/VPN address
+launchpad node init --host ubuntu@203.0.113.10 \
+  --advertise-ip 10.0.1.50 --cpu 2048 --memory 4096 \
+  --cluster prod --yes
+
+# Enroll an operator-owned ingress box as the cluster edge
+launchpad node init --host ubuntu@edge.example.com \
+  --role edge --public-ip 203.0.113.20 --cpu 512 --memory 512 \
+  --cluster prod --yes
+```
+
+`deploy` **still never SSHes** into nodes — only `node init` does, and only at enrollment.
+Once enrolled, the box is driven exactly like an EC2 node: entirely through S3 (desired →
+status), self-healing, idempotent.
+
+When `--advertise-ip` is omitted for an external app node, `node init` runs
+`ip -o -4 route get 1.1.1.1` over SSH, extracts the source IPv4 address, and asks you to
+confirm it before writing `agent.json` / `node.json`. Use `--advertise-ip` explicitly when the
+edge should dial a VPN, VPC, or peered private address instead of the host's default route
+address.
+
+Before declaring success for an external app node, `node init` performs a best-effort edge
+reachability probe: it starts a one-shot temporary listener on the BYOS host at TCP `20000`,
+then asks the EC2 edge over SSM to connect to the chosen advertise IP on port `20000`. A
+failure is a warning, not an enrollment failure, but it means web services will 502 or fail
+edge health checks until the network path is fixed. External edge enrollment skips this
+app-port probe.
+
+If enrollment times out waiting for the first heartbeat, the bootstrap may still be healthy
+but slow. Re-run the same `node init` command with `--name <nodeId>`; when the existing entry
+is an external node still in `provisioning`, Launch Pad resumes the heartbeat wait and marks
+the node `ready` once the agent reports, without creating another IAM key or re-running the
+bootstrap.
+
+BYOS app networking checklist:
+
+- Open edge → BYOS host TCP `20000-29999` in the host firewall, security group, VPN ACL, or
+  routed LAN policy.
+- Confirm or override the detected advertise IP with an address reachable **from the edge**,
+  not merely from your laptop.
+- Avoid NAT hairpin paths where the edge dials the box's public IP from inside the same NAT;
+  use a private/VPC/VPN/peered address instead.
+- Re-run `launchpad doctor` after deploying a web service; it probes the edge to live external
+  host ports and reports unreachable nodes.
+
+BYOS edge networking checklist:
+
+- Point service A records at the external edge node's `--public-ip` (one wildcard DNS-only A
+  record is usually enough for environment subdomains).
+- Open public TCP `80`/`443` to the edge host so Caddy can serve traffic and complete ACME
+  HTTP/TLS challenges.
+- Keep the public IP stable outside Launch Pad; unlike EC2 edge nodes, Launch Pad does not
+  allocate an Elastic IP for operator-owned hosts.
+
+**Resolved open decisions (BYOS Phase 1):**
+
+- **One IAM user per external node** (not a shared user) — same least-privilege node policy
+  an EC2 node gets, so a compromised box can't read anything beyond its own state. Teardown
+  deletes just that user.
+- **A single `node init` command** does both credential provisioning and one-shot SSH
+  bootstrap — there is no separate "register" + "bootstrap" split.
+- **`advertiseIp` is stored in both `agent.json` and `node.json`** — the box reads it from
+  `agent.json` (env `LAUNCHPAD_ADVERTISE_IP` overrides), the CLI/edge read it from `node.json`.
+- **Target hosts are Linux + systemd** with a `dnf` or `apt-get` package manager; anything
+  else fails the bootstrap with a clear error. SSH access and passwordless sudo are checked
+  up front with `sudo -n true`.
+- **`doctor` checks external-node heartbeat freshness** and warns when a BYOS node is missing
+  or stale. When a web service is running on a BYOS node, `doctor` also asks the edge to probe
+  that node's live host ports. External nodes are not SSM-managed, so EC2 lifecycle commands
+  still skip them with a warning.
+
+### BYOS break-glass SSH equivalents
+
+External nodes are **not SSM-managed**. AWS Systems Manager Run Command, Session Manager,
+`node install-logging`, EC2 pause/resume/resize, and the EC2 live-sampling path in
+`node monitor --watch` do not reach an operator-owned host. Use the Launch Pad command when
+one exists (`node upgrade-agent <external>`, `node rotate-creds <external>`, `node destroy`)
+and use SSH for emergency host inspection:
+
+```bash
+# Agent health + recent logs
+ssh ubuntu@203.0.113.10 'sudo systemctl status launch-pad-agent --no-pager'
+ssh ubuntu@203.0.113.10 'sudo journalctl -u launch-pad-agent -n 200 --no-pager'
+
+# App nodes: Docker/container state
+ssh ubuntu@203.0.113.10 'sudo docker ps --filter label=launchpad.managed=true'
+ssh ubuntu@203.0.113.10 'sudo docker logs <container-id> --tail 200'
+
+# Edge nodes: Caddy state
+ssh ubuntu@203.0.113.20 'sudo systemctl status caddy --no-pager'
+ssh ubuntu@203.0.113.20 'sudo journalctl -u caddy -n 200 --no-pager'
+
+# Restart after manual host repair
+ssh ubuntu@203.0.113.10 'sudo systemctl restart launch-pad-agent'
+ssh ubuntu@203.0.113.20 'sudo systemctl restart caddy launch-pad-agent'
+```
+
+Credential and lifecycle break-glass:
+
+- To refresh a suspected-stale key, run `launchpad node rotate-creds <name> --host <user@host>
+  --ssh-key <path> --yes`; it writes `/etc/launch-pad/agent.env`, restarts the agent, and
+  deletes superseded IAM keys after the SSH push succeeds.
+- If a key is compromised and the host cannot be reached, revoke it from AWS IAM immediately
+  (delete the `launch-pad-node-<cluster>-<node>` access keys or the whole user), then run
+  `launchpad node destroy <name> --force --yes` to remove Launch Pad registry/S3 state.
+- If the host is repaired after a heartbeat timeout, re-run `node init --name <nodeId>` with
+  the same SSH options to resume the heartbeat wait instead of minting another key.
 
 ### `node create [name]`
 
@@ -849,9 +1033,19 @@ and remove its full S3 prefix (`node.json`, `desired.json`, `status.json`, the a
 | ---- | ----------- |
 | `--yes` | Skip the confirmation prompt |
 | `--force` | Destroy even if the node still hosts services (they will be **orphaned**) |
+| `--delete-data` | Acknowledge **permanent data loss** — required to destroy a node holding a persistent volume (a database). `--force` does **not** bypass this |
 | `--evacuate` | First move the current project's services off the node(s), wait for them to come up elsewhere, **then** destroy |
 | `--env <name>` | Target a named environment footprint for `--evacuate` (same as `deploy --env`) |
 | `--timeout <seconds>` | How long `--evacuate` waits for the moved replicas to converge (default 300) |
+
+**Data-loss guard:** a node hosting a **persistent volume** (a `[[database]]` or any
+`[[service.volumes]]` service) refuses to be destroyed — terminating the instance wipes the
+volume, which is irreversible. This gate is checked **independently of `--force`** (data loss is
+not the same as orphaning a stateless container) and evacuation can't move volume data off the
+node. Two ways forward: remove the data service first (`launchpad destroy --service <svc>`) so its
+volume is gone, then destroy the node; or pass **`--delete-data`** to accept that the volume's
+data is destroyed with the instance. A node whose `desired.json` is present but unparseable is
+treated as **possibly holding a volume** and refuses the same way (fail-closed).
 
 **Safety:** `node destroy` **refuses** by default when a node still hosts scheduled services —
 destroying it would orphan their containers (no node reconciles them anymore). The error lists
@@ -873,6 +1067,18 @@ which `project/service`s are at risk. Three ways forward:
 launchpad node destroy app-2 --evacuate --yes   # evacuate this project's services, then destroy
 launchpad node destroy app-2 --force --yes       # destroy now, orphan its services
 ```
+
+**External (BYOS) nodes:** for a node enrolled with [`node init`](#node-init)
+(`provisioning: "external"`), destroy deletes the per-node IAM **user** (its access keys +
+inline policy) and removes the node's S3 prefix — but makes **no EC2 calls and never touches
+the server itself**. The box keeps running; the agent simply loses its credentials and stops
+reconciling. Tear the host down (or stop the `launch-pad-agent` service) yourself.
+Before teardown, destroy best-effort marks the external node `terminating`, which cordons it
+out of future placement while IAM/S3 cleanup runs. For a dead BYOS node that still has desired
+services, use `node destroy <name> --evacuate --yes`: Launch Pad first republishes the current
+project's volume-free services onto surviving app nodes, then deletes the stale node state.
+`node pause` / `node resume` / `node resize` manage EC2 instances and are **unsupported** for
+external nodes — they error out telling you to manage the server yourself.
 
 To tear down a whole cluster at once, use [`cluster destroy`](#cluster-destroy-name).
 
@@ -932,30 +1138,85 @@ launchpad node resize node-prod-1 --instance-type t3.large --evacuate --yes # ro
 
 ### `node upgrade-agent [name]`
 
-Upload the **role-specific Rust agent binary** to S3 and install it on running
-instance(s) via SSM (with manual fallback). With no name, upgrades every node in the
-cluster. Each node gets the binary for **its** role (edge → Caddy router, app → Docker
+Upload the **role-specific Rust agent binary** to S3 and install it on running nodes. EC2
+nodes are restarted via SSM (with manual fallback). A named external (BYOS) node is restarted
+over SSH: pass `--host` when you need a user/hostname override, otherwise the CLI uses
+`node.json`'s `publicIp` / `advertiseIp` and forwards `--ssh-key` / `--ssh-port` to `ssh`.
+With no name, upgrades every EC2 node in the cluster and skips external nodes so SSH details
+stay explicit. Each node gets the binary for **its** role (edge → Caddy router, app → Docker
 reconciler), and the registry records `agentType: "rust"`. A node still on the legacy
-TypeScript agent is migrated in place — the systemd unit is rewritten to run the binary,
-the old bundle is removed, and an edge node also stops its now-unneeded Docker daemon —
-no re-provisioning. (Build the binaries first: `pnpm build:agent`.)
+TypeScript agent is migrated in place — the systemd unit is rewritten to run the binary, the
+old bundle is removed, and an edge node also stops its now-unneeded Docker daemon — no
+re-provisioning. (Build the binaries first: `pnpm build:agent`.)
 
 | Flag | Description |
 | ---- | ----------- |
 | `--upload-only` | Upload to S3 only — do not restart on-box agents |
 | `--agent-version <semver>` | Version recorded in the registry |
+| `--host <user@host>` | SSH target for a named external node |
+| `--ssh-key <path>` | SSH private key for a named external node |
+| `--ssh-port <port>` | SSH port for a named external node |
 | `--dry-run` | Show targets without changing anything |
 | `--yes` | Skip confirmation |
 
+```bash
+launchpad node upgrade-agent byos-app \
+  --host ubuntu@203.0.113.10 --ssh-key ~/.ssh/id_ed25519 --yes
+```
+
+### `node rotate-creds <name>`
+
+Rotate the long-lived IAM access key for an external (BYOS) node without re-enrolling it. The
+command creates a replacement key on the node's per-node IAM user, rewrites
+`/etc/launch-pad/agent.env` over SSH, restarts `launch-pad-agent`, then deletes superseded
+access keys only after the restart succeeds. If SSH fails, the replacement key is deleted and
+the old key remains active.
+
+| Flag | Description |
+| ---- | ----------- |
+| `--host <user@host>` | SSH target (defaults to the node's `publicIp` / `advertiseIp`) |
+| `--ssh-key <path>` | SSH private key |
+| `--ssh-port <port>` | SSH port |
+| `--dry-run` | Show the rotation plan without creating an access key |
+| `--yes` | Skip confirmation |
+
+Recommended cadence: rotate BYOS node credentials at least every 90 days, after operator
+turnover, and after any suspected host or key exposure.
+
+Revoke-on-compromise runbook:
+
+1. If the host is still trusted and reachable, run:
+
+   ```bash
+   launchpad node rotate-creds byos-app --host ubuntu@203.0.113.10 --ssh-key ~/.ssh/id_ed25519 --yes
+   ```
+
+2. If the host may be compromised, remove it from service first:
+
+   ```bash
+   launchpad node destroy byos-app --evacuate --yes
+   ```
+
+   Then tear down or rebuild the server yourself. `node destroy` deletes the per-node IAM user
+   and all of its access keys.
+
 ### `node install-logging [name]`
 
-Install CloudWatch log shipping on an existing node (IAM + CloudWatch Agent). With no name,
-targets every node in the cluster. `--dry-run` / `--yes` as above.
+Install the legacy CloudWatch Agent logging support on an existing EC2 node. New Rust agents
+ship service logs directly, but this remains useful for older EC2 nodes that lack the system
+log forwarders. With no name, targets every EC2 node in the cluster. `--dry-run` / `--yes` as
+above.
 
 ### `node reconcile [name]`
 
 Repair EC2 console drift: start stopped nodes, replace terminated ones (same node id; the
 edge keeps its Elastic IP). `deploy` runs this automatically unless `--no-repair`.
+
+External (BYOS) nodes have no EC2 instance to repair, but `node reconcile` still checks their
+heartbeat. A live external node stuck in `provisioning` is marked `ready`; a stale or missing
+heartbeat is reported with the same recovery choices as `node list`: restart the host/agent if
+it should still be live, or run `launchpad node destroy <name> --evacuate --yes` if the host is
+gone.
 
 | Flag | Description |
 | ---- | ----------- |
@@ -966,9 +1227,14 @@ edge keeps its Elastic IP). `deploy` runs this automatically unless `--no-repair
 ### `node monitor <nodeId>`
 
 Graph a node's CPU/memory usage over time. **Historic** mode reads the `launchpad.stats`
-samples the agent emits (~60s) to CloudWatch; **live** mode (`--watch`) samples the node
-over SSM and redraws a sparkline. Resource usage only — for app output use `logs`, for
-deploy convergence use `status`.
+samples the agent emits (~60s) to CloudWatch; **live** mode (`--watch`) samples EC2 nodes
+over SSM and redraws a sparkline. External (BYOS) nodes are not SSM-managed, so live mode
+reads the latest `status.json.host` sample from the agent heartbeat and labels the graph
+`from heartbeat`. Resource usage only — for app output use `logs`, for deploy convergence use
+`status`.
+
+Heartbeat-sourced BYOS live mode includes host CPU/memory only. Per-service live graphs still
+need SSM or historic CloudWatch stats; use `--since` without `--watch` for BYOS service rows.
 
 | Flag | Description |
 | ---- | ----------- |
@@ -1126,11 +1392,12 @@ launchpad cost --json --budget 100          # machine-readable, for CI / schedul
 | `--budget <usd>` | Monthly USD budget — exit non-zero (and flag) when the estimate exceeds it |
 | `--idle-days <n>` | Age (days) before an idle node is flagged in the recommendations (default `7`) |
 
-Running nodes (ready/provisioning) are estimated for EC2 + agent S3; **paused** nodes are noted
-separately (a stopped instance has no compute/agent charge, but its EBS volume + Elastic IP
-still cost — not estimated). It's a baseline, not a bill: it excludes data transfer, ECR /
-CloudWatch storage, and gp3 root volumes. With `--budget`, the non-zero exit makes it gateable
-in CI or a scheduled job to catch a cluster that grew past its threshold.
+Running EC2 nodes (ready/provisioning) are estimated for EC2 + agent S3. **External (BYOS)**
+nodes are labeled as no-EC2-cost and contribute only their agent S3 polling estimate. **Paused**
+nodes are noted separately (a stopped instance has no compute/agent charge, but its EBS volume
+and Elastic IP still cost — not estimated). It's a baseline, not a bill: it excludes data
+transfer, ECR / CloudWatch storage, and gp3 root volumes. With `--budget`, the non-zero exit
+makes it gateable in CI or a scheduled job to catch a cluster that grew past its threshold.
 
 It also surfaces **idle-node recommendations** — money spent without work being done:
 

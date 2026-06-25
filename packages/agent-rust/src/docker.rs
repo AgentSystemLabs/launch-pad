@@ -373,6 +373,100 @@ pub fn run_container(
     run_docker(&refs)
 }
 
+/// Build the `docker exec` argv for a command run INSIDE a container, injecting a
+/// KEY-ONLY `-e KEY` flag for each entry of `env` (used to forward `PGPASSWORD` to
+/// `pg_dump` / `psql`). The VALUE is deliberately NOT placed on the argv: a
+/// `-e KEY=value` pair is visible in `ps` on the host while `docker exec` runs, so the
+/// caller (`exec_capture` / `exec_to_file`) instead sets the variable in the spawned
+/// `docker` process's own environment and `docker exec -e KEY` forwards it from there —
+/// the secret never reaches argv, desired.json, or an error message. Pure so the flag
+/// wiring is unit-testable. `cmd` is the program + args (e.g.
+/// `["pg_dump", "-U", "postgres", "-d", "app", "-Z", "6"]`).
+pub fn build_exec_args(container: &str, env: &[(String, String)], cmd: &[&str]) -> Vec<String> {
+    let mut args: Vec<String> = vec!["exec".into()];
+    for (k, _v) in env {
+        args.push("-e".into());
+        args.push(k.clone());
+    }
+    args.push(container.to_string());
+    for part in cmd {
+        args.push((*part).to_string());
+    }
+    args
+}
+
+/// `docker exec` capturing stdout as bytes. Used to ENUMERATE databases (small text
+/// output) — the dump path streams to a file instead (see `exec_to_file`). On a
+/// non-zero exit only stderr is surfaced (the env carries `PGPASSWORD`, which must
+/// never reach a status message).
+pub fn exec_capture(
+    container: &str,
+    env: &[(String, String)],
+    cmd: &[&str],
+) -> Result<Vec<u8>, String> {
+    let args = build_exec_args(container, env, cmd);
+    // The secret values live in THIS process's environment (never argv); `docker exec
+    // -e KEY` forwards them into the container from here.
+    let out = Command::new("docker")
+        .args(&args)
+        .envs(env.iter().cloned())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(format!(
+            "docker exec: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// `docker exec` streaming stdout straight to `dest` (the dump goes to a temp file on
+/// the node, never buffered in memory — a database dump can be large). Returns the
+/// number of bytes written. On a non-zero exit only stderr is surfaced.
+pub fn exec_to_file(
+    container: &str,
+    env: &[(String, String)],
+    cmd: &[&str],
+    dest: &std::path::Path,
+) -> Result<u64, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let args = build_exec_args(container, env, cmd);
+    // The dump is a full plaintext-equivalent copy of the database — create it 0600 so
+    // it is never world-readable while it sits on disk before the S3 upload.
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(dest)
+        .map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let stderr_buf = std::process::Stdio::piped();
+    // The secret values live in THIS process's environment (never argv); `docker exec
+    // -e KEY` forwards them into the container from here.
+    let child = Command::new("docker")
+        .args(&args)
+        .envs(env.iter().cloned())
+        .stdout(std::process::Stdio::from(file))
+        .stderr(stderr_buf)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "docker exec: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let bytes = std::fs::metadata(dest)
+        .map(|m| m.len())
+        .map_err(|e| format!("stat {}: {e}", dest.display()))?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +492,8 @@ mod tests {
             health_check: None,
             rollout: Rollout::default(),
             volumes: vec![],
+            database: None,
+            backup: None,
         }
     }
 
@@ -562,5 +658,42 @@ mod tests {
         assert_eq!(format_cpus(512), "0.5");
         assert_eq!(format_cpus(256), "0.25");
         assert_eq!(format_cpus(2048), "2");
+    }
+
+    #[test]
+    fn build_exec_args_injects_env_then_container_then_command() {
+        let env = vec![("PGPASSWORD".to_string(), "s3cret".to_string())];
+        let args = build_exec_args(
+            "launchpad_blog_db_0",
+            &env,
+            &["pg_dump", "-U", "postgres", "-d", "app", "-Z", "6"],
+        );
+        // The secret VALUE never reaches argv — only the KEY (`-e PGPASSWORD`); the
+        // value is conveyed separately via the spawned process's environment.
+        assert_eq!(
+            args,
+            vec![
+                "exec".to_string(),
+                "-e".to_string(),
+                "PGPASSWORD".to_string(),
+                "launchpad_blog_db_0".to_string(),
+                "pg_dump".to_string(),
+                "-U".to_string(),
+                "postgres".to_string(),
+                "-d".to_string(),
+                "app".to_string(),
+                "-Z".to_string(),
+                "6".to_string(),
+            ]
+        );
+        // The value is carried out-of-band, not in any argv element.
+        assert!(!args.iter().any(|a| a.contains("s3cret")));
+        assert_eq!(env, vec![("PGPASSWORD".to_string(), "s3cret".to_string())]);
+    }
+
+    #[test]
+    fn build_exec_args_with_no_env_is_just_exec_container_command() {
+        let args = build_exec_args("c0", &[], &["psql", "-At"]);
+        assert_eq!(args, vec!["exec", "c0", "psql", "-At"]);
     }
 }

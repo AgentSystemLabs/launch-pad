@@ -228,6 +228,9 @@ async function observePool(aws: AwsEnv, defaultEdge: string | null, nowMs: numbe
         nodeId: entry.nodeId,
         role: entry.role,
         state: entry.state,
+        // External (BYOS) nodes count toward pool size/utilization but are excluded
+        // from scale-in victim candidates by the shared planner.
+        provisioning: entry.provisioning,
         // The cluster's routing anchor must never be a scale-in victim.
         protected: entry.nodeId === defaultEdge,
         cpuPercent,

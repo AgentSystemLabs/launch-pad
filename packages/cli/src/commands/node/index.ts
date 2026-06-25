@@ -35,7 +35,15 @@ import {
   terminateInstance,
 } from "../../aws/ec2";
 import { awsErrorName, isDestroyAlreadyGoneError } from "../../aws/errors";
-import { deleteNodeIam, nodeProfileName, nodeRoleName } from "../../aws/iam";
+import {
+  createExternalNodeAccessKey,
+  deleteExternalNodeAccessKey,
+  deleteExternalNodeAccessKeysExcept,
+  deleteExternalNodeIam,
+  deleteNodeIam,
+  nodeProfileName,
+  nodeRoleName,
+} from "../../aws/iam";
 import { getClusterConfig, putClusterConfig } from "../../cluster/store";
 import { rememberClusterTarget } from "../../config/local";
 import { deletePrefix, ensureBucket, getJson, listNodeIds, putJson } from "../../aws/s3-state";
@@ -47,6 +55,7 @@ import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
 import { provisionRoleOf, resolveNodeAmi, resolveNodeAmiByRole } from "../../provision/golden-ami";
 import { installLoggingOnNode } from "../../provision/install-logging";
 import { parseCreateAmount, planNodeCreateNames } from "./create-names";
+import { type InitOptions, runInit } from "./init";
 import { planEdgeForAppNode } from "./resolve-edge";
 import { registerMonitor } from "./monitor";
 import { type ResizeEvacuationPlan, planResizeEvacuation } from "./resize-evacuate";
@@ -58,7 +67,9 @@ import {
   resumeNode,
   securityGroupName,
 } from "../../provision/provision-node";
-import { manualUpgradeHint, upgradeAgentOnNode } from "../../provision/upgrade-agent";
+import { manualUpgradeHint, sshTargetFromHost, upgradeAgentOnNode } from "../../provision/upgrade-agent";
+import { renderExternalCredentialsUpdate } from "../../provision/external-bootstrap";
+import { sshRunScript } from "../../provision/ssh";
 import { renderUserData } from "../../provision/user-data";
 import { panel, table } from "../../ui/box";
 import { isJsonMode, log, printJson, spinner } from "../../ui/log";
@@ -75,6 +86,19 @@ async function loadNode(aws: AwsEnv, nodeId: string): Promise<NodeRegistryEntry>
     });
   }
   return parseNodeRegistryEntry(obj.raw);
+}
+
+/**
+ * Refuse an EC2-instance lifecycle op (pause / resume / resize) on an external (BYOS)
+ * node — those commands drive the EC2 API, but an external node is an operator-owned
+ * host with no instance for launchpad to start/stop/retype.
+ */
+function assertNotExternal(node: NodeRegistryEntry): void {
+  if (node.provisioning === "external") {
+    throw new CliError(`node "${node.nodeId}" is an external (BYOS) node`, {
+      hint: "pause/resume/resize manage EC2 instances; manage the server yourself",
+    });
+  }
 }
 
 /** Every edge-role node id registered in the cluster (S3-lexicographic order). */
@@ -115,6 +139,34 @@ function driftBadge(drift: NodeDrift["drift"]): string | null {
     case "transitional":
       return color.dim("EC2 not stable yet");
   }
+}
+
+export type ExternalReconcileAction = "noop" | "mark-ready" | "operator-action";
+
+export interface ExternalReconcileAssessment {
+  heartbeat: "live" | "stale" | "missing" | "malformed";
+  action: ExternalReconcileAction;
+}
+
+export function assessExternalReconcile(
+  entry: Pick<NodeRegistryEntry, "state" | "provisioning">,
+  lastSeen: string | null,
+  nowMs: number,
+): ExternalReconcileAssessment {
+  const heartbeat =
+    lastSeen === null
+      ? "missing"
+      : isHeartbeatStale(lastSeen, nowMs, HEARTBEAT_STALE_MS)
+        ? "stale"
+        : "live";
+  if (entry.provisioning !== "external") return { heartbeat, action: "noop" };
+  if (heartbeat === "live") {
+    return { heartbeat, action: entry.state === "provisioning" ? "mark-ready" : "noop" };
+  }
+  return {
+    heartbeat,
+    action: entry.state === "ready" || entry.state === "provisioning" ? "operator-action" : "noop",
+  };
 }
 
 // ── create ─────────────────────────────────────────────────────────────────────
@@ -423,9 +475,13 @@ function formatNodeServices(services: NodeDesiredSummary["services"]): string {
     .join(color.dim(" · "));
 }
 
-async function heartbeat(aws: AwsEnv, nodeId: string): Promise<string> {
-  const obj = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, nodeId));
-  if (!obj) return color.dim("no agent yet");
+async function heartbeat(aws: AwsEnv, node: NodeRegistryEntry): Promise<string> {
+  const obj = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, node.nodeId));
+  if (!obj) {
+    return node.provisioning === "external" && (node.state === "ready" || node.state === "provisioning")
+      ? color.yellow("stale (no heartbeat)")
+      : color.dim("no agent yet");
+  }
   try {
     const status = parseNodeStatus(obj.raw);
     return isHeartbeatStale(status.lastSeen, Date.now(), HEARTBEAT_STALE_MS)
@@ -526,12 +582,16 @@ async function runList(opts: GlobalOpts): Promise<void> {
     }
     const node = item.node;
     const used = summaryOf(node.nodeId);
-    const beat = await heartbeat(aws, node.nodeId);
+    const beat = await heartbeat(aws, node);
     const obs = observe(node);
-    const where = node.instanceId
-      ? `${color.dim(node.instanceId)} ${node.publicIp ?? ""}`.trim()
-      : color.yellow("not provisioned");
-    const badge = driftBadge(driftOf(node));
+    const isExternal = node.provisioning === "external";
+    const where = isExternal
+      ? `${color.cyan("external")} ${color.dim("no EC2 cost")} ${color.dim(node.advertiseIp ?? "")}`.trim()
+      : node.instanceId
+        ? `${color.dim(node.instanceId)} ${node.publicIp ?? ""}`.trim()
+        : color.yellow("not provisioned");
+    // External nodes never have an EC2 instance, so they can't drift against EC2.
+    const badge = isExternal ? null : driftBadge(driftOf(node));
     const legacyBadge = node.role === "both" ? color.yellow("legacy both") : null;
     log.plain(
       `  ${color.cyan(node.nodeId)}  ${color.dim(`${node.role} · ${node.instanceType}`)}  ${beat}  ${where}${legacyBadge ? `  ${legacyBadge}` : ""}${badge ? `  ${badge}` : ""}`,
@@ -583,16 +643,28 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
     return;
   }
 
+  const isExternal = node.provisioning === "external";
   const rows: Array<[string, string]> = [
-    ["instance", node.instanceId ?? color.yellow("not provisioned")],
+    [
+      "instance",
+      isExternal
+        ? color.cyan("external (BYOS)")
+        : (node.instanceId ?? color.yellow("not provisioned")),
+    ],
     ["cluster", node.clusterId],
     ["role", node.role],
+    ["provisioning", node.provisioning],
     ["instance type", node.instanceType],
     ["private ip", node.privateIp ?? color.dim("—")],
+    ...(isExternal ? ([["advertise ip", node.advertiseIp ?? color.dim("—")]] as Array<[string, string]>) : []),
     ["region / az", `${node.region} ${color.dim(node.availabilityZone ?? "")}`],
     [
       "public ip",
-      nodeUsesElasticIp(node.role) ? (publicIp ?? color.dim("—")) : color.dim("none (VPC-private)"),
+      isExternal
+        ? (node.publicIp ?? color.dim("—"))
+        : nodeUsesElasticIp(node.role)
+          ? (publicIp ?? color.dim("—"))
+          : color.dim("none (VPC-private)"),
     ],
     ["security group", node.securityGroupId ?? color.dim("—")],
     ["capacity", `${sharesToVcpu(node.totalCpu)} vCPU · ${node.totalMemory} MB`],
@@ -633,6 +705,12 @@ interface DestroyOptions extends GlobalOpts {
   /** Destroy even when the node still hosts services (they will be orphaned). */
   force?: boolean;
   /**
+   * Acknowledge PERMANENT data loss: allow tearing down a node that holds a persistent
+   * volume (terminating the instance wipes the volume). Required to destroy a node
+   * hosting a database/data service — `--force` does NOT bypass this gate.
+   */
+  deleteData?: boolean;
+  /**
    * Before destroying, auto-evacuate the current project's cluster-placed services off the
    * node(s) (= `node evacuate` / `rebalance --drain`) and wait for them to come up elsewhere.
    */
@@ -647,11 +725,38 @@ interface DestroyOptions extends GlobalOpts {
 export interface ScheduledService {
   project: string;
   service: string;
+  /**
+   * True when this service keeps a persistent volume on the node (e.g. a Postgres data
+   * service). Optional so existing callers/tests that only care about (project, service)
+   * stay valid — absent is treated as "no volume". Surfaced by `listScheduledServices`
+   * so `node destroy` can refuse to wipe a data volume by accident.
+   */
+  hasVolume?: boolean;
 }
 
 export interface OrphanRisk {
   name: string;
   services: ScheduledService[];
+}
+
+/** A node holding at least one volume-bearing service, with just those services. */
+export interface VolumeRisk {
+  name: string;
+  services: ScheduledService[];
+}
+
+/**
+ * The nodes that host a persistent volume (a Postgres/data service) — destroying them
+ * TERMINATES the instance and PERMANENTLY wipes that volume's data. Pure so the
+ * refuse-without-`--delete-data` decision is unit-tested. This is checked INDEPENDENTLY
+ * of `--force`/orphan logic: data loss is irreversible, so `--force` must not bypass it.
+ */
+export function volumeBearingTargets(
+  targets: Array<{ name: string; services: ScheduledService[] }>,
+): VolumeRisk[] {
+  return targets
+    .map((t) => ({ name: t.name, services: t.services.filter((s) => s.hasVolume === true) }))
+    .filter((t) => t.services.length > 0);
 }
 
 /**
@@ -717,14 +822,31 @@ export function parseNodeNames(args: string | string[]): string[] {
   return names;
 }
 
+/**
+ * Convert a node's PRESENT desired.json into its scheduled services. Pure so the
+ * fail-closed behavior is unit-tested. On a parse failure we can't tell whether a
+ * persistent volume lives on the node, so we FAIL CLOSED — return a synthetic
+ * volume-bearing service so both the orphan gate (--force) and the data-loss gate
+ * (--delete-data) fire, rather than letting `node destroy` terminate the instance and
+ * wipe a database volume without acknowledgement. (A truly absent desired.json is
+ * handled by the caller as [].)
+ */
+export function scheduledServicesFromDesired(raw: unknown): ScheduledService[] {
+  try {
+    return parseDesiredState(raw).services.map((s) => ({
+      project: s.project,
+      service: s.service,
+      hasVolume: s.volumes.length > 0,
+    }));
+  } catch {
+    return [{ project: "(unknown)", service: "(unparseable desired.json)", hasVolume: true }];
+  }
+}
+
 async function listScheduledServices(aws: AwsEnv, name: string): Promise<ScheduledService[]> {
   const desired = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, name));
   if (!desired) return [];
-  try {
-    return parseDesiredState(desired.raw).services.map((s) => ({ project: s.project, service: s.service }));
-  } catch {
-    return [];
-  }
+  return scheduledServicesFromDesired(desired.raw);
 }
 
 interface TeardownProgress {
@@ -791,14 +913,29 @@ export async function teardownNode(
       deleteSecurityGroup(aws.ec2, node.securityGroupId!),
     );
   }
-  // Delete the node's per-node IAM role + instance profile (best-effort + idempotent;
-  // only ever touches `launch-pad-node-<cluster>-<node>`-named resources, so a legacy
-  // shared role is left alone). Matches `cluster destroy` — without this, single-node
-  // destroy left orphan IAM roles/profiles accumulating in the account.
-  progress?.text?.("deleting IAM role");
-  await tryDestroyStep(progress, `delete IAM role ${nodeRoleName(node.clusterId, name)}`, () =>
-    deleteNodeIam(aws.iam, node.clusterId, name),
-  );
+  // Delete the node's per-node IAM. An external (BYOS) node is backed by an IAM USER
+  // (access keys), not an instance role/profile — tear that down instead. An EC2 node's
+  // role + instance profile are removed by deleteNodeIam (best-effort + idempotent; only
+  // ever touches `launch-pad-node-<cluster>-<node>`-named resources, so a legacy shared
+  // role is left alone). Without this, single-node destroy left orphan IAM accumulating.
+  if (node.provisioning === "external") {
+    progress?.text?.("cordoning external node");
+    await tryDestroyStep(progress, `cordon external node ${name}`, () =>
+      putJson(aws.s3, aws.bucket, nodeRegistryKey(node.clusterId, name), {
+        ...node,
+        state: "terminating",
+      }),
+    );
+    progress?.text?.("deleting IAM user");
+    await tryDestroyStep(progress, `delete IAM user for ${name}`, () =>
+      deleteExternalNodeIam(aws.iam, node.clusterId, name),
+    );
+  } else {
+    progress?.text?.("deleting IAM role");
+    await tryDestroyStep(progress, `delete IAM role ${nodeRoleName(node.clusterId, name)}`, () =>
+      deleteNodeIam(aws.iam, node.clusterId, name),
+    );
+  }
   // If this node was its cluster's default edge, clear that pointer first.
   if (node.clusterId !== DEFAULT_CLUSTER) {
     await tryDestroyStep(progress, "clear default edge", async () => {
@@ -874,6 +1011,27 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
     orphaning = nodesThatWouldOrphan(active);
   }
 
+  // Data-loss gate (checked INDEPENDENTLY of --force/orphan logic): a node holding a
+  // persistent volume (a Postgres/data service) can't be torn down by accident —
+  // terminating the instance wipes the volume's data, which is irreversible. Evacuation
+  // can't move a volume-bearing service (its data is node-local), so a volume service
+  // still present here means the data would be destroyed. Refuse unless --delete-data —
+  // and --force must NOT bypass this.
+  const volumeRisks = volumeBearingTargets(active);
+  if (volumeRisks.length > 0 && opts.deleteData !== true) {
+    const lines = volumeRisks.map(
+      (v) => `  ${color.cyan(v.name)}: ${v.services.map((s) => `${s.project}/${s.service}`).join(", ")}`,
+    );
+    throw new CliError(
+      `refusing to destroy — ${volumeRisks.length} node(s) hold a persistent volume (a database/data service) whose data would be PERMANENTLY destroyed:\n${lines.join("\n")}`,
+      {
+        hint:
+          "remove the data service first with `launchpad destroy --service <svc>` (so its volume is gone), " +
+          "or pass --delete-data to accept PERMANENT data loss (terminating the instance wipes the volume)",
+      },
+    );
+  }
+
   // Safety gate: destroying a node still hosting services orphans them (their
   // containers keep running with no desired-state owner, and no node reconciles
   // them). Refuse unless --force explicitly acknowledges the orphaning.
@@ -898,6 +1056,14 @@ async function runDestroy(namesArg: string | string[], opts: DestroyOptions): Pr
           ? `node "${active[0]!.name}" still has ${totalServices} scheduled service(s) — they will be orphaned (--force)`
           : `${active.length} node(s) still have ${totalServices} scheduled service(s) combined — they will be orphaned (--force)`;
       log.warn(msg);
+    }
+    // --delete-data got us past the volume gate — make sure the operator sees that the
+    // database volume(s) on these nodes are about to be permanently destroyed.
+    if (volumeRisks.length > 0) {
+      const dbs = volumeRisks.flatMap((v) => v.services.map((s) => `${s.project}/${s.service}`));
+      log.warn(
+        `PERMANENT data loss: the database volume(s) for ${dbs.join(", ")} will be destroyed when the instance is terminated (--delete-data)`,
+      );
     }
     const what =
       active.length === 1
@@ -1121,6 +1287,7 @@ async function runPause(name: string, opts: GlobalOpts): Promise<void> {
   assertValidNodeId(name);
   const aws = await prepareAws(opts);
   const node = await loadNode(aws, name);
+  assertNotExternal(node);
   if (!node.instanceId) {
     throw new CliError(`node "${name}" has no instance to pause`);
   }
@@ -1151,6 +1318,7 @@ async function runResume(name: string, opts: GlobalOpts): Promise<void> {
   assertValidNodeId(name);
   const aws = await prepareAws(opts);
   const node = await loadNode(aws, name);
+  assertNotExternal(node);
   if (!node.instanceId) {
     throw new CliError(`node "${name}" has no instance to resume`);
   }
@@ -1305,6 +1473,7 @@ async function runResize(name: string, opts: ResizeOptions): Promise<void> {
   }
   const aws = await prepareAws(opts);
   const node = await loadNode(aws, name);
+  assertNotExternal(node);
   if (!node.instanceId) {
     throw new CliError(`node "${name}" has no instance to resize`, {
       hint: "provision it first with `launchpad node create`",
@@ -1508,6 +1677,18 @@ interface UpgradeAgentOptions extends GlobalOpts {
   dryRun?: boolean;
   uploadOnly?: boolean;
   agentVersion?: string;
+  host?: string;
+  sshKey?: string;
+  sshPort?: string;
+}
+
+function parseSshPortOption(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const port = Number.parseInt(raw, 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new CliError(`invalid --ssh-port "${raw}"`, { hint: "pass a TCP port, e.g. --ssh-port 22" });
+  }
+  return port;
 }
 
 async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptions): Promise<void> {
@@ -1534,20 +1715,34 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
     }
   }
 
-  const targets = entries.filter((e) => e.instanceId);
+  const external = entries.filter((e) => e.provisioning === "external");
+  if (!name && external.length > 0) {
+    for (const e of external) {
+      log.warn(
+        `skipping external (BYOS) node ${color.cyan(e.nodeId)} in bulk upgrade — pass the node name plus --host/--ssh-key when SSH details are needed`,
+      );
+    }
+  }
+  const targets = entries.filter((e) => e.provisioning !== "external" || name !== undefined);
   if (targets.length === 0) {
-    throw new CliError("no nodes with a running EC2 instance to upgrade", {
+    throw new CliError("no nodes to upgrade", {
       hint: "provision a node first, or pass a specific node id",
     });
   }
 
+  const sshPort = parseSshPortOption(opts.sshPort);
+
   if (!isJsonMode()) {
     log.plain();
     for (const e of targets) {
+      const isExternal = e.provisioning === "external";
       const action = opts.uploadOnly
         ? "upload agent bundle to S3"
-        : "upload agent bundle + restart agent via SSM";
-      log.plain(`  ${color.cyan(e.nodeId)}  ${color.dim(action)}  ${color.dim(e.instanceId ?? "")}`);
+        : isExternal
+          ? "upload agent bundle + restart agent via SSH"
+          : "upload agent bundle + restart agent via SSM";
+      const target = isExternal ? (opts.host ?? e.publicIp ?? e.advertiseIp ?? "pass --host") : (e.instanceId ?? "");
+      log.plain(`  ${color.cyan(e.nodeId)}  ${color.dim(action)}  ${color.dim(target)}`);
     }
     log.plain();
   }
@@ -1557,7 +1752,13 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
       printJson({
         dryRun: true,
         agentVersion,
-        nodes: targets.map((e) => ({ nodeId: e.nodeId, instanceId: e.instanceId, agentType: e.agentType })),
+        nodes: targets.map((e) => ({
+          nodeId: e.nodeId,
+          instanceId: e.instanceId,
+          agentType: e.agentType,
+          delivery: opts.uploadOnly ? "upload-only" : e.provisioning === "external" ? "ssh" : "ssm",
+          sshHost: e.provisioning === "external" ? (opts.host ?? e.publicIp ?? e.advertiseIp ?? null) : null,
+        })),
       });
     } else {
       log.info(`dry run — would upgrade ${targets.length} node(s) to agent ${agentVersion}`);
@@ -1588,6 +1789,12 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
         entry,
         agentVersion,
         uploadOnly: opts.uploadOnly,
+        ssh:
+          entry.provisioning === "external" && opts.host
+            ? sshTargetFromHost(opts.host, sshPort, opts.sshKey)
+            : entry.provisioning === "external" && (opts.sshKey || sshPort) && (entry.publicIp ?? entry.advertiseIp)
+              ? { host: (entry.publicIp ?? entry.advertiseIp)!, port: sshPort, key: opts.sshKey }
+              : undefined,
         onProgress: (t) => {
           spin.text = t;
         },
@@ -1597,9 +1804,20 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
         spin.succeed(
           `${color.cyan(entry.nodeId)}  ${color.dim(result.delivery === "upload-only" ? "bundle uploaded" : "agent restarted via SSM")}`,
         );
+      } else if (result.delivery === "ssh") {
+        spin.succeed(`${color.cyan(entry.nodeId)}  ${color.dim("agent restarted via SSH")}`);
       } else {
         spin.warn(`${color.cyan(entry.nodeId)}  ${color.yellow("bundle uploaded — install manually")}`);
-        if (result.bundleUrl) manualLines.push(manualUpgradeHint(entry.nodeId, result.bundleUrl));
+        if (result.bundleUrl) {
+          manualLines.push(
+            manualUpgradeHint(
+              entry.nodeId,
+              result.bundleUrl,
+              undefined,
+              entry.provisioning === "external" ? "external" : "ec2",
+            ),
+          );
+        }
         if (result.error) manualLines.push(`    ${color.dim(result.error)}`);
       }
     } catch (error) {
@@ -1615,13 +1833,127 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
 
   if (manualLines.length > 0) {
     log.plain();
-    log.warn("SSM could not reach some nodes — finish the upgrade on the instance:");
+    log.warn("could not reach some nodes automatically — finish the upgrade on the instance:");
     log.plain();
     for (const line of manualLines) log.plain(line);
     log.plain();
-    log.info(
-      "attach AmazonSSMManagedInstanceCore to the node IAM role, wait ~2 min for SSM registration, then re-run upgrade-agent",
+    log.info("for EC2 nodes, attach AmazonSSMManagedInstanceCore and re-run; for BYOS nodes, pass --host/--ssh-key");
+  }
+}
+
+// ── rotate-creds ───────────────────────────────────────────────────────────────
+
+interface RotateCredsOptions extends GlobalOpts {
+  yes?: boolean;
+  dryRun?: boolean;
+  host?: string;
+  sshKey?: string;
+  sshPort?: string;
+}
+
+async function runRotateCreds(name: string, opts: RotateCredsOptions): Promise<void> {
+  assertValidNodeId(name);
+  const aws = await prepareAws(opts);
+  const entry = await loadNode(aws, name);
+  if (entry.provisioning !== "external") {
+    throw new CliError(`node "${name}" is not an external (BYOS) node`, {
+      hint: "EC2 nodes use instance-profile credentials; rotate the IAM role outside launchpad if needed",
+    });
+  }
+  if (!entry.iamUserName) {
+    throw new CliError(`external node "${name}" has no IAM user recorded`, {
+      hint: "destroy and re-enroll the node, or repair node.json before rotating credentials",
+    });
+  }
+
+  const sshPort = parseSshPortOption(opts.sshPort);
+  const targetHost = opts.host ?? entry.publicIp ?? entry.advertiseIp;
+  if (!targetHost) {
+    throw new CliError(`no SSH target available for external node "${name}"`, {
+      hint: "pass --host <user@host>",
+    });
+  }
+  const target = sshTargetFromHost(targetHost, sshPort, opts.sshKey);
+
+  if (opts.dryRun) {
+    const plan = {
+      dryRun: true,
+      nodeId: name,
+      iamUserName: entry.iamUserName,
+      sshHost: targetHost,
+      actions: [
+        "create a replacement IAM access key",
+        "rewrite /etc/launch-pad/agent.env over SSH",
+        "restart launch-pad-agent",
+        "delete superseded IAM access keys after the restart succeeds",
+      ],
+    };
+    if (isJsonMode()) printJson(plan);
+    else {
+      panel(`Rotate credentials for ${name} ${color.dim("(dry run)")}`, [
+        ...table([
+          ["iam user", entry.iamUserName],
+          ["ssh", targetHost],
+          ["cleanup", "delete old access keys after successful restart"],
+        ]),
+      ]);
+    }
+    return;
+  }
+
+  if (opts.yes !== true && !isJsonMode()) {
+    const ok = await confirm(
+      `rotate AWS credentials for external node ${color.cyan(name)} and restart its agent over SSH?`,
+      false,
     );
+    if (!ok) throw new CliError("aborted", { hint: "re-run with --yes to skip this prompt" });
+  }
+
+  const spin = spinner(`rotating credentials for ${name}…`).start();
+  let newAccessKeyId: string | null = null;
+  let pushedToHost = false;
+  try {
+    spin.text = "creating replacement access key";
+    const key = await createExternalNodeAccessKey(aws.iam, entry.iamUserName);
+    newAccessKeyId = key.accessKeyId;
+
+    spin.text = `pushing credentials to ${target.host}`;
+    await sshRunScript(
+      target,
+      renderExternalCredentialsUpdate({
+        aws: { accessKeyId: key.accessKeyId, secretAccessKey: key.secretAccessKey, region: aws.region },
+      }),
+    );
+    pushedToHost = true;
+
+    spin.text = "deleting superseded access keys";
+    let deleted: string[] = [];
+    try {
+      deleted = await deleteExternalNodeAccessKeysExcept(aws.iam, entry.iamUserName, key.accessKeyId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.warn(`credentials rotated, but old key cleanup failed: ${message}`);
+    }
+    spin.succeed(`rotated credentials for ${color.cyan(name)}`);
+
+    if (isJsonMode()) {
+      printJson({ nodeId: name, iamUserName: entry.iamUserName, accessKeyId: key.accessKeyId, deletedAccessKeyIds: deleted });
+      return;
+    }
+    log.dim(`  active key: ${key.accessKeyId}`);
+    if (deleted.length > 0) log.dim(`  deleted old key(s): ${deleted.join(", ")}`);
+  } catch (error) {
+    if (spin.isSpinning) spin.fail(`rotate credentials for ${name} failed`);
+    if (newAccessKeyId && !pushedToHost) {
+      try {
+        await deleteExternalNodeAccessKey(aws.iam, entry.iamUserName, newAccessKeyId);
+      } catch {
+        log.warn(
+          `could not clean up replacement key ${newAccessKeyId}; delete it manually from IAM user ${entry.iamUserName}`,
+        );
+      }
+    }
+    throw error;
   }
 }
 
@@ -1676,6 +2008,32 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
   });
   const repairs = items.filter((i) => i.drift.action.kind !== "noop");
 
+  interface ExternalItem {
+    entry: NodeRegistryEntry;
+    lastSeen: string | null;
+    assessment: ExternalReconcileAssessment;
+  }
+  const externalItems: ExternalItem[] = [];
+  const nowMs = Date.now();
+  for (const entry of entries.filter((e) => e.provisioning === "external")) {
+    const statusObj = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, entry.nodeId));
+    let lastSeen: string | null = null;
+    if (statusObj) {
+      try {
+        lastSeen = parseNodeStatus(statusObj.raw).lastSeen;
+      } catch {
+        lastSeen = null;
+      }
+    }
+    externalItems.push({
+      entry,
+      lastSeen,
+      assessment: assessExternalReconcile(entry, lastSeen, nowMs),
+    });
+  }
+  const externalReadyRepairs = externalItems.filter((i) => i.assessment.action === "mark-ready");
+  const externalOperatorItems = externalItems.filter((i) => i.assessment.action === "operator-action");
+
   // Human-readable summary (always, before any mutation).
   if (!isJsonMode()) {
     log.plain();
@@ -1684,6 +2042,22 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
       log.plain(
         `  ${color.cyan(i.entry.nodeId)}  ${color.dim(`registry ${i.entry.state} · ec2 ${ec2StateLabel(i.obs)}`)}  ${badge ?? color.green("in sync")}`,
       );
+    }
+    for (const i of externalItems) {
+      const badge =
+        i.assessment.action === "mark-ready"
+          ? color.yellow("mark ready")
+          : i.assessment.action === "operator-action"
+            ? color.yellow("needs operator action")
+            : color.green("in sync");
+      log.plain(
+        `  ${color.cyan(i.entry.nodeId)}  ${color.dim(`registry ${i.entry.state} · external heartbeat ${i.assessment.heartbeat}`)}  ${badge}`,
+      );
+      if (i.assessment.action === "operator-action") {
+        log.dim(
+          `    use ${color.cyan(`launchpad node destroy ${i.entry.nodeId} --evacuate --yes`)} if the host is gone, or restart the host/agent if it should still be live`,
+        );
+      }
     }
     log.plain();
   }
@@ -1711,18 +2085,32 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
         drift: i.drift.drift,
         action: i.drift.action.kind,
       })),
+      externalNodes: externalItems.map((i) => ({
+        nodeId: i.entry.nodeId,
+        registryState: i.entry.state,
+        heartbeat: i.assessment.heartbeat,
+        action: i.assessment.action,
+      })),
       reconciled,
     });
   };
 
-  if (repairs.length === 0) {
-    if (!isJsonMode()) log.success("all nodes in sync — nothing to reconcile");
+  if (repairs.length === 0 && externalReadyRepairs.length === 0) {
+    if (!isJsonMode()) {
+      if (externalOperatorItems.length > 0) {
+        log.warn("EC2 nodes are in sync; external node(s) need operator action");
+      } else {
+        log.success("all nodes in sync — nothing to reconcile");
+      }
+    }
     reportJson([]);
     return;
   }
 
   if (opts.dryRun) {
-    if (!isJsonMode()) log.warn(`dry run — ${repairs.length} repair(s) would be applied`);
+    if (!isJsonMode()) {
+      log.warn(`dry run — ${repairs.length + externalReadyRepairs.length} repair(s) would be applied`);
+    }
     reportJson([]);
     return;
   }
@@ -1750,6 +2138,22 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
     (x, y) => (x.entry.role === "app" ? 1 : 0) - (y.entry.role === "app" ? 1 : 0),
   );
   const reconciled: string[] = [];
+  for (const i of externalReadyRepairs) {
+    const spin = spinner(`reconciling ${i.entry.nodeId} (mark-ready)…`).start();
+    try {
+      await putJson(
+        aws.s3,
+        aws.bucket,
+        nodeRegistryKey(aws.clusterId, i.entry.nodeId),
+        { ...i.entry, state: "ready" },
+      );
+      reconciled.push(i.entry.nodeId);
+      spin.succeed(`reconciled ${color.cyan(i.entry.nodeId)} ${color.dim("mark-ready")}`);
+    } catch (error) {
+      if (spin.isSpinning) spin.fail(`reconcile ${i.entry.nodeId} failed`);
+      throw error;
+    }
+  }
   for (const i of order) {
     const spin = spinner(`reconciling ${i.entry.nodeId} (${i.drift.action.kind})…`).start();
     const recreateAmi = recreateAmiByRole.get(provisionRoleOf(i.entry.role));
@@ -1805,7 +2209,11 @@ async function runInstallLogging(name: string | undefined, opts: InstallLoggingO
     }
   }
 
-  const targets = entries.filter((e) => e.instanceId);
+  // External (BYOS) nodes aren't SSM-managed in Phase 1 — skip them with a notice.
+  for (const e of entries.filter((e) => e.provisioning === "external")) {
+    log.warn(`skipping external (BYOS) node ${color.cyan(e.nodeId)} — not SSM-managed in Phase 1`);
+  }
+  const targets = entries.filter((e) => e.instanceId && e.provisioning !== "external");
   if (targets.length === 0) {
     throw new CliError("no nodes with a running EC2 instance to install logging on", {
       hint: "provision a node first, or pass a specific node id",
@@ -1911,6 +2319,50 @@ export function registerNode(program: Command): void {
     });
   applyGlobalOptions(create);
 
+  const init = node
+    .command("init")
+    .description(
+      "Enroll an existing operator-owned server (BYOS) as an external app/edge node over SSH",
+    )
+    .requiredOption("--host <user@host>", "the server to enroll, e.g. ubuntu@203.0.113.5")
+    .option("--role <role>", "node role: app | edge", "app")
+    .option("--edge <nodeId>", "for an app node: the edge node that routes to it")
+    .option("--advertise-ip <ip>", "the IP the edge dials to reach app host ports (auto-detected when omitted)")
+    .option("--public-ip <ip>", "the node's public IP (for an external edge)")
+    .option("--cpu <shares>", "total CPU shares to register (1024 = 1 vCPU)")
+    .option("--memory <mb>", "total memory (MB) to register")
+    .option("--name <id>", "node id to register (generated when omitted)")
+    .option("--ssh-key <path>", "SSH private key to authenticate with")
+    .option("--ssh-port <port>", "SSH port (default 22)")
+    .option("--agent-version <semver>", "agent version to install (default: this CLI's version)")
+    .option("--timeout <seconds>", "how long to wait for the agent to come up", "180")
+    .option("--show-secrets", "print the node's AWS access keys (default: redacted)")
+    .option("--dry-run", "show the enrollment plan + bootstrap without touching the server")
+    .option("--yes", "skip the enrollment confirmation prompt")
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Enrolls a server you already own — no EC2 instance is launched or billed. Launchpad",
+        "creates a dedicated IAM user for the node, SSHes in, installs the role-specific agent",
+        "under systemd, and registers it as an external (BYOS) node. The edge reaches an app",
+        "node at its --advertise-ip over the VPC/network; when omitted, node init detects it",
+        "over SSH and asks you to confirm. Open that path in your own firewall.",
+        "",
+        "pause / resume / resize don't apply to external nodes (manage the server yourself);",
+        "install-logging skips them, while upgrade-agent can use SSH for a named external node.",
+        "",
+        "Examples:",
+        "  $ launchpad node init --host ubuntu@203.0.113.5 --cpu 2048 --memory 4096",
+        "  $ launchpad node init --host ubuntu@203.0.113.5 --advertise-ip 10.0.0.5 --cpu 2048 --memory 4096",
+        "  $ launchpad node init --host root@host --role app --ssh-key ~/.ssh/id_ed25519 --dry-run",
+      ].join("\n"),
+    )
+    .action(async (_opts, command: Command) => {
+      await runInit(mergedOpts<InitOptions>(command));
+    });
+  applyGlobalOptions(init);
+
   const list = node
     .command("list")
     .description("List registered nodes and their capacity / heartbeat")
@@ -1944,6 +2396,10 @@ export function registerNode(program: Command): void {
     .option("--yes", "skip confirmation prompts")
     .option("--force", "destroy even if the node still hosts services (they will be orphaned)")
     .option(
+      "--delete-data",
+      "accept PERMANENT data loss: allow destroying a node that holds a database/persistent volume (--force does NOT bypass this)",
+    )
+    .option(
       "--evacuate",
       "first move the current project's cluster-placed services off the node(s), then destroy",
     )
@@ -1961,6 +2417,11 @@ export function registerNode(program: Command): void {
         "               services can't be auto-moved — destroy still refuses unless --force.",
         "  --force      destroy now and orphan whatever is still scheduled there.",
         "  (manual)     `node evacuate <node>` first, then re-run destroy.",
+        "",
+        "Independently, a node holding a persistent volume (a database/data service) is",
+        "refused even with --force — terminating the instance wipes the volume. Remove the",
+        "data service first with `launchpad destroy --service <svc>`, or pass --delete-data to",
+        "accept PERMANENT data loss.",
         "",
         "Fully tears the node down: instance + Elastic IP + security group + its per-node IAM",
         "role/profile + S3 state. Use `cluster destroy` to tear down a whole cluster at once.",
@@ -2034,6 +2495,9 @@ export function registerNode(program: Command): void {
     .description("Publish the role-specific Rust agent binary to S3 and install it on running instance(s)")
     .option("--upload-only", "upload to S3 only — do not restart the on-box agent")
     .option("--agent-version <semver>", "version recorded in the registry (default: this CLI's version)")
+    .option("--host <user@host>", "SSH target for a named external (BYOS) node")
+    .option("--ssh-key <path>", "SSH private key for a named external (BYOS) node")
+    .option("--ssh-port <port>", "SSH port for a named external (BYOS) node")
     .option("--dry-run", "show targets without uploading or restarting")
     .option("--yes", "skip confirmation prompts")
     .addHelpText(
@@ -2041,13 +2505,17 @@ export function registerNode(program: Command): void {
       [
         "",
         "Build the agent binaries first (`pnpm build:agent`) so the CLI ships the latest agent.",
-        "With no name, upgrades every node in the cluster that has an EC2 instance.",
+        "With no name, upgrades every node in the cluster that has an EC2 instance; external",
+        "(BYOS) nodes are upgraded one at a time so SSH details are explicit.",
         "Each node receives the binary for ITS role (edge → Caddy router, app → Docker",
         "reconciler); nodes still on the legacy TypeScript agent are migrated in place",
         "(systemd unit rewritten, no re-provision; an edge also stops its idle Docker).",
+        "For a named external node, the CLI uses --host when supplied, otherwise node.json's",
+        "publicIp/advertiseIp, and passes --ssh-key/--ssh-port through to ssh.",
         "",
         "Examples:",
         "  $ launchpad node upgrade-agent node-edge",
+        "  $ launchpad node upgrade-agent byos-app --host ubuntu@203.0.113.5 --ssh-key ~/.ssh/id_ed25519 --yes",
         "  $ launchpad node upgrade-agent --yes",
         "  $ launchpad node upgrade-agent --upload-only   # S3 only, manual install",
       ].join("\n"),
@@ -2056,6 +2524,32 @@ export function registerNode(program: Command): void {
       await runUpgradeAgent(name, mergedOpts<UpgradeAgentOptions>(command));
     });
   applyGlobalOptions(upgradeAgent);
+
+  const rotateCreds = node
+    .command("rotate-creds <name>")
+    .description("Rotate the IAM access key for an external (BYOS) node and push it over SSH")
+    .option("--host <user@host>", "SSH target for the external node (defaults to publicIp/advertiseIp)")
+    .option("--ssh-key <path>", "SSH private key to authenticate with")
+    .option("--ssh-port <port>", "SSH port (default 22)")
+    .option("--dry-run", "show the rotation plan without creating an access key")
+    .option("--yes", "skip confirmation prompts")
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Creates a replacement IAM access key for the node's per-node IAM user, rewrites",
+        "/etc/launch-pad/agent.env over SSH, restarts launch-pad-agent, then deletes",
+        "superseded access keys. If SSH fails, the newly-created key is deleted and the",
+        "old key remains active.",
+        "",
+        "Examples:",
+        "  $ launchpad node rotate-creds byos-app --host ubuntu@203.0.113.5 --ssh-key ~/.ssh/id_ed25519 --yes",
+      ].join("\n"),
+    )
+    .action(async (name: string, _opts, command: Command) => {
+      await runRotateCreds(name, mergedOpts<RotateCredsOptions>(command));
+    });
+  applyGlobalOptions(rotateCreds);
 
   const installLogging = node
     .command("install-logging [name]")

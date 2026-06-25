@@ -46,6 +46,13 @@ pub enum Action {
         config: ServiceConfig,
         fire_ms: i64,
     },
+    /// A managed-database backup is DUE and the DB container is running: dump every
+    /// target database, upload to S3, prune expired dumps, record the fire. Layered
+    /// ON TOP of the normal container reconcile (the DB is a long-running worker).
+    BackupRun {
+        config: ServiceConfig,
+        fire_ms: i64,
+    },
     Noop {
         config: ServiceConfig,
     },
@@ -62,6 +69,7 @@ impl Action {
             Action::Remove { .. } => "remove",
             Action::CronRun { .. } => "cronRun",
             Action::CronSkip { .. } => "cronSkip",
+            Action::BackupRun { .. } => "backupRun",
             Action::Noop { .. } => "noop",
         }
     }
@@ -75,6 +83,7 @@ impl Action {
             | Action::Rollout { config, .. }
             | Action::CronRun { config, .. }
             | Action::CronSkip { config, .. }
+            | Action::BackupRun { config, .. }
             | Action::Noop { config } => Some(config),
             Action::Remove { .. } => None,
         }
@@ -175,6 +184,62 @@ fn plan_cron_service(
     });
 }
 
+/// Plan the backup schedule for a managed database service. Layered ON TOP of the
+/// normal container reconcile (the DB is a long-running worker), so this only ever
+/// APPENDS a `BackupRun` — never the long-running branches. The backup fire anchor
+/// lives under a backup-namespaced state key (`backup:<service_key>`), separate from
+/// any cron anchor for the same service key.
+///
+/// Rules (mirrors the cron due-run logic, minus the container/overlap machinery):
+///   - No durable anchor yet → noop (the tick seeds a first-sight anchor before
+///     planning, exactly like cron, so a freshly-deployed schedule never replays).
+///   - Not due → noop.
+///   - Due but the DB container is NOT running → noop (do NOT record the fire — the
+///     run retries on a later tick once the DB is up). A dump needs a live engine.
+///   - Due AND running → BackupRun (apply dumps + uploads + prunes + records the fire).
+fn plan_backup_service(
+    c: &ServiceConfig,
+    have: &[ManagedReplica],
+    key: &str,
+    cron: Option<&CronPlanContext>,
+    actions: &mut Vec<Action>,
+) {
+    let Some(backup) = c.backup.as_ref() else {
+        return;
+    };
+    let Some(cron) = cron else {
+        return;
+    };
+    let state_key = format!("backup:{key}");
+
+    // No durable anchor → the tick hasn't seeded this schedule yet; never fire (it
+    // would replay history). The seeding happens wherever cron anchors are seeded.
+    let Some(&last_fire) = cron.last_fires.get(&state_key) else {
+        return;
+    };
+
+    // The CLI validates the schedule before publishing; an unparseable one here is
+    // defensive only — do nothing rather than run wild.
+    let Ok(schedule) = parse_cron_expression(&backup.schedule) else {
+        return;
+    };
+
+    let Some(due) = due_cron_fire(&schedule, last_fire, cron.now_ms) else {
+        return;
+    };
+
+    // GATE: a dump needs the engine running. If the DB container isn't up, leave the
+    // fire UNRECORDED so a later tick retries once it comes up.
+    if !have.iter().any(|r| r.state == "running") {
+        return;
+    }
+
+    actions.push(Action::BackupRun {
+        config: c.clone(),
+        fire_ms: due,
+    });
+}
+
 /// Pure diff over the replica set. Reasons by COUNT (not fixed indices) so a service
 /// whose replicas live at non-`0..N-1` indices (after a rollout) is still "converged".
 /// Image or cpu/memory/stamp drift collapses to a single `rollout` action.
@@ -242,8 +307,23 @@ pub fn plan_reconcile(
                 config: c.clone(),
                 remove: extras,
             });
-        } else if stopped.is_empty() {
+        } else if stopped.is_empty() && c.backup.is_none() {
+            // A bare worker with nothing to do is a noop. A managed DB with a backup
+            // schedule defers its noop to plan_backup_service so a due fire surfaces.
             actions.push(Action::Noop { config: c.clone() });
+        }
+
+        // Layer the scheduled backup on top of the (steady-state / starting) DB
+        // worker. Skipped during a rollout (the branch above `continue`d) so a dump
+        // never races a container replacement. A no-op backup decision falls through
+        // to the noop emitted just above for a converged DB.
+        if c.backup.is_some() {
+            let before = actions.len();
+            plan_backup_service(c, have, &key, cron, &mut actions);
+            // Keep a converged-but-not-due DB visible to the watcher as a noop.
+            if actions.len() == before && stopped.is_empty() && have_len == c.replicas {
+                actions.push(Action::Noop { config: c.clone() });
+            }
         }
     }
 
@@ -300,6 +380,17 @@ pub trait Reconciler {
     fn record_cron_fire(&mut self, key: &str, fire_ms: i64) -> Result<(), String>;
     /// Record a per-service error (the `ctx.errors` map in the TS `ApplyContext`).
     fn set_error(&mut self, key: &str, message: String);
+    /// Run one managed-database backup pass: dump each target database, upload to S3,
+    /// prune expired dumps, record the fire (under the backup-namespaced state key)
+    /// AFTER the attempt, and store the resulting `backup` status rollup. The DB
+    /// container is already known to be running (the planner gated on it). Per-db
+    /// dump failures are recorded in the status (`lastError`) rather than thrown, so
+    /// the fire still advances; an outer Err only on a setup failure that prevented
+    /// recording the fire (which would replay the same fire next tick). The default
+    /// impl is a no-op so the offline rollout tests need not implement it.
+    fn run_backup(&mut self, _config: &ServiceConfig, _fire_ms: i64) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 fn apply_one<R: Reconciler>(action: &Action, ctx: &mut R) -> Result<(), String> {
@@ -355,6 +446,12 @@ fn apply_one<R: Reconciler>(action: &Action, ctx: &mut R) -> Result<(), String> 
             // A fire elapsed while a run was still in progress: record it so the
             // run's exit doesn't trigger an immediate catch-up execution.
             ctx.record_cron_fire(&service_key(&config.project, &config.service), *fire_ms)
+        }
+        Action::BackupRun { config, fire_ms } => {
+            // All the dump/upload/prune/fire-record/status I/O lives in the agent's
+            // `run_backup` (it owns S3 + docker + state) — per-db failures are folded
+            // into the backup status there, not thrown, so the fire still advances.
+            ctx.run_backup(config, *fire_ms)
         }
     }
 }
@@ -504,6 +601,8 @@ mod tests {
                 stop_grace: "30s".into(),
             },
             volumes: vec![],
+            database: None,
+            backup: None,
         }
     }
 
@@ -855,6 +954,130 @@ mod tests {
         assert_eq!(types_for(&actions, "blog", "job"), vec!["noop"]);
     }
 
+    // ── managed-database backup scheduling ──
+
+    use crate::types::{ServiceBackupConfig, ServiceDatabase};
+
+    /// A managed-database worker (no ingress, no cron) carrying a backup schedule.
+    fn db_svc(schedule: &str) -> ServiceConfig {
+        let mut c = svc("blog", "db", "img:1");
+        c.database = Some(ServiceDatabase {
+            engine: "postgres".into(),
+            version: "16".into(),
+            databases: vec!["app".into()],
+        });
+        c.backup = Some(ServiceBackupConfig {
+            schedule: schedule.into(),
+            retention_days: 7,
+            bucket: "launch-pad-backups-acct-region".into(),
+            prefix: "default/blog/db/".into(),
+        });
+        c
+    }
+
+    #[test]
+    fn a_due_backup_with_the_db_running_emits_a_backup_run() {
+        let ctx = cron_ctx(
+            "2026-06-25T03:00:30Z",
+            &[("backup:blog/db", utc("2026-06-25T02:00:00Z"))],
+        );
+        let running = rep("blog", "db", 0, "img:1", "running");
+        let actions = plan_reconcile(
+            &desired(vec![db_svc("0 3 * * *")]),
+            &actual_map(vec![running]),
+            Some(&ctx),
+        );
+        match actions.iter().find(|a| a.type_name() == "backupRun") {
+            Some(Action::BackupRun { fire_ms, .. }) => {
+                assert_eq!(*fire_ms, utc("2026-06-25T03:00:00Z"));
+            }
+            _ => panic!("expected a backupRun action, got {actions:?}"),
+        }
+        // A due backup on a converged DB is exactly one backupRun — no stray noop.
+        assert_eq!(types_for(&actions, "blog", "db"), vec!["backupRun"]);
+    }
+
+    #[test]
+    fn a_due_backup_with_the_db_down_does_not_fire() {
+        // Due, but no running container → no backupRun (and the fire stays unrecorded
+        // so it retries once the DB is up). The DB worker itself reconciles (start).
+        let ctx = cron_ctx(
+            "2026-06-25T03:00:30Z",
+            &[("backup:blog/db", utc("2026-06-25T02:00:00Z"))],
+        );
+        let stopped = rep("blog", "db", 0, "img:1", "exited");
+        let actions = plan_reconcile(
+            &desired(vec![db_svc("0 3 * * *")]),
+            &actual_map(vec![stopped]),
+            Some(&ctx),
+        );
+        assert!(!actions.iter().any(|a| a.type_name() == "backupRun"));
+        // The stopped DB still gets started by the normal reconcile.
+        assert!(actions.iter().any(|a| a.type_name() == "start"));
+    }
+
+    #[test]
+    fn a_backup_not_yet_due_is_a_noop() {
+        // Anchored at 02:00, now 02:30, schedule 03:00 daily → not due.
+        let ctx = cron_ctx(
+            "2026-06-25T02:30:00Z",
+            &[("backup:blog/db", utc("2026-06-25T02:00:00Z"))],
+        );
+        let running = rep("blog", "db", 0, "img:1", "running");
+        let actions = plan_reconcile(
+            &desired(vec![db_svc("0 3 * * *")]),
+            &actual_map(vec![running]),
+            Some(&ctx),
+        );
+        assert!(!actions.iter().any(|a| a.type_name() == "backupRun"));
+        // A converged-but-not-due DB still surfaces as a noop for the watcher.
+        assert_eq!(types_for(&actions, "blog", "db"), vec!["noop"]);
+    }
+
+    #[test]
+    fn a_freshly_deployed_backup_schedule_never_fires_without_an_anchor() {
+        // No backup-namespaced anchor in state yet → never fire (would replay history),
+        // even though the cron expression's last fire predates now.
+        let ctx = cron_ctx("2026-06-25T03:00:30Z", &[]);
+        let running = rep("blog", "db", 0, "img:1", "running");
+        let actions = plan_reconcile(
+            &desired(vec![db_svc("0 3 * * *")]),
+            &actual_map(vec![running]),
+            Some(&ctx),
+        );
+        assert!(!actions.iter().any(|a| a.type_name() == "backupRun"));
+        assert_eq!(types_for(&actions, "blog", "db"), vec!["noop"]);
+    }
+
+    #[test]
+    fn an_unparseable_backup_schedule_is_a_defensive_noop() {
+        let ctx = cron_ctx("2026-06-25T03:00:30Z", &[("backup:blog/db", 1)]);
+        let mut c = db_svc("not a cron");
+        c.backup.as_mut().unwrap().schedule = "not a cron".into();
+        let running = rep("blog", "db", 0, "img:1", "running");
+        let actions = plan_reconcile(
+            &desired(vec![c]),
+            &actual_map(vec![running]),
+            Some(&ctx),
+        );
+        assert!(!actions.iter().any(|a| a.type_name() == "backupRun"));
+    }
+
+    #[test]
+    fn backup_run_apply_delegates_to_run_backup() {
+        let mut ctx = TestReconciler::new();
+        let fire = utc("2026-06-25T03:00:00Z");
+        apply_actions(
+            &[Action::BackupRun {
+                config: db_svc("0 3 * * *"),
+                fire_ms: fire,
+            }],
+            &mut ctx,
+        );
+        assert_eq!(ctx.events, vec![format!("run_backup blog/db@{fire}")]);
+        assert!(ctx.errors.is_empty());
+    }
+
     // ── imperative apply / rollout ──
 
     use crate::types::{HealthCheck, Ingress};
@@ -963,6 +1186,13 @@ mod tests {
         }
         fn set_error(&mut self, key: &str, message: String) {
             self.errors.insert(key.to_string(), message);
+        }
+        fn run_backup(&mut self, config: &ServiceConfig, fire_ms: i64) -> Result<(), String> {
+            self.events.push(format!(
+                "run_backup {}/{}@{fire_ms}",
+                config.project, config.service
+            ));
+            Ok(())
         }
     }
 

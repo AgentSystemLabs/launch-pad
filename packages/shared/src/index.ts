@@ -23,3 +23,4 @@ export * from "./stats";
 export * from "./secrets";
 export * from "./autoscale";
 export * from "./node-names";
+export * from "./sns-notification";

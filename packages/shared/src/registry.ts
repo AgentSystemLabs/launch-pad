@@ -57,6 +57,12 @@ export const NodeRegistryEntrySchema = z
     eipAllocationId: z.string().nullable().default(null),
     securityGroupId: z.string().nullable(),
     iamInstanceProfile: z.string().nullable(),
+    /** Provisioning mode: "ec2" (managed EC2) or "external" (BYOS operator-owned host). */
+    provisioning: z.enum(["ec2", "external"]).default("ec2"),
+    /** External nodes: the IP the edge dials to reach this node's container host ports. */
+    advertiseIp: z.string().nullable().default(null),
+    /** External nodes: the IAM user backing this node's credentials (for teardown). */
+    iamUserName: z.string().nullable().default(null),
     agentId: z.string(),
     agentVersion: z.string().nullable(),
     /** Defaults old node.json files to the original TypeScript agent runtime. */

@@ -56,6 +56,9 @@ export function buildPlacementSnapshot(
           rollout: { ...s.rollout },
           volumes: s.volumes.map((v) => ({ ...v })),
           ...(s.cron !== undefined ? { cron: s.cron } : {}),
+          // Carry the managed-database marker so the config-lock baseline reconstructed
+          // from desired.json freezes the engine+version (engine/version is identity).
+          ...(s.database !== undefined ? { database: { ...s.database } } : {}),
         });
         continue;
       }

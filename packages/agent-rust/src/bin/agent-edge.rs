@@ -9,9 +9,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use launch_pad_agent::aws::{load_sdk_config, s3_client};
+use launch_pad_agent::aws::{cloudwatch_logs_client, load_sdk_config, s3_client};
 use launch_pad_agent::caddy::{apply_caddy, CaddyState};
-use launch_pad_agent::cloudwatch_logs::CloudWatchAgentSync;
+use launch_pad_agent::cloudwatch_logs::DirectCloudWatchLogsSync;
 use launch_pad_agent::config::{load_agent_config, AgentConfig};
 use launch_pad_agent::docker::ManagedReplica;
 use launch_pad_agent::routes::{build_shard_routes, merge_routes_by_domain};
@@ -62,7 +62,7 @@ struct EdgeAgent {
     write_tracker: WriteTracker,
     liveness_ms: i64,
     stats: StatsSampler<EdgeStatsDeps>,
-    cloudwatch: CloudWatchAgentSync,
+    cloudwatch: DirectCloudWatchLogsSync,
 }
 
 impl EdgeAgent {
@@ -78,7 +78,11 @@ impl EdgeAgent {
 
     /// The tracker is only advanced on a SUCCESSFUL PUT — a failed write must retry
     /// as "changed" on the very next tick, not wait out the liveness interval.
-    fn write_status_maybe(&mut self, status: &NodeStatus, now_ms: i64) -> Result<WriteReason, String> {
+    fn write_status_maybe(
+        &mut self,
+        status: &NodeStatus,
+        now_ms: i64,
+    ) -> Result<WriteReason, String> {
         let fp = fingerprint_status(status);
         let decision = decide_status_write(&self.write_tracker, &fp, now_ms, self.liveness_ms);
         if decision.write {
@@ -150,23 +154,11 @@ impl EdgeAgent {
             eprintln!("[agent] s3: status {reason:?}");
         }
         // Edge ships system logs only (agent + caddy) — no containers run here.
-        self.cloudwatch.sync(&[]);
+        let h = self.handle.clone();
+        h.block_on(self.cloudwatch.sync(&[], now_millis()));
         // Host-only usage sample (no managed containers on an edge).
         self.stats.maybe_sample(now_millis(), &BTreeMap::new());
         Ok(())
-    }
-}
-
-fn cw_reload(config_path: &str) -> Result<(), String> {
-    const CW_AGENT_CTL: &str = "/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl";
-    let out = std::process::Command::new(CW_AGENT_CTL)
-        .args(["-a", "fetch-config", "-m", "ec2", "-s", "-c", &format!("file:{config_path}")])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
 
@@ -208,12 +200,11 @@ fn main() {
         |m: &str| eprintln!("[agent] stats: {m}"),
     );
 
-    let cloudwatch = CloudWatchAgentSync::new(
+    let cloudwatch = DirectCloudWatchLogsSync::new(
         config.cluster_id.clone(),
         config.node_id.clone(),
         config.role,
-        |path: &str, contents: &str| std::fs::write(path, contents).map_err(|e| e.to_string()),
-        cw_reload,
+        cloudwatch_logs_client(&sdk),
         |m: &str| eprintln!("{m}"),
     );
 

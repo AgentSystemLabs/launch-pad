@@ -126,6 +126,25 @@ describe("summarizeClusterCost", () => {
     const summary = summarizeClusterCost([entry({ nodeId: "app-1", state: "provisioning" })]);
     expect(summary.runningNodes).toBe(1);
   });
+
+  it("does not let an external node's synthetic instance type poison the cluster total", () => {
+    const summary = summarizeClusterCost([
+      entry({ nodeId: "app-1", state: "ready", instanceType: "t3.small", provisioning: "ec2" }),
+      entry({
+        nodeId: "byos-1",
+        state: "ready",
+        instanceType: "external",
+        provisioning: "external",
+      }),
+    ]);
+
+    expect(summary.runningNodes).toBe(2);
+    expect(summary.estimate.ec2Lines).toHaveLength(1);
+    expect(summary.estimate.ec2Lines[0]?.instanceType).toBe("t3.small");
+    expect(summary.estimate.s3ByNode).toHaveLength(2);
+    expect(summary.estimate.s3ByNode.find((n) => n.nodeId === "byos-1")?.billsEc2).toBe(false);
+    expect(summary.estimate.totalUsd).not.toBeNull();
+  });
 });
 
 describe("budgetVerdict", () => {

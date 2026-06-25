@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { serializeStatsLine, type StatsLine } from "@agentsystemlabs/launch-pad-shared";
+import {
+  serializeStatsLine,
+  type NodeStatus,
+  type StatsLine,
+} from "@agentsystemlabs/launch-pad-shared";
 import type { LogEvent } from "../../aws/cloudwatch-logs";
 import {
   matchingServices,
+  sampleFromNodeStatus,
   samplesFromLogEvents,
   serviceSeries,
   summarize,
@@ -94,5 +99,61 @@ describe("serviceSeries", () => {
     expect(series.cpu).toEqual([30, 70]);
     expect(series.memUsed).toEqual([250, 250]);
     expect(series.replicas).toEqual([0, 1]);
+  });
+});
+
+describe("sampleFromNodeStatus", () => {
+  it("maps the heartbeat host sample to a monitor stats sample", () => {
+    const status: NodeStatus = {
+      nodeId: "byos-app-1",
+      agentId: "agent-byos-app-1",
+      lastSeen: "2026-06-20T00:00:02.000Z",
+      agentVersion: "0.1.0",
+      caddy: { managed: false, lastReloadAt: null, error: null },
+      edgeRoutes: [],
+      host: {
+        cpuPercent: 42,
+        memoryUsedMb: 768,
+        memoryTotalMb: 2048,
+        sampledAt: "2026-06-20T00:00:01.000Z",
+      },
+      services: [
+        {
+          project: "blog",
+          service: "web",
+          image: "repo/web:tag",
+          state: "running",
+          message: "",
+          containerId: "c1",
+          replicas: [],
+          desiredReplicas: 1,
+          runningReplicas: 1,
+          updatedAt: "2026-06-20T00:00:00.000Z",
+        },
+      ],
+    };
+
+    expect(sampleFromNodeStatus(status)).toEqual({
+      event: "launchpad.stats",
+      nodeId: "byos-app-1",
+      ts: "2026-06-20T00:00:01.000Z",
+      host: { cpuPercent: 42, memoryUsedMb: 768, memoryTotalMb: 2048 },
+      services: [],
+      epochMillis: Date.parse("2026-06-20T00:00:01.000Z"),
+    });
+  });
+
+  it("returns null when the heartbeat has no host sample yet", () => {
+    const status: NodeStatus = {
+      nodeId: "byos-app-1",
+      agentId: "agent-byos-app-1",
+      lastSeen: "2026-06-20T00:00:02.000Z",
+      agentVersion: "0.1.0",
+      caddy: { managed: false, lastReloadAt: null, error: null },
+      edgeRoutes: [],
+      services: [],
+    };
+
+    expect(sampleFromNodeStatus(status)).toBeNull();
   });
 });

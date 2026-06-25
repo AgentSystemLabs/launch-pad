@@ -3,6 +3,8 @@ import type { EC2Client } from "@aws-sdk/client-ec2";
 import type { ECRClient } from "@aws-sdk/client-ecr";
 import type { IAMClient } from "@aws-sdk/client-iam";
 import type { S3Client } from "@aws-sdk/client-s3";
+import type { SNSClient } from "@aws-sdk/client-sns";
+import type { SQSClient } from "@aws-sdk/client-sqs";
 import type { SSMClient } from "@aws-sdk/client-ssm";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
 import { DEFAULT_CLUSTER, stateBucketName } from "@agentsystemlabs/launch-pad-shared";
@@ -27,6 +29,8 @@ export interface AwsEnv {
   iam: IAMClient;
   ssm: SSMClient;
   logs: CloudWatchLogsClient;
+  sns: SNSClient;
+  sqs: SQSClient;
 }
 
 export async function getCallerIdentity(
@@ -73,11 +77,11 @@ export async function prepareAws(
     profile: opts.profile ?? target?.profile,
   };
 
-  const { region, s3, ecr, sts, ec2, iam, ssm, logs } = await createClients(resolvedOpts);
+  const { region, s3, ecr, sts, ec2, iam, ssm, logs, sns, sqs } = await createClients(resolvedOpts);
   const { accountId, arn } = await getCallerIdentity(sts);
   const bucket = stateBucketName(accountId, region);
   if (options.ensureBucket) {
     await ensureBucket(s3, bucket, region, clusterId);
   }
-  return { clusterId, region, accountId, callerArn: arn, bucket, s3, ecr, sts, ec2, iam, ssm, logs };
+  return { clusterId, region, accountId, callerArn: arn, bucket, s3, ecr, sts, ec2, iam, ssm, logs, sns, sqs };
 }

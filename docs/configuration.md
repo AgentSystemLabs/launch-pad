@@ -212,6 +212,69 @@ Rules:
   first deploy from a volumes-aware CLI — that deploy adds the `volumes` field to every service in
   the node's `desired.json`, which a pre-volumes agent won't parse.
 
+## Managed databases (Postgres)
+
+A `[[database]]` block is a batteries-included Postgres instance: a pinned engine image, a
+persisted data volume, an optional scheduled S3 backup, and a teardown guard so the node
+holding your data can't be destroyed by accident. It is **sugar** — at deploy time the CLI
+desugars each block into an ordinary worker `[[service]]` (so everything below about volumes,
+placement, and config-lock applies), then layers backups on top.
+
+```toml
+[[database]]
+name = "primary"                 # becomes the service name
+engine = "postgres"              # only engine supported today
+version = "16"                   # pins public.ecr.aws/docker/library/postgres:16
+storage = "20Gi"                 # advisory only — see note below
+cpu = 1024                       # defaults: 1024 / 1024
+memory = 1024
+databases = ["app", "analytics"] # logical DBs to back up (empty ⇒ back up all non-template DBs)
+
+  [database.backup]
+  schedule = "0 3 * * *"         # 5-field UTC cron (same evaluator as scheduled jobs)
+  retention_days = 7             # daily dumps older than this are pruned per database
+```
+
+What a deploy does with it:
+
+- **Runs Postgres with a persisted volume.** The desugared service mounts a named volume at
+  `/var/lib/postgresql/data`, so it is **sticky single-node** and **config-locked** exactly like
+  any `[[service.volumes]]` service. The image is *pulled*, never built — there's no Dockerfile.
+- **Requires a password secret.** Set the superuser password before the first deploy:
+  `launchpad secret set primary POSTGRES_PASSWORD <value>`. Deploy refuses to publish without it.
+  (You may also set `POSTGRES_USER` via the service `env`; it defaults to `postgres`.)
+- **Backs up to S3** when `[database.backup]` is present. On each fire the on-node agent runs
+  `pg_dump` (gzip-compressed) for every target database and uploads it to a dedicated,
+  auto-created, hardened (private + encrypted + versioned) **backups bucket**
+  `launch-pad-backups-<account>-<region>`, then prunes dumps older than `retention_days`. Layout:
+
+  ```
+  s3://launch-pad-backups-<acct>-<region>/<cluster>/<owner>/<service>/<database>/<timestamp>.sql.gz
+  # e.g. .../default/shop/primary/app/2026-06-25T03-00-00Z.sql.gz
+  ```
+
+  Restore manually with `aws s3 cp` + `gunzip -c dump.sql.gz | psql`. The agent records a backup
+  rollup (last run, per-database success time + size, last error) in the node's `status.json`.
+
+Mutable vs. frozen (config-lock): `engine` and `version` are **frozen identity** — bumping the
+major version is a migration, not a tweak, so re-create the footprint. The backup `schedule`,
+`retention_days`, and the `databases` target list are **operational** and may change any time.
+
+Notes and limits:
+
+- `storage` is **advisory** — docker named volumes don't enforce a size cap; it documents the
+  disk you expect the node to have. Size the node accordingly.
+- **`databases` are not auto-created.** LaunchPad runs the engine and backs up whatever logical
+  databases exist (or the ones you list); create them yourself (migrations / `psql`).
+- **App↔DB connectivity is out of scope (v1).** A managed database has no published port and no
+  cross-node service discovery — the cluster networks the edge to app nodes, not app-to-app. Wire
+  an app to the database yourself, and expect them to be reachable on the database's own node.
+- **Backups run on the reconcile tick.** The agent emits a liveness heartbeat between databases
+  so a multi-database backup doesn't make the node look offline, but a very large dump still
+  delays that node's other reconcile work until it completes. Pick an off-peak `schedule`.
+- See the teardown guard under [`launchpad node destroy`](./cli.md) — a node holding a database
+  volume refuses to be destroyed (even with `--force`) without `--delete-data`.
+
 ## Placement
 
 Placement is **fully automatic** — `launch-pad.toml` carries no node names. The scheduler

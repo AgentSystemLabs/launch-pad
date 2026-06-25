@@ -1,6 +1,17 @@
 import { HeadBucketCommand } from "@aws-sdk/client-s3";
 import { Command } from "commander";
-import { nodeRegistryKey, parseNodeRegistryEntry } from "@agentsystemlabs/launch-pad-shared";
+import {
+  HEARTBEAT_STALE_MS,
+  HOST_PORT_MAX,
+  HOST_PORT_MIN,
+  isHeartbeatStale,
+  nodeRegistryKey,
+  nodeFrontsIngress,
+  type NodeRegistryEntry,
+  parseNodeRegistryEntry,
+  parseNodeStatus,
+  statusKey,
+} from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import { awsErrorName, awsStatusCode } from "../aws/errors";
 import { getEcrAuth } from "../aws/ecr";
@@ -13,6 +24,7 @@ import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
 import { panel } from "../ui/box";
 import { isJsonMode, log, printJson, spinner } from "../ui/log";
 import { color, symbols } from "../ui/theme";
+import { probeEdgeReachability, probePortsFromStatus, type ReachabilityTarget } from "../provision/reachability";
 
 type DoctorOptions = GlobalOpts;
 
@@ -22,7 +34,24 @@ const AWS_DEPENDENT_CHECKS = [
   "default VPC",
   "golden AMIs",
   "agent runtime",
+  "external nodes",
 ] as const;
+
+export interface ExternalNodeHeartbeatView {
+  nodeId: string;
+  lastSeen: string | null;
+}
+
+interface ExternalNodeView extends ExternalNodeHeartbeatView {
+  entry: NodeRegistryEntry;
+  ports: number[];
+}
+
+export function staleExternalNodeIds(nodes: ExternalNodeHeartbeatView[], nowMs: number): string[] {
+  return nodes
+    .filter((n) => n.lastSeen === null || isHeartbeatStale(n.lastSeen, nowMs, HEARTBEAT_STALE_MS))
+    .map((n) => n.nodeId);
+}
 
 function fromError(name: string, error: unknown, hint: string): Check {
   return { name, status: "fail", detail: (error as Error).message, hint };
@@ -141,6 +170,89 @@ async function checkLegacyAgents(aws: AwsEnv): Promise<Check> {
   }
 }
 
+async function checkExternalNodes(aws: AwsEnv): Promise<Check> {
+  const name = "external nodes";
+  try {
+    const ids = await listNodeIds(aws.s3, aws.bucket, aws.clusterId);
+    const external: ExternalNodeView[] = [];
+    const edges: NodeRegistryEntry[] = [];
+    for (const id of ids) {
+      const obj = await getJson(aws.s3, aws.bucket, nodeRegistryKey(aws.clusterId, id));
+      if (!obj) continue;
+      try {
+        const entry = parseNodeRegistryEntry(obj.raw);
+        if (nodeFrontsIngress(entry.role) && entry.provisioning !== "external") edges.push(entry);
+        if (entry.provisioning === "external") {
+          const statusObj = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, id));
+          let lastSeen: string | null = null;
+          let ports: number[] = [];
+          if (statusObj) {
+            try {
+              const status = parseNodeStatus(statusObj.raw);
+              lastSeen = status.lastSeen;
+              ports = probePortsFromStatus(status);
+            } catch {
+              lastSeen = null;
+            }
+          }
+          external.push({ nodeId: id, lastSeen, entry, ports });
+        }
+      } catch {
+        /* unparseable entries surface through other commands */
+      }
+    }
+    if (external.length === 0) {
+      return { name, status: "skip", detail: "no external (BYOS) nodes" };
+    }
+    const stale = staleExternalNodeIds(external, Date.now());
+    if (stale.length > 0) {
+      return {
+        name,
+        status: "warn",
+        detail: `${external.length} external (BYOS) node(s); stale heartbeat: ${stale.join(", ")}`,
+        hint: "a stale external node is skipped by placement; restart the host/agent or destroy the registry entry when it is gone",
+      };
+    }
+
+    const edge = edges[0] ?? null;
+    const targets: ReachabilityTarget[] = external
+      .filter((n) => n.entry.advertiseIp && n.ports.length > 0)
+      .map((n) => ({ nodeId: n.nodeId, advertiseIp: n.entry.advertiseIp!, ports: n.ports }));
+    if (edge && targets.length > 0) {
+      const results = await probeEdgeReachability(aws, edge, targets);
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        return {
+          name,
+          status: "warn",
+          detail: `edge cannot reach external node port(s): ${failed
+            .map((r) => `${r.nodeId} ${r.advertiseIp}:${r.ports.join(",")}`)
+            .join("; ")}`,
+          hint: `open edge → BYOS host TCP ${HOST_PORT_MIN}-${HOST_PORT_MAX} and avoid NAT hairpin paths that the edge cannot route`,
+        };
+      }
+      return {
+        name,
+        status: "pass",
+        detail: `${external.length} external (BYOS) node(s); edge reached live host port(s) on ${targets
+          .map((t) => t.nodeId)
+          .join(", ")}`,
+      };
+    }
+
+    return {
+      name,
+      status: "warn",
+      detail: `${external.length} external (BYOS) node(s): ${external.map((n) => n.nodeId).join(", ")}`,
+      hint: edge
+        ? `no running web host ports to probe; the edge must reach each advertiseIp on TCP ${HOST_PORT_MIN}-${HOST_PORT_MAX}`
+        : `no EC2 edge found for an active probe; open edge → BYOS host TCP ${HOST_PORT_MIN}-${HOST_PORT_MAX}`,
+    };
+  } catch (error) {
+    return fromError(name, error, "couldn't read the node registry");
+  }
+}
+
 const STATUS_SYMBOL: Record<Check["status"], string> = {
   pass: color.green(symbols.success),
   warn: color.yellow(symbols.warn),
@@ -214,6 +326,7 @@ async function runDoctor(opts: DoctorOptions): Promise<void> {
     checks.push(await checkDefaultVpc(aws));
     checks.push(await checkGoldenAmi(aws));
     checks.push(await checkLegacyAgents(aws));
+    checks.push(await checkExternalNodes(aws));
   } else {
     for (const name of AWS_DEPENDENT_CHECKS) {
       checks.push({ name, status: "skip", detail: "skipped — fix AWS credentials first" });

@@ -17,6 +17,47 @@ export function stateBucketName(accountId: string, region: string): string {
   return `launch-pad-state-${accountId}-${region}`;
 }
 
+/**
+ * Dedicated database-backups bucket, account+region scoped (deterministic, globally
+ * unique). Separate from the state bucket so large `pg_dump` dumps never mix with
+ * control-plane state and the node's write grant stays tightly scoped to its cluster
+ * prefix. Auto-created (hardened: private + encrypted + versioned) on first DB deploy.
+ */
+export function backupsBucketName(accountId: string, region: string): string {
+  return `launch-pad-backups-${accountId}-${region}`;
+}
+
+/**
+ * Key prefix for one database service's backups: `<cluster>/<owner>/<service>/`.
+ * Always cluster-prefixed (even the `default` cluster) — the backups bucket is new,
+ * so there's no legacy un-prefixed layout to preserve, and the explicit cluster
+ * segment is what the node IAM grant is scoped to.
+ */
+export function backupServicePrefix(clusterId: string, ownerProject: string, service: string): string {
+  return `${clusterId}/${ownerProject}/${service}/`;
+}
+
+/** Per-logical-database backup directory: `<cluster>/<owner>/<service>/<database>/`. */
+export function backupDatabasePrefix(
+  clusterId: string,
+  ownerProject: string,
+  service: string,
+  database: string,
+): string {
+  return `${backupServicePrefix(clusterId, ownerProject, service)}${database}/`;
+}
+
+/** One backup object key: `<cluster>/<owner>/<service>/<database>/<timestamp>.sql.gz`. */
+export function backupObjectKey(
+  clusterId: string,
+  ownerProject: string,
+  service: string,
+  database: string,
+  timestamp: string,
+): string {
+  return `${backupDatabasePrefix(clusterId, ownerProject, service, database)}${timestamp}.sql.gz`;
+}
+
 /** Root prefix for a cluster's per-node state. */
 export function clusterNodesPrefix(clusterId: string): string {
   return clusterId === DEFAULT_CLUSTER

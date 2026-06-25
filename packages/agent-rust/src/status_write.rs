@@ -11,7 +11,7 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::types::{EdgeRouteStatus, NodeStatus, ReplicaStatus, ServiceState, ServiceStatus, UpstreamBackend, UpstreamShard};
+use crate::types::{DatabaseBackupStatus, EdgeRouteStatus, NodeStatus, ReplicaStatus, ServiceState, ServiceStatus, UpstreamBackend, UpstreamShard};
 use crate::types::service_key;
 
 fn sha256_hex(input: &str) -> String {
@@ -56,6 +56,12 @@ struct FpService {
     desired_replicas: i64,
     running_replicas: i64,
     replicas: Vec<FpReplica>,
+    // Backup rollup IS meaningful (a completed daily backup must trigger a write),
+    // but it is only mutated on a backup run/skip — never every tick — so it can't
+    // churn between idle ticks. Omitted when None so the golden TS-parity hashes
+    // (which predate backups) stay byte-identical for non-database services.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup: Option<DatabaseBackupStatus>,
 }
 
 #[derive(Serialize)]
@@ -109,6 +115,7 @@ pub fn fingerprint_status(status: &NodeStatus) -> String {
                         healthy: r.healthy,
                     })
                     .collect(),
+                backup: s.backup.clone(),
             }
         })
         .collect();
@@ -334,6 +341,7 @@ mod tests {
                 desired_replicas: 1,
                 running_replicas: 1,
                 cron: None,
+                backup: None,
                 updated_at: "2026-06-04T00:00:00.000Z".into(),
             }],
             caddy: CaddyStatus {

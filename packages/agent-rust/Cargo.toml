@@ -14,8 +14,9 @@ path = "src/lib.rs"
 # `default = both` so `cargo test` covers every module in one run.
 [features]
 default = ["app", "edge"]
-app = ["dep:aws-sdk-ecr", "dep:aws-sdk-ssm", "dep:base64"]
-edge = []
+app = ["dep:aws-sdk-cloudwatchlogs", "dep:aws-sdk-ecr", "dep:aws-sdk-ssm", "dep:base64"]
+edge = ["dep:aws-sdk-cloudwatchlogs"]
+aws-sdk-cloudwatchlogs = ["dep:aws-sdk-cloudwatchlogs"]
 
 [[bin]]
 name = "launchpad-agent-app"
@@ -29,8 +30,11 @@ required-features = ["edge"]
 
 [dependencies]
 aws-config = "1.8.18"
+aws-sdk-cloudwatchlogs = { version = "1.138.0", optional = true }
 aws-sdk-ecr = { version = "1.119.0", optional = true }
 aws-sdk-s3 = "1.135.0"
+aws-sdk-sns = "1.102.0"
+aws-sdk-sqs = "1.102.0"
 aws-sdk-ssm = { version = "1", optional = true }
 base64 = { version = "0.22.1", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
