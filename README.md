@@ -12,6 +12,13 @@ updates. You declare what should run in `launch-pad.toml`; an agent on each node
 Docker and Caddy to match. There is **no control-plane server** — the CLI and agents
 coordinate entirely through S3 in your account.
 
+> **Alpha Warning — Use with Caution in Production**
+>
+> Launch Pad is in **alpha** (pre-1.0). APIs, wire formats, and CLI behavior may change
+> without notice. It has been tested against real AWS, but you should expect rough edges,
+> missing features, and breaking changes between releases. **Do not rely on it for
+> production workloads** without thorough testing, backups, and a rollback plan you trust.
+
 ## Who it's for
 
 Launch Pad is built for **indie hackers and small teams** who want PaaS-grade ergonomics
@@ -103,3 +110,7 @@ pnpm --filter @agentsystemlabs/launch-pad dev -- deploy --dry-run   # CLI from s
 
 Contributor rules, invariants, and gotchas live in [CLAUDE.md](CLAUDE.md);
 testing conventions in [docs/testing.md](docs/testing.md).
+
+## License
+
+[MIT](LICENSE)

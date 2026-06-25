@@ -2,6 +2,7 @@
   "name": "@agentsystemlabs/launch-pad",
   "version": "0.1.0",
   "description": "Deploy your apps to your own AWS infrastructure — one command.",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "launchpad": "./dist/index.js",
