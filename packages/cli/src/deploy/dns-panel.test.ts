@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDnsChecklist, type DnsTarget, wildcardForPattern } from "./dns-panel";
+import { buildDnsChecklist, type DnsTarget, HIDDEN_EIP, wildcardForPattern } from "./dns-panel";
 
 describe("buildDnsChecklist", () => {
   it("returns [] when there are no web domains", () => {
@@ -53,6 +53,29 @@ describe("buildDnsChecklist", () => {
       "*.example.com",
     );
     expect(lines.some((l) => l.includes("*.example.com"))).toBe(false);
+  });
+
+  it("masks the edge IP everywhere when hideIp is set, and explains how to reveal it", () => {
+    const lines = buildDnsChecklist(
+      [
+        { domain: "app.example.com", frontingNode: "node-edge", viaEdge: true, eip: "54.210.10.20" },
+        { domain: "app-pr-1.example.com", frontingNode: "node-edge", viaEdge: true, eip: "54.210.10.20" },
+      ],
+      "*.example.com",
+      { hideIp: true },
+    );
+    // No real IP-looking token survives anywhere in the rendered panel.
+    for (const line of lines) expect(line).not.toMatch(/\d+\.\d+\.\d+\.\d+/);
+    expect(lines.some((l) => l.includes(HIDDEN_EIP))).toBe(true);
+    // The wildcard row is masked too (it would otherwise re-expose the IP).
+    expect(lines.some((l) => l.includes("*.example.com") && l.includes(HIDDEN_EIP))).toBe(true);
+    expect(lines.some((l) => /hidden in this log/i.test(l))).toBe(true);
+  });
+
+  it("still shows the real IP when hideIp is false/absent (default)", () => {
+    const target: DnsTarget = { domain: "app.example.com", frontingNode: "node-edge", viaEdge: true, eip: "54.210.10.20" };
+    expect(buildDnsChecklist([target]).some((l) => l.includes("54.210.10.20"))).toBe(true);
+    expect(buildDnsChecklist([target], null, { hideIp: false }).some((l) => l.includes("54.210.10.20"))).toBe(true);
   });
 });
 

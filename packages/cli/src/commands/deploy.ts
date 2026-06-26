@@ -164,6 +164,10 @@ export interface DeployOptions extends GlobalOpts {
   ttl?: string;
   /** Allow new [[service]] blocks in launch-pad.toml (adding services to an existing footprint). */
   allowNewServices?: boolean;
+  /** Mask the edge IP in the DNS panel (default on under GitHub Actions / LAUNCHPAD_HIDE_IP). */
+  hideIp?: boolean;
+  /** Force-show the edge IP even under CI auto-hide. */
+  showIp?: boolean;
 }
 
 interface BuiltService {
@@ -1892,11 +1896,11 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
   }
 
   if (opts.wait === false) {
-    reportPublished(built, ownerProject, placementPlan, dnsTargets, dnsWildcard);
+    reportPublished(built, ownerProject, placementPlan, dnsTargets, dnsWildcard, hideEdgeIp(opts));
     await recordDeployEvent(aws, { ownerProject, env, kind: deployKind, services: eventServices, converged: null });
     return;
   }
-  const converged = await watchAndReport(aws, targets, resolveTimeoutMs(opts.timeout), built, placementPlan, dnsTargets, dnsWildcard);
+  const converged = await watchAndReport(aws, targets, resolveTimeoutMs(opts.timeout), built, placementPlan, dnsTargets, dnsWildcard, hideEdgeIp(opts));
   await recordDeployEvent(aws, { ownerProject, env, kind: deployKind, services: eventServices, converged });
 }
 
@@ -1915,12 +1919,24 @@ function resolveTimeoutMs(raw: string | undefined): number {
   return seconds * 1000;
 }
 
+/**
+ * Whether to mask the edge IP in the human DNS panel. On by default in GitHub Actions
+ * (and any run with `LAUNCHPAD_HIDE_IP` set) so a public deploy log can't leak the origin
+ * IP behind a proxy/CDN; `--hide-ip` forces it on, `--show-ip` forces it off. Affects the
+ * human panel only — `--json` keeps the real IP (it's a machine contract, not a log).
+ */
+function hideEdgeIp(opts: DeployOptions): boolean {
+  if (opts.showIp === true) return false;
+  return opts.hideIp === true || !!process.env.LAUNCHPAD_HIDE_IP || process.env.GITHUB_ACTIONS === "true";
+}
+
 function reportPublished(
   built: BuiltService[],
   project: string,
   placementPlan: PlacementPlanEntry[],
   dnsTargets: DnsTarget[],
   dnsWildcard: string | null,
+  hideIp: boolean,
 ): void {
   if (isJsonMode()) {
     printJson({
@@ -1936,7 +1952,7 @@ function reportPublished(
     ...built.map((b) => `${color.cyan(`${project}/${b.decl.name}`)} ${color.dim(`×${b.decl.replicas}`)}`),
     color.dim("the agent on each node will reconcile to this state"),
   ]);
-  const dnsLines = buildDnsChecklist(dnsTargets, dnsWildcard);
+  const dnsLines = buildDnsChecklist(dnsTargets, dnsWildcard, { hideIp });
   if (dnsLines.length > 0) panel("DNS — point your domains here", dnsLines);
 }
 
@@ -1948,6 +1964,7 @@ async function watchAndReport(
   placementPlan: PlacementPlanEntry[],
   dnsTargets: DnsTarget[],
   dnsWildcard: string | null,
+  hideIp: boolean,
 ): Promise<boolean> {
   const spin = spinner("waiting for nodes to converge…").start();
   let final: WatchResult[] = [];
@@ -1987,7 +2004,7 @@ async function watchAndReport(
       "URLs",
       webTargets.map((b) => `https://${b.domain}`),
     );
-    const dnsLines = buildDnsChecklist(dnsTargets, dnsWildcard);
+    const dnsLines = buildDnsChecklist(dnsTargets, dnsWildcard, { hideIp });
     if (dnsLines.length > 0) panel("DNS — point your domains here", dnsLines);
   }
 
@@ -2019,6 +2036,8 @@ export function registerDeploy(program: Command): void {
       String(DEFAULT_CONVERGE_TIMEOUT_SECONDS),
     )
     .option("--yes", "skip confirmation prompts (required to auto-provision in CI)")
+    .option("--hide-ip", "mask the edge IP in the DNS panel (default under GitHub Actions / LAUNCHPAD_HIDE_IP)")
+    .option("--show-ip", "always show the edge IP, even under CI auto-hide")
     .option("--dry-run", "do everything except push images, write state, or create nodes")
     .option("--ami <id>", "AMI id for auto-provisioned/recreated nodes")
     .option("--restart", "skip build/push and roll containers (picks up secret/env changes)")
