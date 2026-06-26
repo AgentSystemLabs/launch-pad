@@ -68,6 +68,7 @@ import { describeInstancesById, getDefaultVpcId } from "../aws/ec2";
 import { ensureRepository, getEcrAuth, imageExists } from "../aws/ecr";
 import { ensureBackupsBucket, getJson, PreconditionFailedError, putJson } from "../aws/s3-state";
 import { createOrGetTopic, publishDeployNotification } from "../aws/sns";
+import { ensureNodeQueue } from "../aws/sqs";
 import { adoptEdgeIfUnset, getClusterConfig, putClusterConfig } from "../cluster/store";
 import { loadConfig } from "../config/load";
 import { loadProjectIndex, upsertProjectIndex } from "../project/registry";
@@ -1745,6 +1746,10 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     }
   }
 
+  // Every node that received a desired-state write this deploy — each needs a
+  // subscribed SQS queue before the single cluster-wide SNS notification fires.
+  const touchedNodeIds = new Set<string>();
+
   // Publish desired state per node.
   for (const [id, placed] of nodePlacements) {
     const node = nodes.get(id) as NodeRegistryEntry;
@@ -1760,22 +1765,8 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
       ),
     );
     await publishDesired(aws, id, node, ownerProject, incoming, partialDeploy);
+    touchedNodeIds.add(id);
     log.success(`published desired state → ${color.cyan(id)}`);
-
-    // Notify agent immediately via SNS (graceful failure if unavailable).
-    if (snsTopicArn && !opts.dryRun) {
-      try {
-        const now = new Date().toISOString();
-        await publishDeployNotification(aws.sns, snsTopicArn, {
-          type: "config-changed",
-          cluster: aws.clusterId,
-          timestamp: now,
-          version: 1,
-        });
-      } catch (error) {
-        log.warn(`SNS publish failed for node ${id}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
   }
 
   // Cleanup AFTER the additions: transient over-provisioning beats a window where
@@ -1792,21 +1783,37 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
       continue;
     }
     await publishDesired(aws, id, entry, ownerProject, []);
+    touchedNodeIds.add(id);
     log.success(`removed ${color.cyan(ownerProject)} from ${color.cyan(id)} (no longer placed there)`);
+  }
 
-    // Notify agent immediately via SNS (graceful failure if unavailable).
-    if (snsTopicArn && !opts.dryRun) {
+  // Push half of the hybrid model: ensure each touched node (plus the edge that routes
+  // them) has an SQS queue subscribed to the cluster topic, then publish ONE
+  // cluster-wide notification so every agent fetches immediately instead of waiting for
+  // its 60s poll. Entirely best-effort — any failure here leaves polling as the fallback
+  // and never blocks the deploy.
+  if (snsTopicArn && !opts.dryRun) {
+    touchedNodeIds.add(edgeNodeId);
+    for (const id of touchedNodeIds) {
       try {
-        const now = new Date().toISOString();
-        await publishDeployNotification(aws.sns, snsTopicArn, {
-          type: "config-changed",
-          cluster: aws.clusterId,
-          timestamp: now,
-          version: 1,
-        });
+        await ensureNodeQueue(aws.sqs, aws.sns, aws.clusterId, id, snsTopicArn);
       } catch (error) {
-        log.warn(`SNS publish failed for node ${id}: ${error instanceof Error ? error.message : String(error)}`);
+        log.warn(
+          `could not wire SNS notifications for node ${id} (agent will poll): ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
+    }
+    try {
+      await publishDeployNotification(aws.sns, snsTopicArn, {
+        type: "config-changed",
+        cluster: aws.clusterId,
+        timestamp: new Date().toISOString(),
+        version: 1,
+      });
+    } catch (error) {
+      log.warn(
+        `SNS publish failed (agents will pick up changes on next poll): ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

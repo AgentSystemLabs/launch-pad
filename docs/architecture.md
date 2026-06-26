@@ -7,13 +7,19 @@ condensed map.
 ## The core idea: declarative, no control plane
 
 There is **no server** in the middle. The CLI writes *desired state* to S3; an agent on each
-node polls S3 and *reconciles* Docker + Caddy to match. S3 is the only thing the two sides
-share:
+node polls S3 and *reconciles* Docker + Caddy to match. S3 is the only shared **state** — the
+single source of truth both sides read and write:
 
 ```
 CLI (local) ──writes desired.json──▶ S3 ◀──polls desired.json── agent (on node)
 CLI (local) ◀──polls status.json──── S3 ──writes status.json──▶ agent (on node)
+CLI (local) ──"config-changed"────▶ SNS → SQS ──wakes──▶ agent (fetch now, don't wait)
 ```
+
+A deploy also fires a per-cluster **SNS notification** (fanned out to each node's SQS queue)
+so agents reconcile within milliseconds instead of waiting out the 60s poll. It's a *wake
+signal only* — it carries no state, and if it never arrives the poll still converges, so S3
+stays the sole source of truth. See [the agent doc](./agent.md#deploy-notifications-snssqs).
 
 The CLI never SSHes into nodes to deploy. Deploys are **idempotent** (running the agent
 twice against the same desired state is a no-op) and nodes **self-heal** after reboots or

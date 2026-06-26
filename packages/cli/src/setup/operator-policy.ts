@@ -297,6 +297,22 @@ export function buildOperatorPolicy(params: OperatorPolicyParams): IamPolicyDocu
         Action: ["logs:FilterLogEvents"],
         Resource: [`arn:aws:logs:${region}:${accountId}:log-group:/launch-pad/*:*`],
       },
+      {
+        // Deploy notifications: one SNS topic per cluster (`launch-pad-<cluster>`). Deploy
+        // creates it, locks its access policy, and publishes a `config-changed` message.
+        Sid: "SnsDeployNotifications",
+        Effect: "Allow",
+        Action: ["sns:CreateTopic", "sns:SetTopicAttributes", "sns:Subscribe", "sns:Publish"],
+        Resource: [`arn:aws:sns:${region}:${accountId}:launch-pad-*`],
+      },
+      {
+        // One SQS queue per node (`launch-pad-<cluster>-<node>`) subscribed to the topic.
+        // Deploy creates each queue and sets its SNS-send policy; the agent only receives.
+        Sid: "SqsDeployNotifications",
+        Effect: "Allow",
+        Action: ["sqs:CreateQueue", "sqs:GetQueueAttributes", "sqs:SetQueueAttributes"],
+        Resource: [`arn:aws:sqs:${region}:${accountId}:launch-pad-*`],
+      },
     ],
   };
 }

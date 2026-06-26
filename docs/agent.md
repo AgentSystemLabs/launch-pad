@@ -1,7 +1,10 @@
 # The node agent
 
 A long-running process on every node — **the only thing that touches Docker and Caddy**.
-It polls S3 for desired state and reconciles the node to match. The implementation lives in
+It reconciles the node to S3's desired state on a **hybrid push + poll** schedule: it polls
+S3 every 60s as the durable fallback, and a background task long-polls the node's own SQS
+queue for SNS deploy notifications that wake the loop within milliseconds of a deploy (see
+[Deploy notifications](#deploy-notifications-snssqs)). The implementation lives in
 [`packages/agent-rust`](../packages/agent-rust) (Rust, one crate) and ships as **two
 role-specific static binaries**, installed at `/opt/launch-pad/agent` and run under systemd:
 
@@ -16,7 +19,8 @@ Docker — a wrong-AMI-for-role provisioning mistake surfaces at first tick, not
 
 ## The reconcile loop (app)
 
-`src/bin/agent-app.rs` runs a poll loop (default 10s). Each tick:
+`src/bin/agent-app.rs` runs a poll loop (default 60s, woken early by deploy notifications —
+see below). Each tick:
 
 1. Read `desired.json` from S3.
 2. Inspect live managed containers (label-based metadata: project, service, replica index,
@@ -114,6 +118,37 @@ memory used/total MB, `sampledAt`) — the live signal `launchpad autoscale run`
 without needing CloudWatch. It is telemetry, not convergence state: the fingerprint ignores
 it (no PUT storm), so a fresh sample reaches S3 with the next change or liveness heartbeat.
 
+## Deploy notifications (SNS/SQS)
+
+The agent's reconcile loop is **hybrid push + poll**. Polling (`LAUNCHPAD_POLL_MS`, 60s)
+is the durable fallback that always converges; on top of it, a deploy *pushes* a
+notification so agents react in milliseconds instead of waiting out the interval.
+
+- **CLI side (publish):** each cluster gets one SNS topic `launch-pad-<cluster>`,
+  auto-created on first deploy (its access policy locks `sns:Publish` to the account root),
+  and its ARN is persisted to `cluster.json`. For every node a deploy writes to, the CLI
+  idempotently ensures an SQS queue `launch-pad-<cluster>-<node>`, gives it a resource policy
+  allowing **only this cluster's topic** to send (`aws:SourceArn`-conditioned), and subscribes
+  it to the topic with raw message delivery. After all desired-state writes land, the CLI
+  publishes **one** cluster-wide `config-changed` message (`shared/src/sns-notification.ts`:
+  versioned, ISO-8601 timestamp, discriminated union for future types). Pure provisioning in
+  `cli/src/aws/sqs.ts`/`sns.ts`; all of it is best-effort — any SNS/SQS failure logs a warning
+  and the deploy proceeds, leaving polling to carry the change.
+- **Agent side (consume):** a background tokio task (`agent-rust/src/sqs.rs`) resolves its own
+  queue by name (retrying with backoff until the CLI has created it), long-polls
+  `ReceiveMessage`, deletes drained messages, and fires a `Notify` that cuts the poll loop's
+  inter-tick wait short (`runtime.rs` `wait_or_wake`) so the very next tick fetches the new
+  desired state. The agent is a pure **consumer** — it never creates the queue or subscribes
+  (that needs provisioning-grade IAM); its node policy grants only
+  `sqs:ReceiveMessage`/`DeleteMessage`/`GetQueueUrl` on its own queue ARN. Both the app and
+  edge binaries run the listener (the edge re-reads its upstream shards on wake). A burst of
+  messages collapses to a single wake — one reconcile catches up the whole desired state.
+
+**Migration:** existing nodes pick this up via `launchpad node upgrade-agent`, which now also
+re-applies the node's inline IAM (adding the SQS receive permission) alongside the new binary.
+Until a node is upgraded it keeps converging on the 60s poll. New clusters/nodes get the whole
+path automatically on first deploy.
+
 ## Secrets, volumes, logs, stats
 
 - **Secrets** (`secrets.rs`): resolves registered keys from SSM Parameter Store at container
@@ -138,7 +173,7 @@ it (no PUT storm), so a fresh sample reaches S3 with the next change or liveness
 
 | Variable | Purpose |
 | -------- | ------- |
-| `LAUNCHPAD_POLL_MS` | Poll interval (default 10000) |
+| `LAUNCHPAD_POLL_MS` | Poll interval / push fallback (default 60000) |
 | `LAUNCHPAD_LIVENESS_MS` | Liveness heartbeat cadence (default 30000, clamped ≤ half the stale window) |
 | `LAUNCHPAD_STATS_INTERVAL_MS` | Stats sampling cadence |
 | `LAUNCHPAD_STATS_SERVICES` | `0` disables per-container sampling (app) |

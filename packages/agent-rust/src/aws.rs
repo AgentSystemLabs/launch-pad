@@ -22,6 +22,11 @@ pub fn s3_client(conf: &SdkConfig) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::new(conf)
 }
 
+/// SQS — both roles (receive SNS deploy notifications from the node's own queue).
+pub fn sqs_client(conf: &SdkConfig) -> aws_sdk_sqs::Client {
+    aws_sdk_sqs::Client::new(conf)
+}
+
 /// CloudWatch Logs — both roles (direct log shipping).
 #[cfg(any(feature = "app", feature = "edge"))]
 pub fn cloudwatch_logs_client(conf: &SdkConfig) -> aws_sdk_cloudwatchlogs::Client {

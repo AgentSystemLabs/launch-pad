@@ -7,10 +7,11 @@
 //! synchronous (subprocess / ureq).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use launch_pad_agent::aws::{
-    cloudwatch_logs_client, ecr_client, load_sdk_config, s3_client, ssm_client,
+    cloudwatch_logs_client, ecr_client, load_sdk_config, s3_client, sqs_client, ssm_client,
 };
 use launch_pad_agent::backup::{
     backup_object_key, backup_state_key, backup_timestamp, database_targets, is_valid_identifier,
@@ -25,7 +26,9 @@ use launch_pad_agent::metadata::resolve_advertise_ip;
 use launch_pad_agent::reconcile::{apply_actions, plan_reconcile, CronPlanContext, Reconciler};
 use launch_pad_agent::runtime::{
     assert_role, env_i64, install_term_flag, load_agent_env, now_iso, now_millis, run_poll_loop,
+    wait_or_wake,
 };
+use launch_pad_agent::sqs::run_sqs_listener;
 use launch_pad_agent::s3::{get_desired, put_status, put_upstream_shard};
 use launch_pad_agent::s3_backup::{delete_backup_object, list_backup_keys, put_backup_object};
 use launch_pad_agent::secrets::resolve_service_env;
@@ -943,6 +946,11 @@ fn main() {
         config.node_id, config.bucket, env.interval_ms, env.liveness.liveness_ms
     );
 
+    // Capture ids for the SNS→SQS listener before `config` moves into the agent.
+    let sqs = sqs_client(&sdk);
+    let listener_cluster = config.cluster_id.clone();
+    let listener_node = config.node_id.clone();
+
     let mut agent = AppAgent {
         handle: rt.handle().clone(),
         s3: s3_client(&sdk),
@@ -974,5 +982,22 @@ fn main() {
     };
 
     let term = install_term_flag();
-    run_poll_loop(env.interval_ms, env.once, &term, || agent.tick());
+
+    // Push half of the hybrid model: a background task long-polls this node's SQS queue
+    // for SNS deploy notifications and wakes the reconcile loop the instant one lands.
+    // Polling (env.interval_ms) stays the fallback when no notification arrives.
+    let notify = Arc::new(tokio::sync::Notify::new());
+    if !env.once {
+        let notify = Arc::clone(&notify);
+        let term = Arc::clone(&term);
+        rt.spawn(run_sqs_listener(sqs, listener_cluster, listener_node, notify, term));
+    }
+    let handle = rt.handle().clone();
+    run_poll_loop(
+        env.interval_ms,
+        env.once,
+        &term,
+        |d| wait_or_wake(&handle, &notify, &term, d),
+        || agent.tick(),
+    );
 }

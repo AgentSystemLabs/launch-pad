@@ -41,6 +41,7 @@ import {
   deleteExternalNodeAccessKeysExcept,
   deleteExternalNodeIam,
   deleteNodeIam,
+  ensureNodeIam,
   nodeProfileName,
   nodeRoleName,
 } from "../../aws/iam";
@@ -1784,6 +1785,25 @@ async function runUpgradeAgent(name: string | undefined, opts: UpgradeAgentOptio
   for (const entry of order) {
     const spin = spinner(`upgrading ${entry.nodeId}…`).start();
     try {
+      // Refresh the node's inline IAM as part of the migration so it gains the SQS
+      // receive permission for SNS deploy notifications (idempotent re-put of the
+      // least-privilege policy). Managed EC2 nodes only — external (BYOS) nodes refresh
+      // their IAM user policy via `node init`. Best-effort: never block the agent swap.
+      if (entry.provisioning !== "external") {
+        try {
+          spin.text = `refreshing IAM for ${entry.nodeId}…`;
+          await ensureNodeIam(aws.iam, {
+            clusterId: entry.clusterId,
+            nodeId: entry.nodeId,
+            role: entry.role,
+            bucket: aws.bucket,
+            region: aws.region,
+            accountId: aws.accountId,
+          });
+        } catch {
+          // Non-fatal — the agent upgrade still proceeds; IAM can be re-applied later.
+        }
+      }
       const result = await upgradeAgentOnNode({
         aws,
         entry,

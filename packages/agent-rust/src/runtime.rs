@@ -86,18 +86,65 @@ pub fn install_term_flag() -> Arc<AtomicBool> {
 }
 
 /// The poll loop: one tick immediately, then tick every `interval_ms` until signaled.
-pub fn run_poll_loop(interval_ms: i64, once: bool, term: &AtomicBool, mut tick: impl FnMut()) {
+///
+/// `wait` performs the inter-tick delay. The plain path passes a thread-sleep; the
+/// app/edge bins pass [`wait_or_wake`] so an SNS deploy notification (delivered to the
+/// node's SQS queue) cuts the wait short and triggers an immediate reconcile. Polling
+/// stays the fallback — if no notification arrives, the tick fires on the interval.
+pub fn run_poll_loop(
+    interval_ms: i64,
+    once: bool,
+    term: &AtomicBool,
+    mut wait: impl FnMut(Duration),
+    mut tick: impl FnMut(),
+) {
     tick();
     if once {
         return;
     }
     while !term.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(interval_ms.max(0) as u64));
+        wait(Duration::from_millis(interval_ms.max(0) as u64));
         if term.load(Ordering::Relaxed) {
             break;
         }
         tick();
     }
+}
+
+/// Plain inter-tick wait — a blocking sleep with no early wake. Used where no SNS
+/// listener is wired (e.g. `--once` style callers or tests).
+pub fn plain_wait(total: Duration) {
+    std::thread::sleep(total);
+}
+
+/// Inter-tick wait that returns early when `notify` fires (an SNS deploy
+/// notification landed on the node's queue) or `term` is set. The `term` flag is
+/// re-checked at ≤500ms granularity so SIGTERM shutdown stays responsive even with a
+/// long (60s) poll interval. Driven on the agent's existing multi-thread runtime via
+/// the supplied `handle`, so the background SQS listener task keeps running while this
+/// blocks the main thread.
+pub fn wait_or_wake(
+    handle: &tokio::runtime::Handle,
+    notify: &tokio::sync::Notify,
+    term: &AtomicBool,
+    total: Duration,
+) {
+    handle.block_on(async {
+        let step = Duration::from_millis(500);
+        let mut remaining = total;
+        while !remaining.is_zero() {
+            if term.load(Ordering::Relaxed) {
+                break;
+            }
+            let this = remaining.min(step);
+            tokio::select! {
+                _ = tokio::time::sleep(this) => {
+                    remaining = remaining.saturating_sub(this);
+                }
+                _ = notify.notified() => break,
+            }
+        }
+    });
 }
 
 #[cfg(test)]

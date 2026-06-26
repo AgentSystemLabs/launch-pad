@@ -30,8 +30,10 @@ orchestrates deploys.
 - An **agent** on the node continuously *reconciles* reality to match desired state.
 
 The CLI never SSHes in or pushes commands to a machine. It declares intent; the agent
-makes it true. S3 is the only thing the two sides share — there is no control-plane
-server in the middle (yet).
+makes it true. S3 is the only shared **state** the two sides read and write — there is no
+control-plane server in the middle (yet). A deploy additionally fires a per-cluster SNS
+notification (→ each node's SQS queue) that merely *wakes* the agent to fetch immediately;
+it carries no state, and polling still converges if it never arrives.
 
 ```
 ┌─────────┐   writes desired.json    ┌─────────┐   polls desired.json   ┌────────────┐

@@ -253,12 +253,36 @@ export function buildAppPolicy(
         Resource: [bucketArn],
         Condition: { StringLike: { "s3:prefix": [`${prefix}*`] } },
       },
+      ...sqsNotificationStatements(region, accountId, clusterId, nodeId),
       ...cloudWatchLogsStatements(region, accountId, clusterId),
       ...ecrStatements(region, accountId),
       ...ssmReadStatements(region, accountId, clusterId),
       ...backupStatements(clusterId, region, accountId),
     ],
   });
+}
+
+/**
+ * Consume SNS deploy notifications from this node's OWN SQS queue
+ * (`launch-pad-<cluster>-<node>`). Receive/delete only — the queue + topic
+ * subscription are provisioned by the CLI (deploy-time IAM), never the agent. Scoped
+ * to the single queue ARN so a node can't touch another node's queue.
+ */
+function sqsNotificationStatements(
+  region: string,
+  accountId: string,
+  clusterId: string,
+  nodeId: string,
+): Array<Record<string, unknown>> {
+  const queueArn = `arn:aws:sqs:${region}:${accountId}:launch-pad-${clusterId}-${nodeId}`;
+  return [
+    {
+      Sid: "ReceiveDeployNotifications",
+      Effect: "Allow",
+      Action: ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueUrl"],
+      Resource: [queueArn],
+    },
+  ];
 }
 
 /** Read launchpad secrets scoped to this cluster (app/both agents resolve at container start). */
@@ -306,6 +330,7 @@ export function buildEdgePolicy(
         Resource: [bucketArn],
         Condition: { StringLike: { "s3:prefix": [`${upstreamPrefix}*`] } },
       },
+      ...sqsNotificationStatements(region, accountId, clusterId, edgeId),
       ...cloudWatchLogsStatements(region, accountId, clusterId),
     ],
   });
