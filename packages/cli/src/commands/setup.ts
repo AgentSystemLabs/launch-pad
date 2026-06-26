@@ -1,10 +1,21 @@
+import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
+import {
+  CreateOpenIDConnectProviderCommand,
+  CreateRoleCommand,
+  type IAMClient,
+  PutRolePolicyCommand,
+  UpdateAssumeRolePolicyCommand,
+} from "@aws-sdk/client-iam";
 import { S3Client } from "@aws-sdk/client-s3";
 import { Command } from "commander";
 import { DEFAULT_CLUSTER, LABEL_REGEX, stateBucketName } from "@agentsystemlabs/launch-pad-shared";
 import { prepareAws } from "../aws/context";
 import { ensureBucket } from "../aws/s3-state";
 import { ensureClusterConfig } from "../cluster/store";
-import { localConfigPath, upsertClusterTarget } from "../config/local";
+import { loadConfig } from "../config/load";
+import { loadLocalConfig, localConfigPath, upsertClusterTarget } from "../config/local";
 import { CliError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
 import {
@@ -14,10 +25,12 @@ import {
   oidcProviderArn,
   oidcTrustPolicyJson,
   parseRepo,
+  type RepoRef,
   validateBranch,
   validateRoleName,
 } from "../setup/github-oidc";
 import { buildOperatorPolicy, operatorPolicyJson } from "../setup/operator-policy";
+import { buildProjectDeployPolicy, projectDeployPolicyJson } from "../setup/project-deploy-policy";
 import { buildSetupPlan } from "../setup/wizard";
 import { panel, table } from "../ui/box";
 import { isJsonMode, log, printJson } from "../ui/log";
@@ -156,6 +169,202 @@ async function runGithubOidc(opts: GithubOidcOptions): Promise<void> {
   log.step("Workflow → .github/workflows/deploy.yml");
   process.stderr.write("\n");
   process.stdout.write(workflow);
+}
+
+interface CiDeployOptions extends SetupOptions {
+  repo?: string;
+  cluster?: string;
+  branch?: string;
+  roleName?: string;
+  /** Emit the role/trust/policy/workflow without creating anything in AWS or on disk. */
+  print?: boolean;
+  /** Skip the confirmation prompt before mutating AWS + writing the workflow file. */
+  yes?: boolean;
+}
+
+const GITHUB_OIDC_PROVIDER_URL = "https://token.actions.githubusercontent.com";
+/** GitHub's root-CA thumbprint. AWS ignores it for STS-audience OIDC but the API still requires one. */
+const GITHUB_OIDC_THUMBPRINT = "6938fd4d98bab03faadb97b34396831e3780aea1";
+
+/** True for the "create X that already exists" IAM error, so ensure-style calls are idempotent. */
+function isAlreadyExists(error: unknown): boolean {
+  return (error as { name?: string })?.name === "EntityAlreadyExistsException";
+}
+
+/** Derive `owner/name` from the repo's `origin` remote, so `--repo` can be omitted in a checkout. */
+function deriveRepoFromGit(dir: string): string | undefined {
+  let url: string;
+  try {
+    url = execFileSync("git", ["-C", dir, "config", "--get", "remote.origin.url"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+  // git@github.com:owner/name.git  |  https://github.com/owner/name(.git)
+  const match = url.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/);
+  return match ? `${match[1]}/${match[2]}` : undefined;
+}
+
+/** Register the GitHub OIDC provider once per account (no-op if it already exists). */
+async function ensureOidcProvider(iam: IAMClient): Promise<boolean> {
+  try {
+    await iam.send(
+      new CreateOpenIDConnectProviderCommand({
+        Url: GITHUB_OIDC_PROVIDER_URL,
+        ClientIDList: ["sts.amazonaws.com"],
+        ThumbprintList: [GITHUB_OIDC_THUMBPRINT],
+      }),
+    );
+    return true;
+  } catch (error) {
+    if (isAlreadyExists(error)) return false;
+    throw error;
+  }
+}
+
+/**
+ * `setup ci-deploy` — create the BARE-MINIMUM, single-project, single-cluster CI deploy
+ * role and write the matching `.github/workflows/deploy.yml`. The opposite of the broad
+ * operator role: see {@link buildProjectDeployPolicy}. Provisioning stays an out-of-band
+ * operator action, so the generated workflow is deploy-only (`--no-create/-repair/-recreate`)
+ * and the role carries zero EC2/IAM write permissions.
+ */
+async function runCiDeploy(opts: CiDeployOptions): Promise<void> {
+  const { config, dir } = loadConfig();
+  const project = config.project;
+
+  // Per-project isolation requires a DEDICATED named cluster: the `default` cluster's
+  // state lives at the bucket root and can't be prefix-isolated from other projects.
+  const cluster = opts.cluster ?? loadLocalConfig().defaultCluster;
+  if (cluster === undefined) {
+    throw new CliError("no cluster to scope the role to", {
+      hint: "pass --cluster <name> (a dedicated cluster for this project — not the shared `default`)",
+    });
+  }
+  if (cluster === DEFAULT_CLUSTER) {
+    throw new CliError("a scoped CI role can't target the `default` cluster", {
+      hint: "give this project its own cluster: `launchpad setup --cluster <name> …` then `--cluster <name>` here",
+    });
+  }
+  if (!LABEL_REGEX.test(cluster)) {
+    throw new CliError(`invalid cluster name "${cluster}"`, {
+      hint: "use lowercase letters, numbers and hyphens (a valid DNS label)",
+    });
+  }
+
+  const repoSlug = opts.repo ?? deriveRepoFromGit(dir);
+  if (repoSlug === undefined) {
+    throw new CliError("could not determine the GitHub repo", {
+      hint: "pass --repo owner/name (no `origin` remote was found to derive it from)",
+    });
+  }
+  const repo: RepoRef = parseRepo(repoSlug);
+  const branch = validateBranch(opts.branch ?? DEFAULT_BRANCH);
+  const subject = githubSubject({ owner: repo.owner, repo: repo.repo, branch });
+  const roleName = validateRoleName(opts.roleName ?? `${project}-deploy`);
+  const policyName = `${project}-deploy`;
+
+  const { accountId, region } = await resolveAccountRegion({ ...opts, cluster });
+  const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
+  const trustPolicy = buildOidcTrustPolicy({ accountId, subject });
+  const policy = buildProjectDeployPolicy({ accountId, region, cluster, project });
+  const workflow = buildDeployWorkflow({ roleArn, region, branch, cluster, deployOnly: true });
+  const workflowPath = join(dir, ".github", "workflows", "deploy.yml");
+
+  if (isJsonMode()) {
+    printJson({
+      project,
+      cluster,
+      repo: `${repo.owner}/${repo.repo}`,
+      branch,
+      roleName,
+      roleArn,
+      policyName,
+      subject,
+      trustPolicy,
+      policy,
+      workflow,
+      workflowPath,
+      applied: false,
+    });
+    return;
+  }
+
+  panel("Scoped CI deploy role", [
+    ...table([
+      ["project", color.cyan(project)],
+      ["cluster", color.cyan(cluster)],
+      ["repo / branch", `${color.cyan(`${repo.owner}/${repo.repo}`)} ${color.dim(`@ ${branch}`)}`],
+      ["account / region", `${accountId} ${color.dim(region)}`],
+      ["role", color.cyan(roleName)],
+      ["workflow", relative(process.cwd(), workflowPath) || workflowPath],
+    ]),
+    color.dim("bare-minimum: push to this project's ECR + write this cluster's S3 state — nothing else."),
+    color.dim("no EC2/IAM writes; deploy-only (provisioning stays a local operator action)."),
+  ]);
+
+  // --print: emit the artifacts for review, mutate nothing.
+  if (opts.print === true) {
+    log.step("Trust policy");
+    process.stdout.write(oidcTrustPolicyJson({ accountId, subject }));
+    log.step(`Scoped inline policy → ${policyName}`);
+    process.stdout.write(projectDeployPolicyJson({ accountId, region, cluster, project }));
+    log.step(`Workflow → ${relative(process.cwd(), workflowPath) || workflowPath}`);
+    process.stdout.write(workflow);
+    log.dim("\n--print: nothing was created. Re-run without --print to apply.");
+    return;
+  }
+
+  const proceed = opts.yes === true || (await confirm(`create role ${roleName} + write the workflow?`, true));
+  if (!proceed) {
+    log.info("aborted — nothing was created");
+    return;
+  }
+
+  const aws = await prepareAws({ ...opts, cluster });
+
+  if (await ensureOidcProvider(aws.iam)) log.success("registered the GitHub OIDC provider");
+  else log.dim("GitHub OIDC provider already registered");
+
+  try {
+    await aws.iam.send(
+      new CreateRoleCommand({
+        RoleName: roleName,
+        AssumeRolePolicyDocument: JSON.stringify(trustPolicy),
+        Description: `Scoped Launch Pad CI deploy role for ${repo.owner}/${repo.repo} → cluster ${cluster}`,
+        MaxSessionDuration: 3600,
+      }),
+    );
+    log.success(`created role ${color.cyan(roleName)}`);
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error;
+    await aws.iam.send(
+      new UpdateAssumeRolePolicyCommand({ RoleName: roleName, PolicyDocument: JSON.stringify(trustPolicy) }),
+    );
+    log.dim(`role ${roleName} already exists — refreshed its trust policy`);
+  }
+
+  await aws.iam.send(
+    new PutRolePolicyCommand({
+      RoleName: roleName,
+      PolicyName: policyName,
+      PolicyDocument: JSON.stringify(policy),
+    }),
+  );
+  log.success(`attached scoped inline policy ${color.cyan(policyName)}`);
+
+  mkdirSync(dirname(workflowPath), { recursive: true });
+  writeFileSync(workflowPath, workflow);
+  log.success(`wrote ${color.cyan(relative(process.cwd(), workflowPath) || workflowPath)}`);
+
+  log.plain();
+  log.step("Next steps:");
+  log.plain("  1. Provision the cluster's nodes once (privileged, local):");
+  log.plain(`       launchpad deploy --cluster ${cluster} --yes`);
+  log.plain("  2. Commit + push the workflow — CI deploys keyless via OIDC from then on.");
+  log.dim("  The CI role can't provision: re-run step 1 locally if a node is ever added/replaced.");
 }
 
 interface SetupWizardOptions extends GlobalOpts {
@@ -333,4 +542,36 @@ export function registerSetup(program: Command): void {
       await runGithubOidc(mergedOpts<GithubOidcOptions>(command));
     });
   applyGlobalOptions(oidc);
+
+  const ciDeploy = setup
+    .command("ci-deploy")
+    .description("Create the bare-minimum CI deploy role + write .github/workflows/deploy.yml for this project")
+    .option("--repo <owner/name>", "the GitHub repository that will deploy (default: derived from `origin`)")
+    .option("--branch <name>", `git branch allowed to deploy (default: ${DEFAULT_BRANCH})`)
+    .option("--role-name <name>", "IAM role name (default: <project>-deploy)")
+    .option("--account <id>", "AWS account id (default: your current identity)")
+    .option("--print", "print the role/trust/policy/workflow without creating anything")
+    .option("--yes", "skip the confirmation prompt (required in CI / non-interactive)")
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Unlike `setup github-oidc` (which prints a BROAD operator role for you to wire up),",
+        "this CREATES a least-privilege role scoped to ONE project on ONE dedicated cluster:",
+        "it may push to the project's ECR repos and write that cluster's S3 state — and nothing",
+        "else. No EC2/IAM writes, no other cluster, no other project. The generated workflow is",
+        "deploy-only (--no-create/-repair/-recreate), so provisioning stays a local operator step.",
+        "",
+        "Run it from a directory with a launch-pad.toml. Requires a NON-default cluster.",
+        "",
+        "Examples:",
+        "  $ launchpad setup ci-deploy --print            # review what it would create",
+        "  $ launchpad setup ci-deploy --cluster prod --yes",
+        "  $ launchpad setup ci-deploy --repo acme/widgets --cluster prod --branch release --yes",
+      ].join("\n"),
+    )
+    .action(async (_opts, command: Command) => {
+      await runCiDeploy(mergedOpts<CiDeployOptions>(command));
+    });
+  applyGlobalOptions(ciDeploy);
 }

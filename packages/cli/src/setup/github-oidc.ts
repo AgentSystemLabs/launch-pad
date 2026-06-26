@@ -114,6 +114,26 @@ export interface DeployWorkflowParams {
   roleArn: string;
   region: string;
   branch: string;
+  /**
+   * Pin the deploy to a named cluster (omit for the implicit `default` cluster). A CI
+   * role scoped to one project MUST target its own cluster, never `default`.
+   */
+  cluster?: string;
+  /**
+   * Emit a deploy-only run: `--no-create --no-repair --no-recreate`, so the workflow
+   * never provisions/repairs nodes and its IAM role needs zero EC2/IAM write perms.
+   * Provisioning stays a privileged, out-of-band operator action.
+   */
+  deployOnly?: boolean;
+}
+
+/** The `deploy` flags implied by the cluster + deploy-only options. */
+function deployFlags(params: DeployWorkflowParams): string {
+  const flags: string[] = [];
+  if (params.cluster !== undefined) flags.push(`--cluster ${params.cluster}`);
+  if (params.deployOnly) flags.push("--no-create", "--no-repair", "--no-recreate");
+  flags.push("--yes");
+  return flags.join(" ");
 }
 
 /**
@@ -159,6 +179,6 @@ jobs:
           # cache: npm
 
       # Pin the CLI version for reproducible deploys, e.g. @agentsystemlabs/launch-pad@1.2.3
-      - run: npx --yes @agentsystemlabs/launch-pad deploy --yes
+      - run: npx --yes @agentsystemlabs/launch-pad deploy ${deployFlags(params)}
 `;
 }
