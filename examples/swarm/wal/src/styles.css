@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .stdout-scroll {
+    @apply max-h-[28rem] overflow-y-auto rounded-lg bg-base-300/60 p-3 font-mono text-xs leading-relaxed;
+  }
+}

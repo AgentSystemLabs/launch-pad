@@ -28,6 +28,7 @@ import {
 import {
   HOST_PORT_MAX,
   HOST_PORT_MIN,
+  AWS_TAG_CLUSTER,
   type InstanceCapacity,
   type NodeRole,
   nodeResourceTags,
@@ -104,6 +105,7 @@ export async function ensureSecurityGroup(
   vpcId: string,
   opts: SecurityGroupOptions,
   tagCtx: SecurityGroupTagContext,
+  legacyName?: string,
 ): Promise<string> {
   const tags = nodeResourceTags({
     clusterId: tagCtx.clusterId,
@@ -111,18 +113,38 @@ export async function ensureSecurityGroup(
     role: opts.role,
   });
 
-  const existing = await ec2.send(
-    new DescribeSecurityGroupsCommand({
-      Filters: [
-        { Name: "group-name", Values: [name] },
-        { Name: "vpc-id", Values: [vpcId] },
-      ],
-    }),
-  );
-  const found = existing.SecurityGroups?.[0]?.GroupId;
-  if (found) {
-    await ensureSecurityGroupTags(ec2, found, tags);
-    return found;
+  const findByName = async (groupName: string) =>
+    (
+      await ec2.send(
+        new DescribeSecurityGroupsCommand({
+          Filters: [
+            { Name: "group-name", Values: [groupName] },
+            { Name: "vpc-id", Values: [vpcId] },
+          ],
+        }),
+      )
+    ).SecurityGroups?.[0];
+
+  const existing = await findByName(name);
+  if (existing?.GroupId) {
+    await ensureSecurityGroupTags(ec2, existing.GroupId, tags);
+    return existing.GroupId;
+  }
+
+  // Back-compat: a named cluster created before SG names were cluster-scoped has
+  // its SG under the legacy un-prefixed name. Reuse it ONLY when it is tagged for
+  // THIS cluster — otherwise a same-named SG belongs to a different cluster (the
+  // edge-1 collision) and reusing it would hijack that cluster's edge.
+  if (legacyName && legacyName !== name) {
+    const legacy = await findByName(legacyName);
+    if (legacy?.GroupId) {
+      const owner = legacy.Tags?.find((t) => t.Key === AWS_TAG_CLUSTER)?.Value;
+      if (owner === tagCtx.clusterId) {
+        await ensureSecurityGroupTags(ec2, legacy.GroupId, tags);
+        return legacy.GroupId;
+      }
+      // Belongs to another cluster — fall through and create the scoped SG.
+    }
   }
 
   const created = await ec2.send(
@@ -363,10 +385,24 @@ export interface NodeEip {
   instanceId: string | null;
 }
 
-/** Find an existing Elastic IP tagged for this node (reused across re-provisions). */
-export async function findNodeEip(ec2: EC2Client, nodeId: string): Promise<NodeEip | null> {
+/**
+ * Find an existing Elastic IP tagged for this node IN THIS CLUSTER (reused across
+ * re-provisions). The cluster filter is load-bearing: without it, a second cluster
+ * whose auto-edge is also named `edge-1` would match — and steal — the first
+ * cluster's edge EIP, dropping the first cluster's public IP on the floor.
+ */
+export async function findNodeEip(
+  ec2: EC2Client,
+  nodeId: string,
+  clusterId: string,
+): Promise<NodeEip | null> {
   const res = await ec2.send(
-    new DescribeAddressesCommand({ Filters: [{ Name: "tag:launch-pad:node", Values: [nodeId] }] }),
+    new DescribeAddressesCommand({
+      Filters: [
+        { Name: "tag:launch-pad:node", Values: [nodeId] },
+        { Name: "tag:launch-pad:cluster", Values: [clusterId] },
+      ],
+    }),
   );
   const addr = res.Addresses?.[0];
   if (!addr?.AllocationId || !addr.PublicIp) return null;
@@ -397,7 +433,7 @@ export async function ensureEipForInstance(
     role: tagCtx.role,
   }).map((t) => ({ Key: t.Key, Value: t.Value }));
 
-  let eip = await findNodeEip(ec2, tagCtx.nodeId);
+  let eip = await findNodeEip(ec2, tagCtx.nodeId, tagCtx.clusterId);
   if (!eip) {
     const allocated = await ec2.send(
       new AllocateAddressCommand({

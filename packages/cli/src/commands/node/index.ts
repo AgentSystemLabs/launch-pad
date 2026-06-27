@@ -244,7 +244,7 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
           amiSource: ami.source,
           amiBootstrapMode: ami.bootstrapMode,
           vpcId,
-          securityGroup: securityGroupName(name),
+          securityGroup: securityGroupName(name, aws.clusterId),
           iamRole: nodeRoleName(aws.clusterId, name),
           instanceProfile: nodeProfileName(aws.clusterId, name),
           ssh: opts.keyName !== undefined,
@@ -393,7 +393,7 @@ function printDryRun(
       amiSource,
       amiBootstrapMode,
       vpcId,
-      securityGroup: securityGroupName(name),
+      securityGroup: securityGroupName(name, aws.clusterId),
       iamRole: nodeRoleName(aws.clusterId, name),
       instanceProfile: nodeProfileName(aws.clusterId, name),
       ssh: opts.keyName !== undefined,
@@ -415,7 +415,7 @@ function printDryRun(
   planRows.push(["instance type", `${opts.instanceType} ${color.dim(`(${sharesToVcpu(capacity.totalCpu)} vCPU · ${capacity.totalMemory} MB)`)}`]);
   planRows.push(["ami", `${amiId} ${color.dim(`(${amiSource}, ${amiBootstrapMode} bootstrap)`)}`]);
   planRows.push(["vpc", vpcId]);
-  planRows.push(["security group", `${securityGroupName(name)} ${color.dim(`(${sgRule})`)}`]);
+  planRows.push(["security group", `${securityGroupName(name, aws.clusterId)} ${color.dim(`(${sgRule})`)}`]);
   planRows.push(["iam role", nodeRoleName(aws.clusterId, name)]);
   planRows.push(["instance profile", nodeProfileName(aws.clusterId, name)]);
   panel(`Plan for node ${name} ${color.dim("(dry run — nothing created)")}`, [...table(planRows)]);
@@ -450,8 +450,8 @@ async function nodeDesiredSummary(aws: AwsEnv, nodeId: string): Promise<NodeDesi
   try {
     const state = parseDesiredState(obj.raw);
     return {
-      cpu: state.services.reduce((s, x) => s + x.cpu, 0),
-      memory: state.services.reduce((s, x) => s + x.memory, 0),
+      cpu: state.services.reduce((s, x) => s + x.cpu * x.replicas, 0),
+      memory: state.services.reduce((s, x) => s + x.memory * x.replicas, 0),
       services: state.services.map((s) => ({
         project: s.project,
         service: s.service,
@@ -462,6 +462,26 @@ async function nodeDesiredSummary(aws: AwsEnv, nodeId: string): Promise<NodeDesi
   } catch {
     return empty;
   }
+}
+
+function formatCapacity(cpu: number, memory: number): string {
+  return `${sharesToVcpu(cpu)} vCPU · ${memory} MB`;
+}
+
+function nodeCapacityLines(
+  node: NodeRegistryEntry,
+  used: Pick<NodeDesiredSummary, "cpu" | "memory">,
+): Array<[string, string]> {
+  const allocatableCpu = node.totalCpu - node.reservedCpu;
+  const allocatableMemory = node.totalMemory - node.reservedMemory;
+  return [
+    ["capacity", formatCapacity(node.totalCpu, node.totalMemory)],
+    ["used", formatCapacity(used.cpu, used.memory)],
+    [
+      "free",
+      formatCapacity(allocatableCpu - used.cpu, allocatableMemory - used.memory),
+    ],
+  ];
 }
 
 /** Compact one-line summary of the services scheduled on a node for `node list`. */
@@ -633,11 +653,20 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
 
   const desired = await getJson(aws.s3, aws.bucket, desiredKey(aws.clusterId, name));
   const status = await getJson(aws.s3, aws.bucket, statusKey(aws.clusterId, name));
+  const used = await nodeDesiredSummary(aws, name);
+  const allocatableCpu = node.totalCpu - node.reservedCpu;
+  const allocatableMemory = node.totalMemory - node.reservedMemory;
 
   if (isJsonMode()) {
     printJson({
       node: { ...node, publicIp },
       ec2: obs ? { state: ec2StateLabel(obs), drift } : null,
+      capacity: {
+        total: { cpu: node.totalCpu, memory: node.totalMemory },
+        allocatable: { cpu: allocatableCpu, memory: allocatableMemory },
+        used: { cpu: used.cpu, memory: used.memory },
+        free: { cpu: allocatableCpu - used.cpu, memory: allocatableMemory - used.memory },
+      },
       desired: desired?.raw ?? null,
       status: status?.raw ?? null,
     });
@@ -668,7 +697,7 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
           : color.dim("none (VPC-private)"),
     ],
     ["security group", node.securityGroupId ?? color.dim("—")],
-    ["capacity", `${sharesToVcpu(node.totalCpu)} vCPU · ${node.totalMemory} MB`],
+    ...nodeCapacityLines(node, used),
     ["registry state", node.state],
   ];
   if (obs) rows.push(["ec2 state", ec2StateLabel(obs)]);

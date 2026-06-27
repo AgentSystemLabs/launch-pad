@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "if [ -z \"${WAL_URL:-}\" ]; then printf '{\"continue\":true}\\n'; exit 0; fi; curl -sS -m 3 -X POST -H 'content-type: application/json' -d \"{\\\"agent\\\":\\\"${AGENT_ID:-unknown}\\\",\\\"event\\\":\\\"cursor_session_start\\\",\\\"summary\\\":\\\"session started\\\"}\" \"${WAL_URL}/wal/append\" >/dev/null 2>&1 || true; printf '{\"continue\":true}\\n'"
+      }
+    ],
+    "stop": [
+      {
+        "command": "if [ -z \"${WAL_URL:-}\" ]; then printf '{\"continue\":true}\\n'; exit 0; fi; curl -sS -m 3 -X POST -H 'content-type: application/json' -d \"{\\\"agent\\\":\\\"${AGENT_ID:-unknown}\\\",\\\"event\\\":\\\"cursor_session_stop\\\",\\\"summary\\\":\\\"session stopped\\\"}\" \"${WAL_URL}/wal/append\" >/dev/null 2>&1 || true; printf '{\"continue\":true}\\n'"
+      }
+    ]
+  }
+}

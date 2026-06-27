@@ -74,6 +74,12 @@ export type NodeListJson = NodeListEntry[];
 export interface NodeShowJson {
   node: NodeRegistryEntry & { publicIp: string | null };
   ec2: { state: string; drift: string } | null;
+  capacity: {
+    total: { cpu: number; memory: number };
+    allocatable: { cpu: number; memory: number };
+    used: { cpu: number; memory: number };
+    free: { cpu: number; memory: number };
+  };
   desired: string | null;
   status: string | null;
 }

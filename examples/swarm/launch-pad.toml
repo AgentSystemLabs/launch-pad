@@ -1,0 +1,62 @@
+# Self-organizing engineering swarm — cursor-agent workers + WAL control plane.
+#
+# PREREQUISITE — build the Bun WAL bundle before deploy (orbital-js is a sibling
+# repo outside the Docker build context, so the server is pre-bundled on the host):
+#   (cd wal && bun install && bun run build)
+#
+# Deploy from this directory:
+#   launchpad secret set CURSOR_API_KEY --service engineer
+#   launchpad secret set GITHUB_TOKEN --service engineer
+#   launchpad secret set GIT_SSH_KEY --service engineer
+#   launchpad secret set OPENAI_API_KEY --service engineer   # optional
+#   launchpad deploy --cluster <yours> --yes
+#
+# Then open https://swarm.example.com, set a mission, click Run.
+# Scale workers: launchpad scale engineer replicas 100
+project = "swarm"
+
+[[service]]
+name = "wal"
+dockerfile = "./wal/Dockerfile"
+context = "./wal"
+cpu = 256
+memory = 512
+replicas = 1
+domain = "swarm.example.com"
+port = 8080
+env = { NODE_ENV = "production" }
+
+  [service.healthCheck]
+  path = "/healthz"
+
+  [[service.volumes]]
+  name = "wal-data"
+  path = "/data"
+
+[[service]]
+name = "engineer"
+dockerfile = "./worker/Dockerfile"
+context = "."
+cpu = 1024
+memory = 2048
+# Start small; scale up for the demo (launchpad scale engineer replicas 100).
+replicas = 5
+secrets = [
+  "CURSOR_API_KEY",
+  "GITHUB_TOKEN",
+  "GIT_SSH_KEY",
+  # Optional — add when target repo needs it:
+  # "OPENAI_API_KEY",
+]
+env = {
+  WAL_URL = "https://swarm.example.com",
+  TARGET_REPO = "git@github.com:YOUR_ORG/coffee-shop.git",
+  TARGET_BRANCH = "main",
+  GITHUB_REPO = "YOUR_ORG/coffee-shop",
+  # Mission now comes from the operator UI (GET /mission/active). SWARM_GOAL is an
+  # optional static fallback only — leave unset to require an operator Run.
+  LOOP_IDLE_SEC = "15",     # pause between completed tasks
+  IDLE_POLL_SEC = "45",     # poll cadence while idle / no mission (no Cursor spend)
+  PAUSE_POLL_SEC = "15",    # poll cadence while paused
+  BOOT_JITTER_MAX_SEC = "300",
+}

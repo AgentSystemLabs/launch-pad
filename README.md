@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/launch-pad-icon.png" alt="Launch Pad" width="128" />
+</p>
+
 # Launch Pad
 
 Deploy your apps to **your own** AWS infrastructure — one command.

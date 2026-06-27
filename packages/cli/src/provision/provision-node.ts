@@ -42,7 +42,27 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-export function securityGroupName(nodeId: string): string {
+/**
+ * The security group name for a node. Cluster-scoped for named clusters so two
+ * clusters that both auto-provision an edge (always named `edge-1`) don't collide
+ * on a single shared SG. The `default` cluster keeps the legacy un-prefixed name
+ * (matching the legacy un-prefixed S3 `nodes/` root) so existing nodes need no
+ * migration. SG names must be unique per VPC, and all clusters share the default
+ * VPC — that uniqueness is exactly what the cluster prefix buys.
+ */
+export function securityGroupName(nodeId: string, clusterId: string): string {
+  return clusterId === DEFAULT_CLUSTER
+    ? `launch-pad-${nodeId}-sg`
+    : `launch-pad-${clusterId}-${nodeId}-sg`;
+}
+
+/**
+ * The pre-cluster-scoping SG name. A named cluster created before this change has
+ * SGs under this name; ensureSecurityGroup reuses such an SG ONLY when it is
+ * tagged for that same cluster, so a node-name clash across clusters can't hijack
+ * another cluster's SG.
+ */
+export function legacySecurityGroupName(nodeId: string): string {
   return `launch-pad-${nodeId}-sg`;
 }
 
@@ -146,7 +166,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
   report("ensuring security group");
   const sgId = await ensureSecurityGroup(
     aws.ec2,
-    securityGroupName(nodeId),
+    securityGroupName(nodeId, aws.clusterId),
     vpcId,
     {
       ssh: p.keyName !== undefined,
@@ -154,6 +174,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
       edgeSecurityGroupId,
     },
     { clusterId: aws.clusterId, nodeId },
+    legacySecurityGroupName(nodeId),
   );
 
   report(`launching ${p.instanceType}`);

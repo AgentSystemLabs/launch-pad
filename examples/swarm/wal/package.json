@@ -1,0 +1,30 @@
+{
+  "name": "@examples/swarm-wal",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "run-p server tailwind",
+    "server": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "tailwind": "tailwindcss -i src/styles.css -o dist/styles.css --watch",
+    "build": "bun run build:tailwind && bun run build:server",
+    "build:tailwind": "tailwindcss -i src/styles.css -o dist/styles.css",
+    "build:server": "bun run scripts/bundle.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src tests/integration.test.ts",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@orbital-js/station": "file:../../../../orbital-js/packages/station",
+    "hono": "^4.5.0",
+    "npm-run-all": "^4.1.5",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/bun": "latest",
+    "daisyui": "^4.12.10",
+    "tailwindcss": "^3.4.6",
+    "typescript": "^5.0.0"
+  }
+}

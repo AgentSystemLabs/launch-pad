@@ -167,11 +167,8 @@ the agent or baked dependencies change. Details: [golden-ami.md](golden-ami.md).
 
 ## CI status
 
-Two GitHub Actions workflows are checked in:
+One GitHub Actions workflow is checked in:
 
-- `.github/workflows/byos-bootstrap.yml` runs the BYOS external bootstrap renderer tests on
-  Ubuntu 22.04, Ubuntu 24.04, and Amazon Linux 2023 (via container) so the `dnf` and `apt-get`
-  bootstrap branches stay covered.
 - `.github/workflows/release.yml` publishes the `@agentsystemlabs/launch-pad` CLI to npm via
   OIDC Trusted Publishing on a `v*` tag (typecheck + test gate the publish). See
   [releasing.md](releasing.md).

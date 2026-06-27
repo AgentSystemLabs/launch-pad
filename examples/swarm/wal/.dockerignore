@@ -1,0 +1,14 @@
+# The image only needs the pre-built, self-contained dist/. Keep everything
+# else out of the build context (node_modules contains a broken cross-repo
+# symlink to orbital-js that COPY can't follow anyway).
+node_modules
+src
+tests
+*.test.ts
+bun.lockb
+tsconfig.json
+tailwind.config.js
+*.db
+*.db-*
+.gitignore
+README.md

@@ -1,0 +1,6 @@
+{
+  "name": "@examples/swarm-mcp",
+  "private": true,
+  "type": "module",
+  "dependencies": {}
+}

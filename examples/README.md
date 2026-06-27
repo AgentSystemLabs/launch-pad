@@ -23,6 +23,7 @@ public 80/443). A first deploy on an empty cluster auto-provisions `edge-1` +
 | Multi-service capacity bin-packing (web + worker) | [`cluster-capacity-split`](cluster-capacity-split) |
 | Scheduled job (cron worker, one container per fire) | [`cron-task`](cron-task) |
 | Persistent named volume (sticky placement) | [`worker-with-volume`](worker-with-volume) |
+| Headless cursor-agent swarm (WAL locks + GitHub issues) | [`swarm`](swarm) |
 
 ## Coverage matrix
 
@@ -37,6 +38,7 @@ public 80/443). A first deploy on an empty cluster auto-provisions `edge-1` +
 | `cluster-capacity-split` | edge + 2 app (named cluster) | — | yes (4) | yes | yes | yes |
 | `cron-task` | edge + 1 app (auto) | — | — | — | yes (cron) | — |
 | `worker-with-volume` | edge + 1 app (auto) | — | — | — | yes | — |
+| `swarm` | edge + N app (scale out) | — | yes (workers) | — | yes | wal + engineer |
 
 ## Edge cases exercised
 

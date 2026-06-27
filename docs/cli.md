@@ -1019,7 +1019,10 @@ Re-running `node destroy <name>` on an already-destroyed node also sweeps any le
 
 ### `node show <name>`
 
-Show registry entry, desired state, and live status for one node.
+Show registry entry, desired state, and live status for one node. Capacity is broken
+out as **total** (instance size), **used** (scheduled services from `desired.json`),
+and **free** (allocatable minus used — allocatable is total minus the host reserve for
+the OS and agent).
 
 ### `node destroy <names...>`
 
