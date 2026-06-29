@@ -92,6 +92,8 @@ export interface ProvisionNodeParams {
   /** The edge node fronting this node — required when role === "app". */
   edgeNodeId?: string;
   keyName?: string;
+  /** When set with keyName, open port 22 in the node security group to this CIDR only. */
+  sshCidr?: string;
   /** Spinner bridge: called with the current step label. */
   onProgress?: (text: string) => void;
 }
@@ -169,7 +171,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
     securityGroupName(nodeId, aws.clusterId),
     vpcId,
     {
-      ssh: p.keyName !== undefined,
+      sshCidr: p.sshCidr,
       role,
       edgeSecurityGroupId,
     },
