@@ -4,6 +4,7 @@ import type { AppCtx } from "../index";
 import { runLaunchPad } from "../lib/run-launch-pad";
 import { flash } from "../lib/ui";
 import { vcpu, mb } from "../lib/format";
+import { confirmSubmit } from "../lib/confirm";
 import { ErrorCard, EmptyState, errorMessage } from "../components/feedback";
 import { Breadcrumbs } from "../components/breadcrumbs";
 import { NodeStateBadge, NodeStateLegend } from "../components/node-state";
@@ -189,7 +190,7 @@ export function registerNodes(station: Station<AppCtx>) {
                       </form>
                       <form
                         p-action="nodes:destroy"
-                        onsubmit={`return confirm('Destroy node ${n.nodeId}? This terminates the instance.')`}
+                        onsubmit={confirmSubmit(`Destroy node ${n.nodeId}? This terminates the instance.`)}
                       >
                         <ClusterField cluster={cluster} />
                         <input type="hidden" name="name" value={n.nodeId} />

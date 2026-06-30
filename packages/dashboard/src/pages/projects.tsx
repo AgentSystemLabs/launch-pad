@@ -13,6 +13,7 @@ import {
 } from "../lib/app-config";
 import { readServices, parseEnvText, envToText, writeServiceEnv } from "../lib/toml-env";
 import { flash } from "../lib/ui";
+import { confirmSubmit } from "../lib/confirm";
 import { EmptyState, errorMessage, DisabledTip } from "../components/feedback";
 import { Breadcrumbs } from "../components/breadcrumbs";
 
@@ -174,7 +175,7 @@ export function registerProjects(station: Station<AppCtx>) {
                       </form>
                       <form
                         p-action="projects:remove"
-                        onsubmit={`return confirm('Remove project ${p.name} from the dashboard? (does not touch AWS)')`}
+                        onsubmit={confirmSubmit(`Remove project ${p.name} from the dashboard? (does not touch AWS)`)}
                       >
                         <input type="hidden" name="name" value={p.name} />
                         <button class="btn btn-ghost btn-xs">Remove</button>
