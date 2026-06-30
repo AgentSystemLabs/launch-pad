@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Alert } from "./evaluate";
-import { buildAlertPayload } from "./webhook";
+import { buildAlertPayload, isSecureWebhookUrl } from "./webhook";
 
 const alert = (over: Partial<Alert> = {}): Alert => ({
   nodeId: "n1",
@@ -26,5 +26,17 @@ describe("buildAlertPayload", () => {
     const p = buildAlertPayload("dev", [alert({ severity: "warning" })]);
     expect(p.text).toContain('1 alert on cluster "dev"');
     expect(p.text).not.toContain("critical)");
+  });
+});
+
+describe("isSecureWebhookUrl", () => {
+  it("accepts HTTPS webhook URLs", () => {
+    expect(isSecureWebhookUrl("https://hooks.slack.com/services/TOKEN")).toBe(true);
+  });
+
+  it("rejects plaintext and malformed webhook URLs", () => {
+    expect(isSecureWebhookUrl("http://hooks.slack.com/services/TOKEN")).toBe(false);
+    expect(isSecureWebhookUrl("ftp://example.com/hook")).toBe(false);
+    expect(isSecureWebhookUrl("not a url")).toBe(false);
   });
 });

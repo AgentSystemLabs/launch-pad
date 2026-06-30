@@ -31,6 +31,15 @@ function safeOrigin(url: string): string {
   }
 }
 
+/** Webhook URLs carry alert details and often embed secret tokens, so require TLS. */
+export function isSecureWebhookUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 /** POST an alert payload to a webhook URL. Throws on a non-2xx response. */
 export async function postWebhook(url: string, payload: AlertPayload): Promise<void> {
   const res = await fetch(url, {
