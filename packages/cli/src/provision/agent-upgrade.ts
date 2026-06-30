@@ -1,5 +1,6 @@
 import type { ProvisionNodeRole } from "@agentsystemlabs/launch-pad-shared";
 import { renderSystemdUnit } from "./systemd-unit";
+import { shellQuote } from "./shell-quote";
 
 /** Path on the instance where the agent binary is installed. */
 export const AGENT_INSTALL_PATH = "/opt/launch-pad/agent";
@@ -46,8 +47,4 @@ sudo systemctl is-active --quiet ${AGENT_SYSTEMD_UNIT}
 export function ssmRunBashScript(script: string): string[] {
   const encoded = Buffer.from(script, "utf8").toString("base64");
   return [`echo ${encoded} | base64 -d | bash`];
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
