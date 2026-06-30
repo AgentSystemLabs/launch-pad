@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { PREVIEW_MARKER_VERSION } from "./constants";
-import { componentOwner, envProject, LABEL_REGEX } from "./config";
+import { componentOwner, envProject, HOSTNAME_REGEX, LABEL_REGEX } from "./config";
 
 /**
  * Strict field shapes: the marker is read back from S3 and drives DESTRUCTIVE actions
@@ -9,7 +9,6 @@ import { componentOwner, envProject, LABEL_REGEX } from "./config";
  * of the CLI's own runtime guards.
  */
 const OWNER_REGEX = /^[a-z0-9][a-z0-9-]*$/;
-const HOSTNAME_REGEX = /^[a-z0-9]([a-z0-9-]{0,62})?(\.[a-z0-9]([a-z0-9-]{0,62})?)+$/i;
 
 /**
  * Preview-environment marker: one `projects/<project>-<env>/preview.json` per env

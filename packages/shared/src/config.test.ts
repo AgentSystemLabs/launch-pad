@@ -80,6 +80,14 @@ describe("parseLaunchPadConfig", () => {
     expect(() => parseLaunchPadConfig({ project: "My_App", service: [worker] })).toThrow();
   });
 
+  it("rejects domains that are not hostnames", () => {
+    for (const domain of ["*", "https://app.example.com", "app.example.com/path", "app.example.com:443"]) {
+      expect(() =>
+        parseLaunchPadConfig({ project: "my-app", service: [{ ...web, domain }] }),
+      ).toThrow(/domain must be a DNS hostname/);
+    }
+  });
+
   it("rejects unknown top-level keys", () => {
     expect(() =>
       parseLaunchPadConfig({ project: "my-app", service: [worker], extra: true }),
@@ -300,6 +308,15 @@ describe("domainPattern validation", () => {
     expect(() =>
       parseLaunchPadConfig({ project: "p", service: [{ ...web, domainPattern: "api-{env}-{region}.acme.com" }] }),
     ).toThrow(/unknown token/);
+  });
+
+  it("rejects patterns that do not resolve to hostnames", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...web, domainPattern: "https://api-{env}.acme.com" }] }),
+    ).toThrow(/domainPattern must resolve to a DNS hostname/);
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", domainPattern: "*.{env}.acme.com", service: [web] }),
+    ).toThrow(/domainPattern must resolve to a DNS hostname/);
   });
 
   it("rejects a domainPattern on a worker", () => {

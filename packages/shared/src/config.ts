@@ -17,6 +17,12 @@ import { SECRET_KEY_HINT, SECRET_KEY_REGEX } from "./secrets";
 /** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1–40 chars. */
 export const LABEL_REGEX = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
 
+/** Public hostname accepted for edge routing. */
+export const HOSTNAME_REGEX = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+export const HOSTNAME_HINT =
+  "a DNS hostname like api.example.com (no scheme, path, port, wildcard, or whitespace)";
+
 /**
  * Separator between project and component in a derived footprint owner
  * (`componentOwner`). Forbidden inside `project`/`component` labels so the
@@ -52,6 +58,8 @@ export function nodeIdError(id: string): string | null {
 const label = (what: string) =>
   z.string().regex(LABEL_REGEX, `${what} must be lowercase letters, numbers and hyphens (1–40 chars)`);
 
+const hostname = (what: string) => z.string().regex(HOSTNAME_REGEX, `${what} must be ${HOSTNAME_HINT}`);
+
 /** Tokens a `domainPattern` may interpolate. `{env}` is required; `{service}` is optional. */
 const DOMAIN_PATTERN_TOKENS = new Set(["env", "service"]);
 
@@ -68,6 +76,10 @@ export function domainPatternError(pattern: string): string | null {
   }
   if (!tokens.includes("env")) {
     return "domainPattern must include the {env} token so environments don't collide on one domain";
+  }
+  const projected = pattern.replace(/\{(env|service)\}/g, (_, k: string) => k);
+  if (!HOSTNAME_REGEX.test(projected)) {
+    return `domainPattern must resolve to ${HOSTNAME_HINT}`;
   }
   return null;
 }
@@ -362,7 +374,7 @@ export const ServiceDeclSchema = z
     secrets: z
       .array(z.string().regex(SECRET_KEY_REGEX, `secret name must be ${SECRET_KEY_HINT}`))
       .default([]),
-    domain: z.string().min(1).optional(),
+    domain: hostname("domain").optional(),
     /** Template for the domain under `--env <e>`; `{env}`/`{service}` are interpolated. */
     domainPattern: z.string().min(1).optional(),
     port: z.number().int().min(1).max(65535).optional(),
