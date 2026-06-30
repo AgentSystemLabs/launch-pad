@@ -5,10 +5,12 @@ import { resetFakeState } from "./_helpers";
 import { HOME_PATH, ROOT } from "../paths";
 
 const PROJ_DIR = join(ROOT, "test-results", "proj-demo");
+const OTHER_DIR = join(ROOT, "test-results", "proj-other");
 
 test.beforeEach(() => {
   resetFakeState();
   rmSync(PROJ_DIR, { recursive: true, force: true });
+  rmSync(OTHER_DIR, { recursive: true, force: true });
   mkdirSync(PROJ_DIR, { recursive: true });
   writeFileSync(join(PROJ_DIR, "Dockerfile"), "FROM node:24\n");
 });
@@ -71,6 +73,37 @@ test("scaffold a project then edit + save env", async ({ page }) => {
 
   const toml = readFileSync(join(PROJ_DIR, "launch-pad.toml"), "utf8");
   expect(toml).toContain("FEATURE_X");
+});
+
+test("env save ignores tampered project directory form data", async ({ page }) => {
+  mkdirSync(OTHER_DIR, { recursive: true });
+  writeFileSync(
+    join(OTHER_DIR, "launch-pad.toml"),
+    'project = "other"\n\n[[service]]\nname = "demo"\nenv = { UNCHANGED = "yes" }\n',
+  );
+
+  await page.goto("/projects");
+  await page.getByPlaceholder("name", { exact: true }).fill("demo");
+  await page.getByPlaceholder("/abs/path/to/source (with Dockerfile)").fill(PROJ_DIR);
+  await page.getByRole("button", { name: "Scaffold" }).click();
+  await expect(page.getByTestId("project-name-demo")).toBeVisible();
+
+  await page.getByTestId("project-row-demo").getByRole("button", { name: "Env" }).click();
+  await page.getByTestId("env-text-demo").fill("NODE_ENV=production\nSAFE_KEY=ok");
+  await page.evaluate((dir) => {
+    const form = document.querySelector('[data-testid="env-editor"] form[p-action="projects:env:save"]');
+    if (!(form instanceof HTMLFormElement)) throw new Error("env form not found");
+    const forged = document.createElement("input");
+    forged.type = "hidden";
+    forged.name = "dir";
+    forged.value = dir;
+    form.appendChild(forged);
+  }, OTHER_DIR);
+  await page.getByTestId("env-editor").getByRole("button", { name: "Save & redeploy" }).click();
+  await expect(page.getByText(/Saved env \+ redeployed/)).toBeVisible();
+
+  expect(readFileSync(join(PROJ_DIR, "launch-pad.toml"), "utf8")).toContain("SAFE_KEY");
+  expect(readFileSync(join(OTHER_DIR, "launch-pad.toml"), "utf8")).not.toContain("SAFE_KEY");
 });
 
 test("click to copy project directory path", async ({ page, context }) => {
