@@ -11,6 +11,7 @@
     "tailwind": "tailwindcss -i src/styles.css -o dist/styles.css --watch",
     "build:tailwind": "tailwindcss -i src/styles.css -o dist/styles.css",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "test:e2e": "playwright test"
   },
   "dependencies": {
