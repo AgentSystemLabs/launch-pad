@@ -5,12 +5,16 @@ import { resetFakeState } from "./_helpers";
 import { HOME_PATH, ROOT } from "../paths";
 
 const PROJ_DIR = join(ROOT, "test-results", "proj-demo");
+const OTHER_PROJ_DIR = join(ROOT, "test-results", "proj-other");
 
 test.beforeEach(() => {
   resetFakeState();
   rmSync(PROJ_DIR, { recursive: true, force: true });
+  rmSync(OTHER_PROJ_DIR, { recursive: true, force: true });
   mkdirSync(PROJ_DIR, { recursive: true });
+  mkdirSync(OTHER_PROJ_DIR, { recursive: true });
   writeFileSync(join(PROJ_DIR, "Dockerfile"), "FROM node:24\n");
+  writeFileSync(join(OTHER_PROJ_DIR, "Dockerfile"), "FROM node:24\n");
 });
 
 test("empty state before any project is registered", async ({ page }) => {
@@ -71,6 +75,43 @@ test("scaffold a project then edit + save env", async ({ page }) => {
 
   const toml = readFileSync(join(PROJ_DIR, "launch-pad.toml"), "utf8");
   expect(toml).toContain("FEATURE_X");
+});
+
+test("env save ignores a tampered project directory field", async ({ page }) => {
+  writeFileSync(
+    join(OTHER_PROJ_DIR, "launch-pad.toml"),
+    'project = "other"\n\n[[service]]\nname = "demo"\nenv = { NODE_ENV = "safe" }\n',
+  );
+
+  await page.goto("/projects");
+  await page.getByPlaceholder("name", { exact: true }).fill("demo");
+  await page.getByPlaceholder("/abs/path/to/source (with Dockerfile)").fill(PROJ_DIR);
+  await page.getByRole("button", { name: "Scaffold" }).click();
+  await expect(page.getByTestId("project-name-demo")).toBeVisible();
+
+  await page.getByTestId("project-row-demo").getByRole("button", { name: "Env" }).click();
+  const textarea = page.getByTestId("env-text-demo");
+  await expect(textarea).toBeVisible();
+  await textarea.fill("NODE_ENV=production\nFEATURE_X=on");
+
+  await page.evaluate((otherDir) => {
+    const form = document.querySelector('[data-testid="env-editor"] form[p-action="projects:env:save"]');
+    if (!(form instanceof HTMLFormElement)) throw new Error("env save form not found");
+    let dir = form.querySelector('input[name="dir"]');
+    if (!(dir instanceof HTMLInputElement)) {
+      dir = document.createElement("input");
+      dir.type = "hidden";
+      dir.name = "dir";
+      form.appendChild(dir);
+    }
+    dir.value = otherDir;
+  }, OTHER_PROJ_DIR);
+
+  await page.getByTestId("env-editor").getByRole("button", { name: "Save & redeploy" }).click();
+  await expect(page.getByText(/Saved env \+ redeployed/)).toBeVisible();
+
+  expect(readFileSync(join(PROJ_DIR, "launch-pad.toml"), "utf8")).toContain("FEATURE_X");
+  expect(readFileSync(join(OTHER_PROJ_DIR, "launch-pad.toml"), "utf8")).not.toContain("FEATURE_X");
 });
 
 test("click to copy project directory path", async ({ page, context }) => {
