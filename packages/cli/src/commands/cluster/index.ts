@@ -2,8 +2,9 @@ import { Command } from "commander";
 import {
   type ClusterConfig,
   CLUSTERS_PREFIX,
+  CLUSTER_ID_HINT,
+  ClusterIdSchema,
   DEFAULT_CLUSTER,
-  LABEL_REGEX,
   type NodeRegistryEntry,
   nodeFrontsIngress,
   nodeRegistryKey,
@@ -59,8 +60,8 @@ function assertClusterName(name: string): void {
       hint: "pick another name, e.g. `lower` or `prod`",
     });
   }
-  if (!LABEL_REGEX.test(name)) {
-    throw new CliError(`invalid cluster name "${name}" (lowercase letters, numbers and hyphens, 1–40 chars)`);
+  if (!ClusterIdSchema.safeParse(name).success) {
+    throw new CliError(`invalid cluster name "${name}" (${CLUSTER_ID_HINT})`);
   }
 }
 
