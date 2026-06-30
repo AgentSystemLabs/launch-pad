@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { AppCtx } from "../index";
 import { runLaunchPad } from "../lib/run-launch-pad";
 import { setDefaults } from "../lib/app-config";
-import { flash } from "../lib/ui";
+import { confirmSubmit, flash } from "../lib/ui";
 import { ErrorCard, EmptyState, errorMessage } from "../components/feedback";
 import type { ClusterListJson } from "../lib/lp-types";
 
@@ -130,7 +130,7 @@ export function registerClusters(station: Station<AppCtx>) {
                       </form>
                       <form
                         p-action="clusters:destroy"
-                        onsubmit={`return confirm('Destroy cluster ${c.clusterId}? This terminates all its nodes.')`}
+                        onsubmit={confirmSubmit(`Destroy cluster ${c.clusterId}? This terminates all its nodes.`)}
                       >
                         <input type="hidden" name="name" value={c.clusterId} />
                         <button class="btn btn-error btn-outline btn-xs">Destroy</button>
