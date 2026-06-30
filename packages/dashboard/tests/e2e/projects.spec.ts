@@ -6,11 +6,13 @@ import { HOME_PATH, ROOT } from "../paths";
 
 const PROJ_DIR = join(ROOT, "test-results", "proj-demo");
 const OTHER_PROJ_DIR = join(ROOT, "test-results", "proj-other");
+const ATTACK_DIR = join(ROOT, "test-results", "proj-attack");
 
 test.beforeEach(() => {
   resetFakeState();
   rmSync(PROJ_DIR, { recursive: true, force: true });
   rmSync(OTHER_PROJ_DIR, { recursive: true, force: true });
+  rmSync(ATTACK_DIR, { recursive: true, force: true });
   mkdirSync(PROJ_DIR, { recursive: true });
   writeFileSync(join(PROJ_DIR, "Dockerfile"), "FROM node:24\n");
 });
@@ -93,6 +95,38 @@ test("scaffold a project then edit + save env", async ({ page }) => {
   expect(toml).toContain("FEATURE_X");
   const otherToml = readFileSync(join(OTHER_PROJ_DIR, "launch-pad.toml"), "utf8");
   expect(otherToml).not.toContain("FEATURE_X");
+});
+
+test("env save ignores a tampered project directory field", async ({ page }) => {
+  mkdirSync(ATTACK_DIR, { recursive: true });
+  writeFileSync(
+    join(ATTACK_DIR, "launch-pad.toml"),
+    'project = "attack"\n\n[[service]]\nname = "demo"\nport = 3000\nenv = { NODE_ENV = "attack" }\n',
+  );
+
+  await page.goto("/projects");
+  await page.getByPlaceholder("name", { exact: true }).fill("demo");
+  await page.getByPlaceholder("/abs/path/to/source (with Dockerfile)").fill(PROJ_DIR);
+  await page.getByRole("button", { name: "Scaffold" }).click();
+  await expect(page.getByTestId("project-name-demo")).toBeVisible();
+
+  await page.getByTestId("project-row-demo").getByRole("button", { name: "Env" }).click();
+  const form = page.locator('[p-action="projects:env:save"]');
+  await form.evaluate((el, dir) => {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "dir";
+    input.value = String(dir);
+    el.appendChild(input);
+  }, ATTACK_DIR);
+
+  await page.getByTestId("env-text-demo").fill("NODE_ENV=production\nSAFE_CHANGE=yes");
+  await page.getByTestId("env-editor").getByRole("button", { name: "Save & redeploy" }).click();
+  await expect(page.getByText(/Saved env \+ redeployed/)).toBeVisible();
+
+  expect(readFileSync(join(PROJ_DIR, "launch-pad.toml"), "utf8")).toContain("SAFE_CHANGE");
+  expect(readFileSync(join(ATTACK_DIR, "launch-pad.toml"), "utf8")).toContain('NODE_ENV = "attack"');
+  expect(readFileSync(join(ATTACK_DIR, "launch-pad.toml"), "utf8")).not.toContain("SAFE_CHANGE");
 });
 
 test("click to copy project directory path", async ({ page, context }) => {

@@ -364,8 +364,8 @@ export function registerProjects(station: Station<AppCtx>) {
     }),
     handler: async ({ data, ctx, invalidate, reply }) => {
       const project = getProject(data.project);
-      if (!project) {
-        flash(ctx, invalidate, "error", `Unknown project "${data.project}"`);
+      if (!project || ctx.editing?.project !== project.name) {
+        flash(ctx, invalidate, "error", `Env editor is not open for "${data.project}"`);
         reply({ ok: false });
         return;
       }
