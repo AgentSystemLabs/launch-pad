@@ -364,7 +364,7 @@ export function registerProjects(station: Station<AppCtx>) {
     }),
     handler: async ({ data, ctx, invalidate, reply }) => {
       const project = getProject(data.project);
-      if (!project) {
+      if (!project || ctx.editing?.project !== data.project) {
         flash(ctx, invalidate, "error", `Unknown project "${data.project}"`);
         reply({ ok: false });
         return;
