@@ -32,6 +32,7 @@ export function sshArgs(target: SshTarget, remoteCommand: string): string[] {
     "StrictHostKeyChecking=accept-new",
     ...(target.key ? ["-i", target.key] : []),
     ...(target.port ? ["-p", String(target.port)] : []),
+    "--",
     userHost,
     remoteCommand,
   ];
