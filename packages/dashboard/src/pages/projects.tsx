@@ -362,13 +362,17 @@ export function registerProjects(station: Station<AppCtx>) {
     }),
     handler: async ({ data, ctx, invalidate, reply }) => {
       const editing = ctx.editing;
-      const project = editing ? getProject(editing.project) : undefined;
-      if (!editing || !project) {
-        flash(ctx, invalidate, "error", "Open a registered project before saving env");
+      if (!editing) {
+        flash(ctx, invalidate, "error", "No project env editor is open");
         reply({ ok: false });
         return;
       }
-
+      const project = getProject(editing.project);
+      if (!project) {
+        flash(ctx, invalidate, "error", `Unknown project "${editing.project}"`);
+        reply({ ok: false });
+        return;
+      }
       try {
         writeServiceEnv(project.dir, data.service, parseEnvText(data.env ?? ""));
         await runLaunchPad(["deploy", "--service", data.service, "--yes"], {
@@ -377,7 +381,6 @@ export function registerProjects(station: Station<AppCtx>) {
           profile: ctx.profile,
           region: ctx.region,
         });
-        ctx.editing = { project: project.name, dir: project.dir };
         flash(ctx, invalidate, "success", `Saved env + redeployed ${project.name}/${data.service}`);
         invalidate("projects:env");
         reply({ ok: true });
