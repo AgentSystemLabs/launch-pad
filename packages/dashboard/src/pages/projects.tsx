@@ -221,7 +221,6 @@ export function registerProjects(station: Station<AppCtx>) {
           {services.map((svc) => (
             <form p-action="projects:env:save" class="space-y-2 border-t border-base-content/10 pt-3">
               <input type="hidden" name="project" value={editing.project} />
-              <input type="hidden" name="dir" value={editing.dir} />
               <input type="hidden" name="service" value={svc.name} />
               <div class="flex items-center justify-between">
                 <span class="font-mono text-sm">{svc.name}</span>
@@ -360,16 +359,21 @@ export function registerProjects(station: Station<AppCtx>) {
   station.defineAction("projects:env:save", {
     input: z.object({
       project: z.string().min(1),
-      dir: z.string().min(1),
       service: z.string().min(1),
       env: z.string().optional(),
     }),
     handler: async ({ data, ctx, invalidate, reply }) => {
+      const project = getProject(data.project);
+      if (!project || ctx.editing?.project !== project.name) {
+        flash(ctx, invalidate, "error", `Env editor is not open for "${data.project}"`);
+        reply({ ok: false });
+        return;
+      }
       try {
-        writeServiceEnv(data.dir, data.service, parseEnvText(data.env ?? ""));
+        writeServiceEnv(project.dir, data.service, parseEnvText(data.env ?? ""));
         await runLaunchPad(["deploy", "--service", data.service, "--yes"], {
-          cwd: data.dir,
-          cluster: getProject(data.project)?.cluster ?? ctx.cluster,
+          cwd: project.dir,
+          cluster: project.cluster ?? ctx.cluster,
           profile: ctx.profile,
           region: ctx.region,
         });
