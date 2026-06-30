@@ -120,7 +120,7 @@ systemctl enable --now docker
   const edgeBlock = role === "edge" ? caddyBlock() : "";
 
   return `#!/bin/bash
-set -euxo pipefail
+set -euo pipefail
 
 # --- detect package manager (dnf: Amazon Linux/Fedora/RHEL; apt-get: Debian/Ubuntu) ---
 if command -v dnf >/dev/null 2>&1; then
