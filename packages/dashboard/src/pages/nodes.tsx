@@ -189,7 +189,7 @@ export function registerNodes(station: Station<AppCtx>) {
                       </form>
                       <form
                         p-action="nodes:destroy"
-                        onsubmit={`return confirm('Destroy node ${n.nodeId}? This terminates the instance.')`}
+                        data-confirm={`Destroy node ${n.nodeId}? This terminates the instance.`}
                       >
                         <ClusterField cluster={cluster} />
                         <input type="hidden" name="name" value={n.nodeId} />
