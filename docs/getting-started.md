@@ -13,7 +13,7 @@ automatically — you never install anything on a server by hand.
 | Requirement | Why |
 | ----------- | --- |
 | **Node.js 20+** (24+ recommended) | Runs `npx @agentsystemlabs/launch-pad` |
-| **Docker with Buildx** | `deploy` builds `linux/amd64` images and pushes to ECR. The daemon must be running. |
+| **Docker with Buildx** | `deploy` builds images for the target app node architecture (`linux/arm64` on Graviton, `linux/amd64` on x86) and pushes to ECR. The daemon must be running. |
 | **Git** (recommended) | Clean checkouts get immutable image tags from the commit SHA |
 | **AWS credentials** | Configure via `aws configure`, an AWS profile, or standard env vars (`AWS_ACCESS_KEY_ID`, etc.) |
 
@@ -85,10 +85,10 @@ Every cluster is at least 2 nodes, provisioned automatically by the first deploy
 with only its role's stack (the agent is a self-contained Rust binary — no Node.js on any
 node):
 
-- **Edge** (t3.nano by default): Caddy + the edge agent + CloudWatch/SSM agents. No
+- **Edge** (`t4g.nano` by default): Caddy + the edge agent + CloudWatch/SSM agents. No
   Docker — its only job is routing HTTPS to app nodes, and the slim stack keeps 512 MB
   comfortable. (`t3.micro` or larger also works if you prefer more headroom.)
-- **App** (auto-sized, t3.small floor): Docker + the app agent + CloudWatch/SSM agents.
+- **App** (auto-sized, `t4g.micro` floor for new ARM clusters): Docker + the app agent + CloudWatch/SSM agents.
   No Caddy — app containers are reachable only by the edge over the VPC.
 
 ### DNS (for web services with HTTPS)

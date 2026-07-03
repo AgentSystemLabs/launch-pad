@@ -43,6 +43,22 @@ export const CronRunStatusSchema = z
   })
   .strict();
 
+export const JobRunStateSchema = z.enum(["pending", "running", "succeeded", "failed"]);
+export type JobRunState = z.infer<typeof JobRunStateSchema>;
+
+/** Result rollup for a one-off `launchpad job run` request. */
+export const JobRunStatusSchema = z
+  .object({
+    id: z.string(),
+    requestedAt: z.string(),
+    startedAt: z.string().nullable(),
+    finishedAt: z.string().nullable(),
+    exitCode: z.number().int().nullable(),
+    state: JobRunStateSchema,
+    message: z.string().default(""),
+  })
+  .strict();
+
 /** Per-logical-database result inside a database service's backup rollup. */
 export const DatabaseBackupEntrySchema = z
   .object({
@@ -94,6 +110,8 @@ export const ServiceStatusSchema = z
     cron: CronRunStatusSchema.optional(),
     /** Present only for managed database services with backups enabled. */
     backup: DatabaseBackupStatusSchema.optional(),
+    /** Present only for a transient one-off job run request. */
+    jobRun: JobRunStatusSchema.optional(),
     updatedAt: z.string(),
   })
   .strict();
@@ -151,6 +169,7 @@ export const NodeStatusSchema = z
 
 export type HostSample = z.infer<typeof HostSampleSchema>;
 export type CronRunStatus = z.infer<typeof CronRunStatusSchema>;
+export type JobRunStatus = z.infer<typeof JobRunStatusSchema>;
 export type DatabaseBackupEntry = z.infer<typeof DatabaseBackupEntrySchema>;
 export type DatabaseBackupStatus = z.infer<typeof DatabaseBackupStatusSchema>;
 export type ReplicaStatus = z.infer<typeof ReplicaStatusSchema>;

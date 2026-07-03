@@ -1,5 +1,6 @@
 export * from "./constants";
 export * from "./cron";
+export * from "./architecture";
 export * from "./capacity";
 export * from "./health";
 export * from "./config";

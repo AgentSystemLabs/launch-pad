@@ -127,6 +127,7 @@ export function buildExternalNodeEntry(args: {
     clusterId: args.aws.clusterId,
     instanceId: null,
     instanceType: "external",
+    architecture: "x86_64",
     region: args.aws.region,
     availabilityZone: null,
     role: args.role,
@@ -417,7 +418,14 @@ export async function runInit(opts: InitOptions): Promise<void> {
 
     // (k) upload the role's agent binary and presign its fetch URL.
     spin.text = "uploading agent binary";
-    const presignedUrl = await uploadAndPresignAgent(aws.s3, aws.bucket, aws.clusterId, nodeId, role);
+    const presignedUrl = await uploadAndPresignAgent(
+      aws.s3,
+      aws.bucket,
+      aws.clusterId,
+      nodeId,
+      role,
+      entry.architecture,
+    );
 
     // (l) systemd unit pointing at the EnvironmentFile (so the agent reads agent.env creds).
     const unit = renderSystemdUnit(role, { environmentFile: AGENT_ENV_FILE });
@@ -428,6 +436,7 @@ export async function runInit(opts: InitOptions): Promise<void> {
       agentConfigJson,
       agentBinaryUrl: presignedUrl,
       systemdUnit: unit,
+      architecture: entry.architecture,
       aws: {
         accessKeyId: iam.accessKeyId,
         secretAccessKey: iam.secretAccessKey,

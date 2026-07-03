@@ -42,6 +42,10 @@ pub enum Action {
         fire_ms: i64,
         previous: Vec<ManagedReplica>,
     },
+    JobRun {
+        config: ServiceConfig,
+        previous: Vec<ManagedReplica>,
+    },
     CronSkip {
         config: ServiceConfig,
         fire_ms: i64,
@@ -68,6 +72,7 @@ impl Action {
             Action::Rollout { .. } => "rollout",
             Action::Remove { .. } => "remove",
             Action::CronRun { .. } => "cronRun",
+            Action::JobRun { .. } => "jobRun",
             Action::CronSkip { .. } => "cronSkip",
             Action::BackupRun { .. } => "backupRun",
             Action::Noop { .. } => "noop",
@@ -82,6 +87,7 @@ impl Action {
             | Action::ScaleDown { config, .. }
             | Action::Rollout { config, .. }
             | Action::CronRun { config, .. }
+            | Action::JobRun { config, .. }
             | Action::CronSkip { config, .. }
             | Action::BackupRun { config, .. }
             | Action::Noop { config } => Some(config),
@@ -184,6 +190,39 @@ fn plan_cron_service(
     });
 }
 
+/// Plan one explicit one-off job run. A job run is request-id based, not schedule based:
+/// once a container with the requested id exists (running or exited), the request is
+/// considered dispatched and must not be started again.
+fn plan_job_service(c: &ServiceConfig, have: &[ManagedReplica], actions: &mut Vec<Action>) {
+    let Some(req) = c.job_run.as_ref() else {
+        return;
+    };
+
+    if have
+        .iter()
+        .any(|r| r.job_run_id.as_deref() == Some(req.id.as_str()))
+    {
+        actions.push(Action::Noop { config: c.clone() });
+        return;
+    }
+
+    // No overlap: a still-running previous job owns the container name and any DB
+    // migration lock discipline belongs to the migration tool. Leave this request
+    // pending until the prior run exits.
+    if have
+        .iter()
+        .any(|r| r.job_run_id.is_some() && r.state == "running")
+    {
+        actions.push(Action::Noop { config: c.clone() });
+        return;
+    }
+
+    actions.push(Action::JobRun {
+        config: c.clone(),
+        previous: have.to_vec(),
+    });
+}
+
 /// Plan the backup schedule for a managed database service. Layered ON TOP of the
 /// normal container reconcile (the DB is a long-running worker), so this only ever
 /// APPENDS a `BackupRun` — never the long-running branches. The backup fire anchor
@@ -256,6 +295,11 @@ pub fn plan_reconcile(
         desired_keys.insert(key.clone());
         let empty: Vec<ManagedReplica> = Vec::new();
         let have: &[ManagedReplica] = actual.get(&key).unwrap_or(&empty);
+
+        if c.job_run.is_some() {
+            plan_job_service(c, have, &mut actions);
+            continue;
+        }
 
         if c.cron.is_some() {
             plan_cron_service(c, have, &key, cron, &mut actions);
@@ -353,6 +397,7 @@ pub trait Reconciler {
         host_port: Option<i64>,
         bind_host: &str,
         cron_fire_ms: Option<i64>,
+        job_run_id: Option<&str>,
     ) -> Result<(), String>;
     fn start_container(&mut self, id: &str) -> Result<(), String>;
     fn stop_container(&mut self, name_or_id: &str, grace_seconds: i64) -> Result<(), String>;
@@ -420,7 +465,7 @@ fn apply_one<R: Reconciler>(action: &Action, ctx: &mut R) -> Result<(), String> 
                 None
             };
             let bind = ctx.bind_host(config);
-            ctx.run_container(config, *index, host_port, &bind, None)
+            ctx.run_container(config, *index, host_port, &bind, None, None)
         }
         Action::Rollout { config, replicas } => rollout_service(config, replicas, ctx),
         Action::CronRun {
@@ -440,7 +485,19 @@ fn apply_one<R: Reconciler>(action: &Action, ctx: &mut R) -> Result<(), String> 
             // between the two, the worst case is a skipped run, never a duplicate.
             ctx.record_cron_fire(&key, *fire_ms)?;
             let bind = ctx.bind_host(config);
-            ctx.run_container(config, 0, None, &bind, Some(*fire_ms))
+            ctx.run_container(config, 0, None, &bind, Some(*fire_ms), None)
+        }
+        Action::JobRun { config, previous } => {
+            let req = config
+                .job_run
+                .as_ref()
+                .ok_or_else(|| "job run action missing request".to_string())?;
+            ctx.pull(&config.image)?;
+            for r in previous {
+                ctx.remove_container(&r.id)?;
+            }
+            let bind = ctx.bind_host(config);
+            ctx.run_container(config, 0, None, &bind, None, Some(&req.id))
         }
         Action::CronSkip { config, fire_ms } => {
             // A fire elapsed while a run was still in progress: record it so the
@@ -518,7 +575,7 @@ fn rollout_service<R: Reconciler>(
                 None
             };
             let bind = ctx.bind_host(c);
-            ctx.run_container(c, idx, host_port, &bind, None)?;
+            ctx.run_container(c, idx, host_port, &bind, None, None)?;
 
             if let (Some(hc), Some(host_port)) = (hc, host_port) {
                 let ceiling = rollout_health_ceiling_ms(hc);
@@ -578,7 +635,7 @@ fn rollout_service<R: Reconciler>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Rollout, PROTOCOL_VERSION};
+    use crate::types::{JobRunRequest, Rollout, PROTOCOL_VERSION};
     use std::collections::BTreeMap;
 
     fn svc_n(project: &str, service: &str, image: &str, replicas: i64) -> ServiceConfig {
@@ -603,11 +660,23 @@ mod tests {
             volumes: vec![],
             database: None,
             backup: None,
+            job_run: None,
         }
     }
 
     fn svc(project: &str, service: &str, image: &str) -> ServiceConfig {
         svc_n(project, service, image, 1)
+    }
+
+    fn job_svc(run_id: &str) -> ServiceConfig {
+        ServiceConfig {
+            service: "migrate".into(),
+            job_run: Some(JobRunRequest {
+                id: run_id.into(),
+                requested_at: "2026-07-02T00:00:00.000Z".into(),
+            }),
+            ..svc("blog", "migrate", "img:1")
+        }
     }
 
     fn desired(services: Vec<ServiceConfig>) -> DesiredState {
@@ -643,6 +712,7 @@ mod tests {
             host_port: Some(20000 + index),
             config_stamp: r#"{"env":{},"restartAt":null,"secretRefs":[]}"#.into(),
             cron_fire_ms: None,
+            job_run_id: None,
             exit_code: if state == "exited" { Some(0) } else { None },
         }
     }
@@ -662,6 +732,17 @@ mod tests {
             cron_fire_ms: Some(fire_ms),
             exit_code,
             ..rep(project, service, 0, "img:1", state)
+        }
+    }
+
+    fn job_rep(run_id: &str, state: &str, exit_code: Option<i64>) -> ManagedReplica {
+        ManagedReplica {
+            service: "migrate".into(),
+            name: "launchpad_blog_migrate_0".into(),
+            job_run_id: Some(run_id.into()),
+            host_port: None,
+            exit_code,
+            ..rep("blog", "migrate", 0, "img:1", state)
         }
     }
 
@@ -1078,6 +1159,38 @@ mod tests {
         assert!(ctx.errors.is_empty());
     }
 
+    // ── one-off job planning ─────────────────────────────────────────────────────
+
+    #[test]
+    fn plans_a_one_off_job_run_for_a_new_request_id() {
+        let actions = plan_reconcile(
+            &desired(vec![job_svc("run-1")]),
+            &actual_map(vec![]),
+            None,
+        );
+        assert_eq!(types_for(&actions, "blog", "migrate"), vec!["jobRun"]);
+    }
+
+    #[test]
+    fn does_not_rerun_a_completed_one_off_job_request() {
+        let actions = plan_reconcile(
+            &desired(vec![job_svc("run-1")]),
+            &actual_map(vec![job_rep("run-1", "exited", Some(0))]),
+            None,
+        );
+        assert_eq!(types_for(&actions, "blog", "migrate"), vec!["noop"]);
+    }
+
+    #[test]
+    fn suppresses_overlapping_one_off_job_runs() {
+        let actions = plan_reconcile(
+            &desired(vec![job_svc("run-2")]),
+            &actual_map(vec![job_rep("run-1", "running", None)]),
+            None,
+        );
+        assert_eq!(types_for(&actions, "blog", "migrate"), vec!["noop"]);
+    }
+
     // ── imperative apply / rollout ──
 
     use crate::types::{HealthCheck, Ingress};
@@ -1124,9 +1237,10 @@ mod tests {
             host_port: Option<i64>,
             bind_host: &str,
             cron_fire_ms: Option<i64>,
+            job_run_id: Option<&str>,
         ) -> Result<(), String> {
             self.events.push(format!(
-                "run {}/{} idx={index} port={host_port:?} bind={bind_host} fire={cron_fire_ms:?}",
+                "run {}/{} idx={index} port={host_port:?} bind={bind_host} fire={cron_fire_ms:?} job={job_run_id:?}",
                 config.project, config.service
             ));
             Ok(())
@@ -1229,7 +1343,7 @@ mod tests {
             vec![
                 "pull img:2".to_string(),
                 "allocate blog/api#1=20001".to_string(),
-                "run blog/api idx=1 port=Some(20001) bind=127.0.0.1 fire=None".to_string(),
+                "run blog/api idx=1 port=Some(20001) bind=127.0.0.1 fire=None job=None".to_string(),
                 "wait_healthy hp=20001".to_string(),
                 // new replica is in the LB BEFORE the old one is touched
                 "refresh_routing exclude=[]".to_string(),
@@ -1299,7 +1413,7 @@ mod tests {
             vec![
                 "pull img:2".to_string(),
                 "allocate blog/api#1=20001".to_string(),
-                "run blog/api idx=1 port=Some(20001) bind=127.0.0.1 fire=None".to_string(),
+                "run blog/api idx=1 port=Some(20001) bind=127.0.0.1 fire=None job=None".to_string(),
                 "wait_healthy hp=20001".to_string(),
                 "stop launchpad_blog_api_1 grace=30".to_string(),
                 "release blog/api#1".to_string(),
@@ -1361,7 +1475,7 @@ mod tests {
                 "pull img:1".to_string(),
                 "remove id-job-0".to_string(),
                 format!("record_fire blog/job@{fire}"),
-                format!("run blog/job idx=0 port=None bind=127.0.0.1 fire=Some({fire})"),
+                format!("run blog/job idx=0 port=None bind=127.0.0.1 fire=Some({fire}) job=None"),
             ]
         );
         assert!(ctx.errors.is_empty());

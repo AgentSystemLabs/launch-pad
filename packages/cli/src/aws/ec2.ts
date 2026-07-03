@@ -33,6 +33,7 @@ import {
   type NodeRole,
   nodeResourceTags,
   nodeUsesElasticIp,
+  parseAwsInstanceArchitecture,
   rawToCapacity,
 } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
@@ -44,6 +45,7 @@ import { ensureEc2ResourceTags, ensureSecurityGroupTags } from "./tags";
 // bound the retry loops that absorb that window. Tuned per-operation because the
 // inconsistency windows differ.
 const MAX_CONSISTENCY_RETRIES = 6;
+const MAX_SECURITY_GROUP_DELETE_RETRIES = 60;
 /** Backoff after RunInstances rejects a not-yet-visible fresh instance profile. */
 const RUN_INSTANCE_RETRY_MS = 2500;
 /** Backoff while a terminated instance's ENI still pins its security group. */
@@ -80,8 +82,9 @@ export async function describeInstanceTypeCapacity(
     const info = res.InstanceTypes?.[0];
     const vcpu = info?.VCpuInfo?.DefaultVCpus;
     const memoryMiB = info?.MemoryInfo?.SizeInMiB;
-    if (vcpu == null || memoryMiB == null) return null;
-    return rawToCapacity({ vcpu, memoryMiB });
+    const architecture = parseAwsInstanceArchitecture(info?.ProcessorInfo?.SupportedArchitectures);
+    if (vcpu == null || memoryMiB == null || architecture == null) return null;
+    return rawToCapacity({ vcpu, memoryMiB, architecture });
   } catch {
     return null;
   }
@@ -367,7 +370,7 @@ export async function deleteSecurityGroup(ec2: EC2Client, groupId: string): Prom
     } catch (error) {
       if (isEc2SecurityGroupNotFound(error)) return;
       // The instance's network interface can linger briefly after termination.
-      if (awsErrorName(error) === "DependencyViolation" && attempt < MAX_CONSISTENCY_RETRIES) {
+      if (awsErrorName(error) === "DependencyViolation" && attempt < MAX_SECURITY_GROUP_DELETE_RETRIES) {
         await sleep(SECURITY_GROUP_RETRY_MS);
         continue;
       }

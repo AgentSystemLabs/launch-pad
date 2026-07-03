@@ -137,10 +137,10 @@ async function runLogs(service: string, opts: LogsOptions): Promise<void> {
   }
   const { config } = loadConfig();
 
-  const decl = config.service.find((s) => s.name === service);
-  if (!decl) {
+  const available = [...config.service.map((s) => s.name), ...(config.job ?? []).map((j) => j.name)];
+  if (!available.includes(service)) {
     throw new CliError(`no service named "${service}" in launch-pad.toml`, {
-      hint: `available: ${config.service.map((s) => s.name).join(", ")}`,
+      hint: `available: ${available.join(", ")}`,
     });
   }
 

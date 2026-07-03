@@ -1,6 +1,10 @@
 import { DescribeImagesCommand, type EC2Client } from "@aws-sdk/client-ec2";
 import type { SSMClient } from "@aws-sdk/client-ssm";
-import type { NodeAgentType, ProvisionNodeRole } from "@agentsystemlabs/launch-pad-shared";
+import type {
+  NodeAgentType,
+  NodeArchitecture,
+  ProvisionNodeRole,
+} from "@agentsystemlabs/launch-pad-shared";
 import { resolveLatestAl2023Ami } from "../aws/ssm";
 import { CliError } from "../errors";
 import rawManifest from "./golden-ami-manifest.json";
@@ -11,7 +15,7 @@ export type AmiSource = "explicit" | "env" | "golden" | "al2023";
 export interface GoldenAmiEntry {
   amiId: string;
   region: string;
-  architecture: "x86_64";
+  architecture: NodeArchitecture;
   /** Which node role this AMI is baked for (edge: Caddy, no Docker; app: Docker, no Caddy). */
   role: ProvisionNodeRole;
   agentType: NodeAgentType;
@@ -27,11 +31,22 @@ export interface GoldenAmiEntry {
  * Node.js) and `amis.app[region]` (Docker + app agent, no Caddy or Node.js). The CLI
  * picks the right one automatically from the node's role; users never choose unless
  * they opt in with `--ami`.
+ *
+ * v3 adds architecture beneath each role:
+ * `amis.edge.arm64[region]` / `amis.app.x86_64[region]`.
  */
-export interface GoldenAmiManifest {
+export type GoldenAmiManifest = GoldenAmiManifestV2 | GoldenAmiManifestV3;
+
+export interface GoldenAmiManifestV2 {
   schemaVersion: 2;
   defaultAgentType: NodeAgentType;
   amis: Record<ProvisionNodeRole, Record<string, GoldenAmiEntry>>;
+}
+
+export interface GoldenAmiManifestV3 {
+  schemaVersion: 3;
+  defaultAgentType: NodeAgentType;
+  amis: Record<ProvisionNodeRole, Record<NodeArchitecture, Record<string, GoldenAmiEntry>>>;
 }
 
 export interface ResolvedNodeAmi {
@@ -47,6 +62,7 @@ export interface ResolveNodeAmiParams {
   region: string;
   /** The node role being provisioned — selects the role-specific golden AMI. */
   role: ProvisionNodeRole;
+  architecture: NodeArchitecture;
   explicitAmiId?: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -79,11 +95,25 @@ async function canDescribeAmi(ec2: EC2Client, amiId: string): Promise<boolean> {
   }
 }
 
+function lookupManifestEntry(
+  amiManifest: GoldenAmiManifest,
+  role: ProvisionNodeRole,
+  architecture: NodeArchitecture,
+  region: string,
+): GoldenAmiEntry | undefined {
+  if (amiManifest.schemaVersion === 3) {
+    return amiManifest.amis[role]?.[architecture]?.[region];
+  }
+  const legacy = amiManifest.amis[role]?.[region];
+  if (!legacy) return undefined;
+  return legacy.architecture === architecture ? legacy : undefined;
+}
+
 /**
  * Resolve the AMI for a node by role + region, in precedence order:
  * `--ami` flag → `LAUNCHPAD_AMI_ID` env (applies to BOTH roles — set
  * `LAUNCHPAD_AMI_BOOTSTRAP=full` if it's not a launchpad golden image) →
- * the role's golden manifest entry (verified available) → latest AL2023 with a
+ * the role+architecture golden manifest entry (verified available) → latest AL2023 with a
  * role-appropriate full bootstrap.
  */
 export async function resolveNodeAmi(
@@ -109,7 +139,7 @@ export async function resolveNodeAmi(
     };
   }
 
-  const entry = amiManifest.amis[params.role]?.[params.region];
+  const entry = lookupManifestEntry(amiManifest, params.role, params.architecture, params.region);
   if (entry && (await canDescribeAmi(params.ec2, entry.amiId))) {
     return {
       imageId: entry.amiId,
@@ -120,24 +150,38 @@ export async function resolveNodeAmi(
   }
 
   return {
-    imageId: await resolveLatestAl2023Ami(params.ssm),
+    imageId: await resolveLatestAl2023Ami(params.ssm, params.architecture),
     source: "al2023",
     bootstrapMode: "full",
   };
 }
 
+export type AmiLookupKey = `${ProvisionNodeRole}:${NodeArchitecture}`;
+export interface ResolveNodeAmiSpec {
+  role: ProvisionNodeRole;
+  architecture: NodeArchitecture;
+}
+
+export function nodeAmiLookupKey(spec: ResolveNodeAmiSpec): AmiLookupKey {
+  return `${spec.role}:${spec.architecture}`;
+}
+
 /**
- * Resolve the AMI for each role in `roles` (a mixed provisioning batch needs one per
- * role — the edge and app golden AMIs are different images).
+ * Resolve the AMI for each role+architecture pair in `specs` (a mixed provisioning
+ * batch may need edge/app and x86/ARM images).
  */
 export async function resolveNodeAmiByRole(
-  params: Omit<ResolveNodeAmiParams, "role">,
-  roles: Iterable<ProvisionNodeRole>,
+  params: Omit<ResolveNodeAmiParams, "role" | "architecture">,
+  specs: Iterable<ResolveNodeAmiSpec>,
   amiManifest: GoldenAmiManifest = manifest,
-): Promise<Map<ProvisionNodeRole, ResolvedNodeAmi>> {
-  const out = new Map<ProvisionNodeRole, ResolvedNodeAmi>();
-  for (const role of new Set(roles)) {
-    out.set(role, await resolveNodeAmi({ ...params, role }, amiManifest));
+): Promise<Map<AmiLookupKey, ResolvedNodeAmi>> {
+  const out = new Map<AmiLookupKey, ResolvedNodeAmi>();
+  const seen = new Set<AmiLookupKey>();
+  for (const spec of specs) {
+    const key = nodeAmiLookupKey(spec);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.set(key, await resolveNodeAmi({ ...params, ...spec }, amiManifest));
   }
   return out;
 }

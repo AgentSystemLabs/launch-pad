@@ -8,7 +8,7 @@ npx @agentsystemlabs/launch-pad <command>
 ```
 
 Commands: [`init`](#init) · [`doctor`](#doctor) · [`deploy`](#deploy) · [`destroy`](#destroy) ·
-[`scale`](#scale) · [`config`](#config) · [`status`](#status) · [`logs`](#logs) ·
+[`scale`](#scale) · [`config`](#config) · [`status`](#status) · [`logs`](#logs) · [`job`](#job) ·
 [`secret`](#secret) · [`dns`](#dns) · [`node`](#node) · [`project`](#project) · [`cluster`](#cluster)
 
 ## Global options
@@ -206,7 +206,7 @@ before publishing, and waits for the agent to report convergence.
 Placement is **automatic**: the scheduler bin-packs services across the cluster's app nodes
 by free CPU/memory, and every web domain routes through the cluster's **dedicated edge node**
 (every cluster is at least 2 nodes — the edge + ≥1 app node). Deploy handles the node-pool
-gaps itself: it **bootstraps an empty cluster** (the `edge-1` edge, default `t3.nano`, plus
+gaps itself: it **bootstraps an empty cluster** (the `edge-1` edge, default `t4g.nano`, plus
 a first auto-sized app node) and **auto-adds app nodes** (generated `<noun>-<verb>-<adverb>`
 names) when the current pool can't
 fit the deploy (e.g. after a replica scale-up) — both spend-gated like any provision, and
@@ -278,9 +278,12 @@ back to — this is why `destroy` deliberately leaves images in place.
 CI runners (or laptops) with no docker daemon. Per service, deploy packs the build context into
 a tarball, uploads it under the footprint's `builds/` prefix in the state bucket, and runs one
 build in a per-cluster CodeBuild project (`launch-pad-build-<cluster>`) that produces the
-**same immutable, content-addressed linux/amd64 tag** the local buildx path would. Everything
+**same immutable, content-addressed architecture-matched tag** the local buildx path would
+(`linux/arm64` on Graviton, `linux/amd64` on x86). Everything
 after the build — merge, publish, convergence watch — is identical, and an image already in ECR
 skips its build the same way.
+ARM builds run on CodeBuild's ARM container environment so Dockerfile `RUN` steps execute
+natively instead of trying to emulate the target platform.
 
 The tarball honors `.dockerignore` for what gets **uploaded**: literal paths, root-level globs
 (`*.pem`, `.env*`), and any-depth `**/`-prefixed patterns are excluded from the upload — so the
@@ -513,6 +516,41 @@ launchpad logs <service> [options]
 
 ---
 
+## `job`
+
+Run a top-level `[[job]]` from `launch-pad.toml` exactly once. Jobs are ignored by normal
+`deploy`; they are intended for migration tasks, data backfills, and other CI-gated one-off
+work.
+
+```bash
+launchpad job run migrate --wait --yes
+```
+
+| Flag | Description |
+| ---- | ----------- |
+| `--env <name>` | Run against a named environment footprint |
+| `--no-wait` | Publish the run request and return without waiting for exit |
+| `--timeout <seconds>` | How long `--wait` waits for completion (default `300`) |
+| `--yes` | Reserved for CI symmetry with deploy/provisioning commands |
+| `--remote-build` | Reserved; job runs currently require local Docker buildx |
+
+`job run` builds and pushes the job image, finds the already-deployed footprint node (preferring
+the sticky managed-database node when one exists), writes a transient run request into that
+node's `desired.json`, and waits for the agent to report the matching run id in `status.json`.
+The agent starts one `--restart no` container and records the exit code. A second run of the
+same job will not overlap a still-running prior run.
+
+For database migrations, deploy the database first so the job has a node and service DNS target,
+then gate the API deploy on migration success:
+
+```bash
+launchpad deploy --service primary --yes
+launchpad job run migrate --wait --yes
+launchpad deploy --service api --yes
+```
+
+---
+
 ## `secret`
 
 Store sensitive values in **SSM Parameter Store** (SecureString). Key names are registered
@@ -530,7 +568,7 @@ cat .env.prod | launchpad secret import - --service api     # from stdin
 
 | Flag | Description |
 | ---- | ----------- |
-| `--service <name>` | Service from `launch-pad.toml` (`set` / `rm` / `import` require this) |
+| `--service <name>` | Service or job from `launch-pad.toml` (`set` / `rm` / `import` require this) |
 | `--env <name>` | Same footprint as `deploy --env` |
 | `--no-register` | SSM only — do not add/remove the key in `launch-pad.toml` |
 | `--value <value>` | (`set`) value inline (prefer the hidden prompt or stdin in scripts) |
@@ -721,7 +759,8 @@ One reconcile pass: read the policy, observe the live pool (registry + each node
 ask the pure planner for at most **one** action, apply it, record `lastScaleAt`, exit.
 
 - **Scale out** — provisions a new app node with a generated name (sized like the largest node already
-  in the pool, floor `t3.small`; always role `app` behind the cluster's edge) and
+  in the pool, defaulting to `t4g.micro` for an empty ARM pool and inheriting an existing
+  x86 pool's architecture; always role `app` behind the cluster's edge) and
   rebalances the project's services onto the new pool. Triggered by the
   `minNodes` floor (which bypasses the cooldown) or by average utilization ≥ the
   scale-out threshold (never past `maxNodes`).
@@ -975,7 +1014,7 @@ unique within the cluster) is used, so you never have to invent node names.
 
 | Flag | Description |
 | ---- | ----------- |
-| `--instance-type <type>` | EC2 instance type (default `t3.small`) |
+| `--instance-type <type>` | EC2 instance type (default `t4g.micro`) |
 | `--role <role>` | `app` or `edge` (default `app`) |
 | `--edge <nodeId>` | For an `app` node: pin a specific edge (defaults to the cluster's edge) |
 | `--key-name <keypair>` | EC2 key pair for SSH (omit to disable SSH) |
@@ -1115,6 +1154,8 @@ Change a node's EC2 instance type. EC2 can only retype a **stopped** instance, s
 resize is stop → modify → start — the node's services are briefly down during the swap. A
 paused node stays paused at the new size; shrinking is blocked when the node's scheduled
 services (plus rollout surge) no longer fit; an edge node's Elastic IP survives the cycle.
+Cross-architecture resize is refused up front (`t3.*` ↔ `t4g.*`): add a node of the target
+architecture, rebalance/evacuate onto it, then destroy the old node instead.
 
 `--evacuate` makes it **non-disruptive** for the current project's services
 (run from the project directory): it drains them onto the rest of the app pool (=
@@ -1135,8 +1176,8 @@ brief stop/start, and resizing the **edge** node still blips ingress while Caddy
 | `--yes` | Skip confirmation |
 
 ```bash
-launchpad node resize node-prod-1 --instance-type t3.large                  # brief downtime
-launchpad node resize node-prod-1 --instance-type t3.large --evacuate --yes # rolling, no downtime
+launchpad node resize node-prod-1 --instance-type t4g.large                  # brief downtime
+launchpad node resize node-prod-1 --instance-type t4g.large --evacuate --yes # rolling, no downtime
 ```
 
 ### `node upgrade-agent [name]`

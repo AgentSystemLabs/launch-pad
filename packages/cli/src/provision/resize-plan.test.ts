@@ -7,6 +7,7 @@ const base: NodeRegistryEntry = {
   clusterId: "default",
   instanceId: "i-abc",
   instanceType: "t3.small",
+  architecture: "x86_64",
   region: "us-east-1",
   availabilityZone: "us-east-1a",
   role: "edge",
@@ -31,7 +32,7 @@ const base: NodeRegistryEntry = {
 };
 
 // t3.large
-const capacity: InstanceCapacity = { totalCpu: 2048, totalMemory: 8192 };
+const capacity: InstanceCapacity = { totalCpu: 2048, totalMemory: 8192, architecture: "x86_64" };
 const newNet: ResizeNetwork = {
   publicIp: "9.9.9.9",
   privateIp: "10.0.0.2",
@@ -42,6 +43,7 @@ describe("planResizedEntry", () => {
   it("always updates instanceType and capacity", () => {
     const out = planResizedEntry({ node: base, instanceType: "t3.large", capacity, restarted: true, network: newNet });
     expect(out.instanceType).toBe("t3.large");
+    expect(out.architecture).toBe("x86_64");
     expect(out.totalCpu).toBe(2048);
     expect(out.totalMemory).toBe(8192);
   });

@@ -148,7 +148,7 @@ describe("schema integration", () => {
 
   it("parses secretRefs in desired.json with defaults", () => {
     const state = parseDesiredState({
-      version: 2,
+      version: 3,
       nodeId: "n1",
       updatedAt: "now",
       services: [

@@ -6,7 +6,9 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   nodePrefix,
   type NodeAgentType,
+  type NodeArchitecture,
   type ProvisionNodeRole,
+  distDirForArchitecture,
 } from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 
@@ -30,11 +32,11 @@ export function agentBinaryKey(clusterId: string, nodeId: string): string {
 }
 
 /**
- * Locate the prebuilt linux/amd64 agent binary for a role inside the
- * `@agentsystemlabs/launch-pad-agent` package (`dist/agent-edge` / `dist/agent-app`,
- * produced by `pnpm build:agent` via cargo-zigbuild).
+ * Locate the prebuilt linux agent binary for a role + architecture inside the
+ * `@agentsystemlabs/launch-pad-agent` package (`dist/<arch>/agent-edge` /
+ * `dist/<arch>/agent-app`, produced by `pnpm build:agent` via cargo-zigbuild).
  */
-export function resolveAgentBinaryPath(role: ProvisionNodeRole): string {
+export function resolveAgentBinaryPath(role: ProvisionNodeRole, architecture: NodeArchitecture): string {
   const require = createRequire(import.meta.url);
   let packageJson: string;
   try {
@@ -44,11 +46,11 @@ export function resolveAgentBinaryPath(role: ProvisionNodeRole): string {
       hint: "install workspace dependencies first (`pnpm install`)",
     });
   }
-  const binary = join(dirname(packageJson), "dist", `agent-${role}`);
+  const binary = join(dirname(packageJson), "dist", distDirForArchitecture(architecture), `agent-${role}`);
   try {
     readFileSync(binary, { flag: "r" }).byteLength;
   } catch {
-    throw new CliError(`agent binary for role "${role}" is missing (${binary})`, {
+    throw new CliError(`agent binary for role "${role}" (${architecture}) is missing (${binary})`, {
       hint: "build the linux agent binaries first (`pnpm build:agent` — requires the Rust toolchain + cargo-zigbuild)",
     });
   }
@@ -62,8 +64,9 @@ export async function uploadAgentBinary(
   clusterId: string,
   nodeId: string,
   role: ProvisionNodeRole,
+  architecture: NodeArchitecture,
 ): Promise<void> {
-  const body = readFileSync(resolveAgentBinaryPath(role));
+  const body = readFileSync(resolveAgentBinaryPath(role, architecture));
   await s3.send(
     new PutObjectCommand({
       Bucket: bucket,
@@ -94,8 +97,9 @@ export async function uploadAndPresignAgent(
   clusterId: string,
   nodeId: string,
   role: ProvisionNodeRole,
+  architecture: NodeArchitecture,
   expiresInSeconds = 3600,
 ): Promise<string> {
-  await uploadAgentBinary(s3, bucket, clusterId, nodeId, role);
+  await uploadAgentBinary(s3, bucket, clusterId, nodeId, role, architecture);
   return presignAgentBinary(s3, bucket, clusterId, nodeId, expiresInSeconds);
 }

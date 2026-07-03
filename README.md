@@ -32,11 +32,11 @@ platform**. Instead of depending on a third-party service like Heroku, Render, o
 - **You own everything.** Every resource — EC2, S3, ECR, IAM — lives in your AWS account,
   tagged and inspectable. There is no vendor server in the loop and nothing to get locked
   into; it's just Docker + Caddy + systemd on machines you control.
-- **You pay cloud prices, not platform markup.** A side project runs on a `t3.small` app
-  node plus a `t3.nano` edge; `node pause` / `cluster pause` stop idle environments so you
+- **You pay cloud prices, not platform markup.** A side project starts on Graviton by default:
+  a `t4g.micro` app node plus a `t4g.nano` edge; `node pause` / `cluster pause` stop idle environments so you
   stop paying.
 - **It scales down to two boxes and up to a small fleet** — a tiny dedicated edge router
-  (t3.nano) fronting private app nodes with replicas and rolling deploys.
+  (`t4g.nano` by default) fronting private app nodes with replicas and rolling deploys.
 
 AWS is the supported target today; the architecture (state in object storage, a reconciling
 agent per VM) is deliberately portable to other major clouds.
@@ -75,7 +75,7 @@ Full prerequisites (Docker, AWS credentials, DNS) and a guided first deploy:
 | [docs/happy-path.md](docs/happy-path.md) | The indie-hacker happy path end-to-end: AWS → first deploy + HTTPS → scale/secrets/rollback → grow to a cluster → tear down safely |
 | [docs/getting-started.md](docs/getting-started.md) | Prerequisites, AWS permissions, DNS, first deploy |
 | [docs/configuration.md](docs/configuration.md) | The `launch-pad.toml` schema — services, placement, health checks, rollouts, secrets, environments, config lock |
-| [docs/cli.md](docs/cli.md) | Complete CLI reference: `init` · `doctor` · `setup` · `deploy` · `destroy` · `rollback` · `rebalance` · `scale` · `config` · `status` · `history` · `logs` · `secret` · `dns` · `node` · `project` · `cluster` · `backup` / `restore` · `cost` |
+| [docs/cli.md](docs/cli.md) | Complete CLI reference: `init` · `doctor` · `setup` · `deploy` · `job` · `destroy` · `rollback` · `rebalance` · `scale` · `config` · `status` · `history` · `logs` · `secret` · `dns` · `node` · `project` · `cluster` · `backup` / `restore` · `cost` |
 | [docs/architecture.md](docs/architecture.md) | How it works: the S3 contract, node roles, edge routing, capacity, invariants |
 | [docs/agent.md](docs/agent.md) | The node reconciler (Rust; edge + app binaries) |
 | [docs/golden-ami.md](docs/golden-ami.md) | The Packer-built golden AMI and node provisioning/bootstrap |

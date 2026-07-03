@@ -12,10 +12,14 @@ variable "region" {
   default = "us-east-1"
 }
 
-# Prebuilt linux/amd64 EDGE agent binary (scripts/build-agent-binaries.sh →
-# packages/agent-rust/dist/agent-edge).
+# Prebuilt linux EDGE agent binary for var.architecture.
 variable "agent_binary_path" {
   type = string
+}
+
+variable "architecture" {
+  type    = string
+  default = "x86_64"
 }
 
 variable "agent_version" {
@@ -29,17 +33,19 @@ variable "ami_name_prefix" {
 }
 
 locals {
-  build_time = formatdate("YYYYMMDD-hhmmss", timestamp())
-  ami_name   = "${var.ami_name_prefix}-${var.agent_version}-${local.build_time}"
+  build_time            = formatdate("YYYYMMDD-hhmmss", timestamp())
+  ami_name              = "${var.ami_name_prefix}-${var.architecture}-${var.agent_version}-${local.build_time}"
+  builder_instance_type = var.architecture == "arm64" ? "t4g.small" : "t3.small"
+  caddy_arch            = var.architecture == "arm64" ? "arm64" : "amd64"
 }
 
 # EDGE golden AMI: Caddy + CloudWatch Agent + the Rust edge agent. Deliberately NO
 # Docker and NO Node.js — an edge node's only job is S3 upstream shards → Caddy, and
-# the slimmer footprint keeps a t3.nano comfortable (the standard AL2023 base is
+# the slimmer footprint keeps a t4g.nano comfortable (the standard AL2023 base is
 # kept over "minimal" because it ships the SSM agent `node upgrade-agent` depends on).
 source "amazon-ebs" "launch_pad_golden_edge" {
   region          = var.region
-  instance_type   = "t3.small"
+  instance_type   = local.builder_instance_type
   ssh_username    = "ec2-user"
   ami_name        = local.ami_name
   # Public on purpose: the AMI ids are committed to the CLI's manifest and launched
@@ -56,10 +62,10 @@ source "amazon-ebs" "launch_pad_golden_edge" {
 
   source_ami_filter {
     filters = {
-      name                = "al2023-ami-*-kernel-*-x86_64"
+      name                = "al2023-ami-*-kernel-*-${var.architecture}"
       root-device-type    = "ebs"
       virtualization-type = "hvm"
-      architecture        = "x86_64"
+      architecture        = var.architecture
     }
     owners      = ["amazon"]
     most_recent = true
@@ -72,6 +78,7 @@ source "amazon-ebs" "launch_pad_golden_edge" {
     LaunchPadRole = "edge"
     AgentType     = "rust"
     AgentVersion  = var.agent_version
+    Architecture  = var.architecture
   }
 }
 
@@ -89,7 +96,7 @@ build {
       "set -euxo pipefail",
       "sudo mkdir -p /etc/launch-pad /var/lib/launch-pad /opt/launch-pad /var/log/launch-pad",
       "sudo dnf install -y amazon-cloudwatch-agent",
-      "curl -fsSL 'https://caddyserver.com/api/download?os=linux&arch=amd64' -o /tmp/caddy",
+      "curl -fsSL 'https://caddyserver.com/api/download?os=linux&arch=${local.caddy_arch}' -o /tmp/caddy",
       "sudo install -m 755 /tmp/caddy /usr/local/bin/caddy",
       "sudo install -m 755 /tmp/launchpad-agent /opt/launch-pad/agent",
       "sudo dnf clean all",
@@ -115,7 +122,7 @@ build {
       role          = "edge"
       agent_type    = "rust"
       agent_version = var.agent_version
-      architecture  = "x86_64"
+      architecture  = var.architecture
     }
   }
 }

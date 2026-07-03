@@ -1,11 +1,12 @@
 /**
- * launchpad real-AWS regression for empty-cluster bootstrap — deploying a
+ * launchpad real-AWS regression for ARM/T4G empty-cluster bootstrap — deploying a
  * cluster-auto-placed service to a brand-new cluster that has NO nodes yet.
  *
  * Auto-placement on a fresh named cluster has no app pool, so the first deploy must
- * bootstrap the minimum topology itself: the dedicated edge node ("edge-1", Caddy only)
- * plus one app node ("app-1") behind it, then place onto app-1. Worker-only (no
- * domain/cert/DNS) so it's fast, but it DOES build + deploy (needs Docker).
+ * bootstrap the minimum Graviton topology itself: the dedicated edge node ("edge-1",
+ * Caddy only) plus one generated app node behind it, then build/deploy the worker as
+ * linux/arm64. Worker-only (no domain/cert/DNS) so it's fast, but it DOES build +
+ * deploy via `--remote-build` (no local Docker daemon required).
  *
  * Run with:  LAUNCHPAD_E2E=1 [AWS_PROFILE=…] pnpm e2e:empty-cluster   (`--keep` skips teardown)
  */
@@ -14,7 +15,7 @@ import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
-import { type Cli, makeCli, repoRoot } from "./cli";
+import { type Cli, listAppNodeIds, makeCli, repoRoot } from "./cli";
 import { assert, assertEquals, note, printSummary, step } from "./report";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -22,7 +23,7 @@ const DEPLOY_TIMEOUT_S = "600";
 const GIT_ID = ["-c", "user.email=e2e@launch-pad.test", "-c", "user.name=launchpad e2e"];
 
 interface NodeShow {
-  node: { nodeId: string; role: string; state: string };
+  node: { nodeId: string; role: string; state: string; instanceType: string; architecture: string };
   status: {
     services: Array<{ service: string; replicas?: Array<{ containerId: string | null; state: string }> }>;
   } | null;
@@ -91,17 +92,16 @@ async function main(): Promise<boolean> {
   const keep = process.argv.includes("--keep") || process.env.LAUNCHPAD_E2E_KEEP === "1";
   const region = process.env.LAUNCHPAD_E2E_REGION ?? "us-east-1";
   const runId = randomBytes(3).toString("hex");
-  const cluster = `e2e-empty-${runId}`;
+  const cluster = `e2e-arm-${runId}`;
   const project = "empty";
   const service = "worker";
   const bootstrapEdge = "edge-1"; // deploy's empty-cluster bootstrap edge (Caddy only)
-  const bootstrapNode = "app-1";  // …and the first app node behind it
 
   const home = mkdtempSync(join(tmpdir(), "launch-pad-home-"));
   const cli = makeCli({ home, region });
   const dir = prepareClusterWorkerFixture({ project, service });
 
-  note(`run ${runId} · cluster ${cluster} · region ${region} · auto-placed worker, NO node create`);
+  note(`run ${runId} · cluster ${cluster} · region ${region} · ARM/T4G auto-placed worker, NO node create`);
   note(`isolated LAUNCHPAD_HOME=${home}`);
 
   await execa("git", ["init", "-q"], { cwd: dir });
@@ -139,15 +139,28 @@ async function main(): Promise<boolean> {
       assert(/no app nodes/i.test(res.stderr), "the refusal explains the cluster has no app nodes");
     });
 
-    await step("deploy auto-bootstraps edge-1 + app-1 and runs the worker", async () => {
-      await cli.run(["deploy", "--cluster", cluster, "--yes", "--timeout", DEPLOY_TIMEOUT_S], { cwd: dir });
+    let appNode = "";
+    await step("deploy auto-bootstraps a t4g edge + app node and runs the worker", async () => {
+      await cli.run(["deploy", "--cluster", cluster, "--yes", "--remote-build", "--timeout", DEPLOY_TIMEOUT_S], {
+        cwd: dir,
+      });
       const edge = await cli.json<NodeShow>(["node", "show", bootstrapEdge, "--cluster", cluster]);
       assertEquals(edge.node.nodeId, bootstrapEdge, `deploy auto-created the cluster edge "${bootstrapEdge}"`);
       assertEquals(edge.node.role, "edge", "the bootstrap edge node has role `edge`");
-      const show = await cli.json<NodeShow>(["node", "show", bootstrapNode, "--cluster", cluster]);
-      assertEquals(show.node.nodeId, bootstrapNode, `deploy auto-created the bootstrap app node "${bootstrapNode}"`);
+      assertEquals(edge.node.instanceType, "t4g.nano", "the bootstrap edge uses the t4g.nano default");
+      assertEquals(edge.node.architecture, "arm64", "the bootstrap edge is arm64");
+      assert(edge.status !== null, "the edge agent published status");
+
+      const appNodes = await listAppNodeIds(cli, cluster);
+      assertEquals(appNodes.length, 1, "deploy auto-created exactly one bootstrap app node");
+      appNode = appNodes[0] as string;
+      const show = await cli.json<NodeShow>(["node", "show", appNode, "--cluster", cluster]);
+      assertEquals(show.node.nodeId, appNode, `deploy auto-created bootstrap app node "${appNode}"`);
       assertEquals(show.node.role, "app", "the bootstrap app node has role `app`");
-      const ids = await retry(() => runningIds(cli, bootstrapNode, cluster, service), {
+      assertEquals(show.node.instanceType, "t4g.micro", "the bootstrap app node uses the t4g.micro floor");
+      assertEquals(show.node.architecture, "arm64", "the bootstrap app node is arm64");
+      assert(show.status !== null, "the app agent published status");
+      const ids = await retry(() => runningIds(cli, appNode, cluster, service), {
         tries: 18,
         delayMs: 10_000,
         until: (r) => r.length === 1,
@@ -156,9 +169,11 @@ async function main(): Promise<boolean> {
     });
 
     await step("a second deploy is idempotent — no new node, same placement", async () => {
-      const before = await runningIds(cli, bootstrapNode, cluster, service);
-      await cli.run(["deploy", "--cluster", cluster, "--yes", "--timeout", DEPLOY_TIMEOUT_S], { cwd: dir });
-      const after = await runningIds(cli, bootstrapNode, cluster, service);
+      const before = await runningIds(cli, appNode, cluster, service);
+      await cli.run(["deploy", "--cluster", cluster, "--yes", "--remote-build", "--timeout", DEPLOY_TIMEOUT_S], {
+        cwd: dir,
+      });
+      const after = await runningIds(cli, appNode, cluster, service);
       assertEquals(after.join(","), before.join(","), "container ids unchanged after a same-version re-deploy (no re-bootstrap)");
     });
   } finally {

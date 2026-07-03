@@ -12,7 +12,8 @@ use crate::cron::{next_cron_fire, parse_cron_expression};
 use crate::docker::ManagedReplica;
 use crate::types::{
     service_key, CaddyStatus, CronRunStatus, DatabaseBackupStatus, DesiredState, HostSample,
-    NodeStatus, ReplicaStatus, ServiceConfig, ServiceState, ServiceStatus,
+    JobRunState, JobRunStatus, NodeStatus, ReplicaStatus, ServiceConfig, ServiceState,
+    ServiceStatus,
 };
 
 /// A Caddy outcome that means "this node does not manage Caddy" — app nodes never
@@ -64,6 +65,12 @@ fn rollup_state(replicas: &[ReplicaStatus], desired_replicas: i64, has_error: bo
 
 struct CronView {
     cron: CronRunStatus,
+    state: ServiceState,
+    message: String,
+}
+
+struct JobRunView {
+    job_run: JobRunStatus,
     state: ServiceState,
     message: String,
 }
@@ -132,6 +139,101 @@ fn cron_service_view(
     }
 }
 
+/// One-off job run rollup for the exact request id the CLI is waiting on.
+fn job_run_service_view(
+    d: &ServiceConfig,
+    reps: &[ManagedReplica],
+    error: Option<&String>,
+    now: &str,
+) -> JobRunView {
+    let req = d.job_run.as_ref().expect("job run view requires a request");
+    let matching = reps
+        .iter()
+        .find(|r| r.job_run_id.as_deref() == Some(req.id.as_str()));
+    let other_running = reps
+        .iter()
+        .any(|r| r.job_run_id.is_some() && r.state == "running");
+
+    if let Some(error) = error {
+        return JobRunView {
+            job_run: JobRunStatus {
+                id: req.id.clone(),
+                requested_at: req.requested_at.clone(),
+                started_at: None,
+                finished_at: Some(now.to_string()),
+                exit_code: None,
+                state: JobRunState::Failed,
+                message: error.clone(),
+            },
+            state: ServiceState::Error,
+            message: error.clone(),
+        };
+    }
+
+    let (state, service_state, message, started_at, finished_at, exit_code) = match matching {
+        Some(replica) if replica.state == "running" => (
+            JobRunState::Running,
+            ServiceState::Running,
+            "job run in progress".to_string(),
+            Some(req.requested_at.clone()),
+            None,
+            None,
+        ),
+        Some(replica) => {
+            let code = replica.exit_code.unwrap_or(1);
+            if code == 0 {
+                (
+                    JobRunState::Succeeded,
+                    ServiceState::Stopped,
+                    "job run succeeded".to_string(),
+                    Some(req.requested_at.clone()),
+                    Some(now.to_string()),
+                    Some(code),
+                )
+            } else {
+                (
+                    JobRunState::Failed,
+                    ServiceState::Error,
+                    format!("job run failed (exit {code})"),
+                    Some(req.requested_at.clone()),
+                    Some(now.to_string()),
+                    Some(code),
+                )
+            }
+        }
+        None if other_running => (
+            JobRunState::Pending,
+            ServiceState::Pending,
+            "waiting for previous job run to finish".to_string(),
+            None,
+            None,
+            None,
+        ),
+        None => (
+            JobRunState::Pending,
+            ServiceState::Pending,
+            "job run pending".to_string(),
+            None,
+            None,
+            None,
+        ),
+    };
+
+    JobRunView {
+        job_run: JobRunStatus {
+            id: req.id.clone(),
+            requested_at: req.requested_at.clone(),
+            started_at,
+            finished_at,
+            exit_code,
+            state,
+            message: message.clone(),
+        },
+        state: service_state,
+        message,
+    }
+}
+
 /// Build the NodeStatus to publish after a reconcile pass.
 ///
 /// `backups` carries the per-service backup rollup the reconciler computed on the
@@ -185,6 +287,28 @@ pub fn build_status(
                 .filter(|r| r.state == ServiceState::Running)
                 .collect();
 
+            if d.job_run.is_some() {
+                let view = job_run_service_view(d, reps, error, now);
+                return ServiceStatus {
+                    project: d.project.clone(),
+                    service: d.service.clone(),
+                    image: running
+                        .first()
+                        .map(|r| r.image.clone())
+                        .unwrap_or_else(|| d.image.clone()),
+                    state: view.state,
+                    message: view.message,
+                    container_id: running.first().and_then(|r| r.container_id.clone()),
+                    running_replicas: running.len() as i64,
+                    desired_replicas: 0,
+                    replicas,
+                    cron: None,
+                    backup: None,
+                    job_run: Some(view.job_run),
+                    updated_at: now.to_string(),
+                };
+            }
+
             if d.cron.is_some() {
                 let view = cron_service_view(d, reps, error, now_ms);
                 return ServiceStatus {
@@ -203,6 +327,7 @@ pub fn build_status(
                     cron: Some(view.cron),
                     // A cron service is never a managed database — no backup rollup.
                     backup: None,
+                    job_run: None,
                     updated_at: now.to_string(),
                 };
             }
@@ -228,6 +353,7 @@ pub fn build_status(
                 // Present only for a managed database with backups enabled; the
                 // reconciler fills `backups` on a run/skip, otherwise absent.
                 backup,
+                job_run: None,
                 updated_at: now.to_string(),
             }
         })
@@ -271,7 +397,7 @@ pub fn heartbeat_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Ingress, NodeRole, Rollout, ServiceConfig, PROTOCOL_VERSION};
+    use crate::types::{Ingress, JobRunRequest, NodeRole, Rollout, ServiceConfig, PROTOCOL_VERSION};
 
     fn config() -> AgentConfig {
         AgentConfig {
@@ -307,6 +433,7 @@ mod tests {
             volumes: vec![],
             database: None,
             backup: None,
+            job_run: None,
         }
     }
 
@@ -333,6 +460,7 @@ mod tests {
             host_port: Some(20000 + index),
             config_stamp: String::new(),
             cron_fire_ms: None,
+            job_run_id: None,
             exit_code: None,
         }
     }
@@ -343,6 +471,28 @@ mod tests {
             cron_fire_ms: Some(fire_ms),
             exit_code,
             host_port: None,
+            ..rep(0, state)
+        }
+    }
+
+    fn job_svc(run_id: &str) -> ServiceConfig {
+        ServiceConfig {
+            service: "migrate".into(),
+            ingress: None,
+            job_run: Some(JobRunRequest {
+                id: run_id.into(),
+                requested_at: "2026-07-02T00:00:00.000Z".into(),
+            }),
+            ..svc(1)
+        }
+    }
+
+    fn job_run(run_id: &str, state: &str, exit_code: Option<i64>) -> ManagedReplica {
+        ManagedReplica {
+            service: "migrate".into(),
+            host_port: None,
+            job_run_id: Some(run_id.into()),
+            exit_code,
             ..rep(0, state)
         }
     }
@@ -513,6 +663,26 @@ mod tests {
         assert_eq!(cron.last_run_at.as_deref(), Some("2026-06-11T10:00:00.000Z"));
         assert_eq!(cron.last_exit_code, Some(0));
         assert!(s.message.starts_with("last run ok"));
+    }
+
+    #[test]
+    fn a_completed_one_off_job_reports_the_matching_run_result() {
+        let status = build_status(
+            &config(),
+            "v",
+            &desired(vec![job_svc("run-1")]),
+            &live("blog/migrate", vec![job_run("run-1", "exited", Some(0))]),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &caddy(),
+            None,
+            "2026-07-02T00:00:05.000Z",
+            0,
+        );
+        let job = status.services[0].job_run.as_ref().expect("job run status");
+        assert_eq!(job.id, "run-1");
+        assert_eq!(job.state, crate::types::JobRunState::Succeeded);
+        assert_eq!(job.exit_code, Some(0));
     }
 
     #[test]
