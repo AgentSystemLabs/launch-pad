@@ -414,23 +414,25 @@ describe("scaleOutNodeSpec", () => {
     const spec = scaleOutNodeSpec({
       existingNodeIds: ["app-1", "app-2"],
       pool: [
-        { nodeId: "app-1", instanceType: "t3.small" },
-        { nodeId: "app-2", instanceType: "t3.medium" },
+        { nodeId: "app-1", instanceType: "t3.small", architecture: "x86_64" },
+        { nodeId: "app-2", instanceType: "t3.medium", architecture: "x86_64" },
       ],
       defaultEdge: "edge-1",
     });
     expect(spec.instanceType).toBe("t3.medium");
+    expect(spec.architecture).toBe("x86_64");
   });
 
-  it("falls back to t3.small for an empty/unknown pool", () => {
+  it("falls back to t4g.micro for an empty/unknown pool", () => {
     const spec = scaleOutNodeSpec({ existingNodeIds: [], pool: [], defaultEdge: "edge-1" });
-    expect(spec.instanceType).toBe("t3.small");
+    expect(spec.instanceType).toBe("t4g.micro");
+    expect(spec.architecture).toBe("arm64");
   });
 
   it("always creates an app node behind the cluster's dedicated edge", () => {
     const spec = scaleOutNodeSpec({
       existingNodeIds: ["edge-1", "app-1"],
-      pool: [{ nodeId: "app-1", instanceType: "t3.small" }],
+      pool: [{ nodeId: "app-1", instanceType: "t4g.small", architecture: "arm64" }],
       defaultEdge: "edge-1",
     });
     expect(spec.role).toBe("app");

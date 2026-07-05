@@ -119,6 +119,16 @@ describe("renderExternalBootstrap (edge role)", () => {
     expect(script).toContain("systemctl enable --now caddy");
   });
 
+  it("downloads the ARM Caddy binary for an ARM edge", () => {
+    const arm = renderExternalBootstrap({
+      role: "edge",
+      ...baseParams,
+      architecture: "arm64",
+      systemdUnit: renderSystemdUnit("edge", { environmentFile: AGENT_ENV_FILE }),
+    });
+    expect(arm).toContain('curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=arm64"');
+  });
+
   it("still writes credentials, binary, and unit", () => {
     expect(script).toContain(`AWS_ACCESS_KEY_ID=${AWS.accessKeyId}`);
     expect(script).toContain("curl -fsSL");

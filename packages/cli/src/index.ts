@@ -13,6 +13,7 @@ import { registerDns } from "./commands/dns";
 import { registerDoctor } from "./commands/doctor";
 import { registerHistory } from "./commands/history";
 import { registerInit } from "./commands/init";
+import { registerJob } from "./commands/job";
 import { registerLogs } from "./commands/logs";
 import { registerNode } from "./commands/node";
 import { registerProject } from "./commands/project";
@@ -71,6 +72,7 @@ function showsClusterBanner(path: string): boolean {
     path === "rebalance" ||
     path === "status" ||
     path === "history" ||
+    path.startsWith("job ") ||
     path === "logs" ||
     path.startsWith("project ") ||
     path.startsWith("scale") ||
@@ -116,6 +118,7 @@ registerScale(program);
 registerConfig(program);
 registerStatus(program);
 registerHistory(program);
+registerJob(program);
 registerLogs(program);
 registerSecret(program);
 registerDns(program);

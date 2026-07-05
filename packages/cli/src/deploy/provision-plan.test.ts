@@ -4,6 +4,7 @@ import { buildProvisionPlan, type NodeDemand, planEdgeAction } from "./provision
 
 function demand(over: Partial<NodeDemand> & { nodeId: string }): NodeDemand {
   return {
+    architecture: "arm64",
     cpu: 0,
     memory: 0,
     ...over,
@@ -21,6 +22,7 @@ function fakeEntry(
     clusterId: "default",
     instanceId: provisioning === "external" ? null : "i-123",
     instanceType: provisioning === "external" ? "external" : "t3.small",
+    architecture: "x86_64",
     region: "us-east-1",
     availabilityZone: null,
     role,
@@ -85,7 +87,8 @@ describe("planEdgeAction", () => {
       kind: "create",
       nodeId: EDGE,
       role: "edge",
-      instanceType: "t3.nano",
+      instanceType: "t4g.nano",
+      architecture: "arm64",
     });
   });
 
@@ -144,19 +147,19 @@ describe("buildProvisionPlan", () => {
       nodeId: "web",
       role: "app",
       edgeNodeId: EDGE,
-      instanceType: "t3.medium", // 2048 MB demand needs totalMem ≥ 2560 → the 4 GB tier
+      instanceType: "t4g.medium", // 2048 MB demand needs totalMem ≥ 2560 → the 4 GB tier
     });
   });
 
   it("sizes a created node for the rollout surge, not just steady state", async () => {
-    // 1024 MB steady fits t3.small (allocatable 1536)…
+    // 1024 MB steady needs t4g.small (allocatable 1536)…
     const steadyOnly = await buildProvisionPlan({
       demands: [demand({ nodeId: "n", cpu: 512, memory: 1024 })],
       edgeNodeId: EDGE,
       load: async () => null,
       allowCreate: true,
     });
-    expect(steadyOnly[0]).toMatchObject({ instanceType: "t3.small" });
+    expect(steadyOnly[0]).toMatchObject({ instanceType: "t4g.small" });
 
     // …but +1024 MB surge → 2048 peak needs the 4 GB tier.
     const withSurge = await buildProvisionPlan({
@@ -165,7 +168,7 @@ describe("buildProvisionPlan", () => {
       load: async () => null,
       allowCreate: true,
     });
-    expect(withSurge[0]).toMatchObject({ instanceType: "t3.medium" });
+    expect(withSurge[0]).toMatchObject({ instanceType: "t4g.medium" });
   });
 
   it("throws for a missing node when allowCreate is false (strict mode)", async () => {

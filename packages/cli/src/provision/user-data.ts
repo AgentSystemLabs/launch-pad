@@ -1,4 +1,8 @@
-import type { NodeRole } from "@agentsystemlabs/launch-pad-shared";
+import {
+  caddyArchForArchitecture,
+  type NodeArchitecture,
+  type NodeRole,
+} from "@agentsystemlabs/launch-pad-shared";
 import { renderCloudWatchInstall } from "./cloudwatch";
 import { renderSystemdUnit } from "./systemd-unit";
 
@@ -19,6 +23,7 @@ export interface AgentConfig {
 
 export interface UserDataParams {
   agent: AgentConfig;
+  architecture: NodeArchitecture;
   /** Presigned S3 URL the node curls to fetch the agent binary (full bootstrap only). */
   agentBinaryUrl?: string;
   /** Golden AMIs already include host dependencies and the role's agent binary. */
@@ -26,7 +31,7 @@ export interface UserDataParams {
 }
 
 /** Caddy install + permissive-admin systemd service (only for the edge node). */
-function caddyBlock(installBinary: boolean): string {
+function caddyBlock(installBinary: boolean, architecture: NodeArchitecture): string {
   const unit = `[Unit]
 Description=Caddy
 After=network-online.target
@@ -45,7 +50,7 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 `;
   const binaryBlock = installBinary
-    ? `curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/local/bin/caddy
+    ? `curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${caddyArchForArchitecture(architecture)}" -o /usr/local/bin/caddy
 chmod +x /usr/local/bin/caddy`
     : "test -x /usr/local/bin/caddy";
 
@@ -84,7 +89,7 @@ export function renderUserData(params: UserDataParams): string {
   const role = params.agent.role;
   const agentJson = JSON.stringify(params.agent, null, 2);
   const unit = renderSystemdUnit(role === "app" ? "app" : "edge");
-  const caddy = role === "app" ? "" : `\n${caddyBlock(bootstrapMode === "full")}`;
+  const caddy = role === "app" ? "" : `\n${caddyBlock(bootstrapMode === "full", params.architecture)}`;
   const cloudwatch = renderCloudWatchInstall({
     clusterId: params.agent.clusterId,
     nodeId: params.agent.nodeId,

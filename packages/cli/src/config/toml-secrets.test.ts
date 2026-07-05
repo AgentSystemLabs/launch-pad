@@ -96,4 +96,45 @@ secrets = ["WORKER_TOKEN"]
     expect(readServiceSecrets(dir, "worker")).toEqual(["WORKER_TOKEN"]);
     expect(readFileSync(join(dir, "launch-pad.toml"), "utf8")).not.toContain("postgres://");
   });
+
+  it("treats managed database password secrets as implicitly registered", () => {
+    const dir = tempProject(`project = "my-app"
+
+[[service]]
+name = "api"
+cpu = 512
+memory = 512
+
+[[database]]
+name = "primary"
+engine = "postgres"
+version = "16"
+`);
+
+    expect(readServiceSecrets(dir, "primary")).toEqual(["POSTGRES_PASSWORD"]);
+    expect(registerServiceSecret(dir, "primary", "POSTGRES_PASSWORD")).toBe(false);
+    expect(unregisterServiceSecret(dir, "primary", "POSTGRES_PASSWORD")).toBe(false);
+    expect(readFileSync(join(dir, "launch-pad.toml"), "utf8")).toContain('name = "primary"');
+  });
+
+  it("registers and reads secrets on one-off jobs", () => {
+    const dir = tempProject(`project = "my-app"
+
+[[service]]
+name = "api"
+cpu = 512
+memory = 512
+
+[[job]]
+name = "migrate"
+cpu = 256
+memory = 128
+`);
+
+    expect(readServiceSecrets(dir, "migrate")).toEqual([]);
+    expect(registerServiceSecret(dir, "migrate", "DATABASE_URL")).toBe(true);
+    expect(readServiceSecrets(dir, "migrate")).toEqual(["DATABASE_URL"]);
+    expect(unregisterServiceSecret(dir, "migrate", "DATABASE_URL")).toBe(true);
+    expect(readServiceSecrets(dir, "migrate")).toEqual([]);
+  });
 });

@@ -98,6 +98,7 @@ mod tests {
                 volumes: vec![],
                 database: None,
                 backup: None,
+                job_run: None,
             }],
         }
     }
@@ -116,6 +117,7 @@ mod tests {
             host_port: Some(host_port),
             config_stamp: String::new(),
             cron_fire_ms: None,
+            job_run_id: None,
             exit_code: None,
         }
     }

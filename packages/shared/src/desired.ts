@@ -24,6 +24,17 @@ export const ServiceBackupConfigSchema = z
   .strict();
 export type ServiceBackupConfig = z.infer<typeof ServiceBackupConfigSchema>;
 
+/** Transient one-off job run request, written by `launchpad job run`. */
+export const JobRunRequestSchema = z
+  .object({
+    /** Unique id for this requested run; the CLI waits for this exact id. */
+    id: z.string().min(1),
+    /** UTC ISO time the run was requested. */
+    requestedAt: z.string().min(1),
+  })
+  .strict();
+export type JobRunRequest = z.infer<typeof JobRunRequestSchema>;
+
 /**
  * Web ingress. Two states only:
  *
@@ -84,6 +95,11 @@ export const ServiceConfigSchema = z
     database: ServiceDatabaseSchema.optional(),
     /** S3 backup config; present → the agent runs scheduled backups for this database. */
     backup: ServiceBackupConfigSchema.optional(),
+    /**
+     * Transient one-off job run request. Present only on desired entries written by
+     * `launchpad job run`; normal deploy removes/ignores jobs.
+     */
+    jobRun: JobRunRequestSchema.optional(),
   })
   .strict();
 

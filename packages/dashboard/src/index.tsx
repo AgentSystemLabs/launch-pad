@@ -1,5 +1,6 @@
 import { Station } from "@orbital-js/station";
 import { serveStatic } from "hono/bun";
+import type { MiddlewareHandler } from "hono";
 
 import { loadConfig } from "./lib/app-config";
 import { wireRoomCleanup } from "./lib/stream-registry";
@@ -41,6 +42,18 @@ export const station = new Station<AppCtx>({
   ],
 });
 
+const SECURITY_HEADERS = {
+  "Content-Security-Policy": "frame-ancestors 'none'",
+  "X-Frame-Options": "DENY",
+} as const;
+
+const securityHeaders: MiddlewareHandler = async (c, next) => {
+  await next();
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    c.header(name, value);
+  }
+};
+
 station.onConnect(() => {
   const cfg = loadConfig();
   return {
@@ -70,6 +83,10 @@ registerLogs(station);
 // `as never`: station is file:-linked and carries its own Hono types, so the
 // middleware from this package's hono doesn't structurally match getApp()'s
 // param type. It's the same hono at runtime (the example app mounts it the same way).
+station.getApp().use(
+  "*",
+  securityHeaders as never,
+);
 station.getApp().use("/styles.css", serveStatic({ path: "./dist/styles.css" }) as never);
 
 wireRoomCleanup();

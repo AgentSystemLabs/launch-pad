@@ -107,10 +107,11 @@ export interface BuildArgs {
   contextDir: string;
   dockerfile: string;
   imageUri: string;
+  platform: string;
   verbose?: boolean;
 }
 
-/** Build for linux/amd64 and push to ECR in a single step. */
+/** Build for the target node platform and push to ECR in a single step. */
 export async function buildAndPush(args: BuildArgs): Promise<void> {
   const cmd = [
     "buildx",
@@ -118,7 +119,7 @@ export async function buildAndPush(args: BuildArgs): Promise<void> {
     "--builder",
     BUILDER_NAME,
     "--platform",
-    "linux/amd64",
+    args.platform,
     "-f",
     args.dockerfile,
     "-t",

@@ -91,14 +91,12 @@ describe("codebuild trust + service policy", () => {
 });
 
 describe("remoteBuildSpec", () => {
-  it("downloads the context, logs in to ECR, builds for linux/amd64, and pushes", () => {
+  it("downloads the context, logs in to ECR, builds for the requested platform, and pushes", () => {
     const spec = remoteBuildSpec();
     expect(spec).toContain("version: 0.2");
     expect(spec).toContain('aws s3 cp "s3://$CONTEXT_BUCKET/$CONTEXT_KEY"');
     expect(spec).toContain("docker login --username AWS --password-stdin");
-    // The wire contract with nodes: images are always linux/amd64 — keep the remote
-    // build identical to the local buildx path.
-    expect(spec).toContain("--platform linux/amd64");
+    expect(spec).toContain('--platform "$DOCKER_PLATFORM"');
     expect(spec).toContain('docker build');
     expect(spec).toContain('-f "/tmp/build-context/$DOCKERFILE"');
     expect(spec).toContain('docker push "$IMAGE_URI"');

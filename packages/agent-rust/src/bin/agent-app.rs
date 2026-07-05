@@ -277,6 +277,19 @@ impl AppAgent {
         self.has_web = self.desired.services.iter().any(|s| s.ingress.is_some());
 
         let live = docker::inspect_managed()?;
+        for service in &self.desired.services {
+            let key = service_key(&service.project, &service.service);
+            if let Some(replicas) = live.get(&key) {
+                for replica in replicas.iter().filter(|r| r.state == "running") {
+                    if let Err(error) = docker::ensure_network_member(&service.project, &service.service, &replica.id) {
+                        eprintln!(
+                            "[agent] docker network repair failed for {}/{}: {}",
+                            service.project, service.service, error
+                        );
+                    }
+                }
+            }
+        }
 
         // Cron bookkeeping: seed a first-sight anchor for new schedules (so they
         // start counting from NOW, not from history) and drop state for keys that
@@ -400,6 +413,7 @@ impl Reconciler for AppAgent {
         host_port: Option<i64>,
         bind_host: &str,
         cron_fire_ms: Option<i64>,
+        job_run_id: Option<&str>,
     ) -> Result<(), String> {
         // Secrets are resolved at container start (never cached) and the config stamp
         // is computed from the same desired config — mirrors TS `runContainer`.
@@ -414,7 +428,9 @@ impl Reconciler for AppAgent {
             host_port,
             bind_host,
             cron_fire_ms,
+            job_run_id,
         };
+        docker::ensure_network(&config.project)?;
         docker::run_container(&spec, &merged_env, &stamp)
     }
     fn start_container(&mut self, id: &str) -> Result<(), String> {

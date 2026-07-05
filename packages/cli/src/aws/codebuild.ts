@@ -46,6 +46,7 @@ const ROLE_POLICY_NAME = "launch-pad-codebuild-policy";
 /** Hard ceiling on one remote build (CodeBuild's own queue + provisioning included). */
 const BUILD_TIMEOUT_MINUTES = 30;
 const POLL_INTERVAL_MS = 5_000;
+const ARM64_CODEBUILD_IMAGE = "aws/codebuild/amazonlinux2-aarch64-standard:3.0";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -207,9 +208,25 @@ export interface RemoteBuildParams {
   imageUri: string;
   /** Context-relative dockerfile path inside the uploaded tarball. */
   dockerfile: string;
+  platform: string;
   /** `<acct>.dkr.ecr.<region>.amazonaws.com` — the registry docker login targets. */
   ecrRegistry: string;
   onProgress?: (text: string) => void;
+}
+
+export function buildEnvironmentOverrides(platform: string): {
+  environmentTypeOverride?: "ARM_CONTAINER";
+  imageOverride?: string;
+  computeTypeOverride?: "BUILD_GENERAL1_SMALL";
+  privilegedModeOverride?: boolean;
+} {
+  if (platform !== "linux/arm64") return {};
+  return {
+    environmentTypeOverride: "ARM_CONTAINER",
+    imageOverride: ARM64_CODEBUILD_IMAGE,
+    computeTypeOverride: "BUILD_GENERAL1_SMALL",
+    privilegedModeOverride: true,
+  };
 }
 
 /**
@@ -257,11 +274,13 @@ export async function runRemoteBuild(
   const started = await codebuild.send(
     new StartBuildCommand({
       projectName: params.projectName,
+      ...buildEnvironmentOverrides(params.platform),
       environmentVariablesOverride: [
         { name: "CONTEXT_BUCKET", value: params.contextBucket },
         { name: "CONTEXT_KEY", value: params.contextKey },
         { name: "IMAGE_URI", value: params.imageUri },
         { name: "DOCKERFILE", value: params.dockerfile },
+        { name: "DOCKER_PLATFORM", value: params.platform },
         { name: "ECR_REGISTRY", value: params.ecrRegistry },
       ],
     }),

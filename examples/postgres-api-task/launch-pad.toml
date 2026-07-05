@@ -1,0 +1,38 @@
+project = "lp-db-test"
+
+[[service]]
+name = "api"
+dockerfile = "Dockerfile"
+context = "."
+cpu = 256
+memory = 128
+replicas = 1
+domain = "api.lp-db-test.webdevcody.com"
+port = 3000
+secrets = ["DATABASE_URL"]
+env = { ROLE = "api", NODE_ENV = "production" }
+
+  [service.healthCheck]
+  path = "/healthz"
+
+  [service.rollout]
+  maxSurge = 1
+  drainTimeout = "20s"
+  stopGrace = "10s"
+
+[[job]]
+name = "migrate"
+dockerfile = "Dockerfile"
+context = "."
+cpu = 256
+memory = 128
+secrets = ["DATABASE_URL"]
+env = { ROLE = "migrate", NODE_ENV = "production" }
+
+[[database]]
+name = "primary"
+engine = "postgres"
+version = "16"
+cpu = 256
+memory = 256
+databases = ["postgres"]

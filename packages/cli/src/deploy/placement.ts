@@ -1,4 +1,8 @@
-import { generateNodeName, sharesToVcpu } from "@agentsystemlabs/launch-pad-shared";
+import {
+  generateNodeName,
+  type NodeArchitecture,
+  sharesToVcpu,
+} from "@agentsystemlabs/launch-pad-shared";
 import { CliError } from "../errors";
 
 export interface Placement {
@@ -16,6 +20,7 @@ export interface Placement {
  */
 export interface CandidateNode {
   nodeId: string;
+  architecture: NodeArchitecture;
   /** total − reserved (shares / MB). */
   allocatableCpu: number;
   allocatableMemory: number;
@@ -35,13 +40,14 @@ export interface CandidateNode {
  * only has to be large enough that `fits` always passes — the real instance type is
  * chosen by `smallestInstanceTypeFor` at provision time).
  */
-export function bootstrapCandidateNode(nodeId: string): CandidateNode {
+export function bootstrapCandidateNode(nodeId: string, architecture: NodeArchitecture = "arm64"): CandidateNode {
   // Effectively unbounded, but finite (avoids NaN in the score/divide math). Far above
   // any single instance type, so the planner never rejects the bootstrap for capacity —
   // a demand that won't fit any real instance fails later, at sizing, with a clear error.
   const UNBOUNDED = Number.MAX_SAFE_INTEGER;
   return {
     nodeId,
+    architecture,
     allocatableCpu: UNBOUNDED,
     allocatableMemory: UNBOUNDED,
     steadyCpu: 0,
@@ -285,8 +291,10 @@ function packByCapacity(pool: NodeTally[], s: ClusterServiceInput): Placement[] 
  */
 export function templateCandidateNode(nodeId: string, existing: CandidateNode[]): CandidateNode {
   if (existing.length === 0) return bootstrapCandidateNode(nodeId);
+  const architecture = existing[0]?.architecture ?? "arm64";
   return {
     nodeId,
+    architecture,
     allocatableCpu: Math.max(...existing.map((n) => n.allocatableCpu)),
     allocatableMemory: Math.max(...existing.map((n) => n.allocatableMemory)),
     steadyCpu: 0,

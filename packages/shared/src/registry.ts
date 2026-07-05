@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NodeArchitectureSchema } from "./architecture";
 import { ClusterIdSchema } from "./config";
 import { DEFAULT_CLUSTER } from "./constants";
 
@@ -41,6 +42,8 @@ export const NodeRegistryEntrySchema = z
     clusterId: ClusterIdSchema.default(DEFAULT_CLUSTER),
     instanceId: z.string().nullable(),
     instanceType: z.string().min(1),
+    /** CPU architecture for the instance type. Old x86-only node.json files default here. */
+    architecture: NodeArchitectureSchema.default("x86_64"),
     region: z.string().min(1),
     availabilityZone: z.string().nullable(),
     /** Node role: "app" (containers, private), "edge" (Caddy router, public), or legacy "both". */

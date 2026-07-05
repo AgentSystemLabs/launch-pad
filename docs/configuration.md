@@ -1,8 +1,9 @@
 # Configuration
 
 Each project keeps a **`launch-pad.toml`** in its app root. One file can declare multiple
-`[[service]]` blocks (web services and background workers), and multiple projects can share
-the same node — deploys merge per-project, never clobbering other projects' services.
+`[[service]]` blocks (web services and background workers), `[[job]]` blocks (manual one-off
+workers), and `[[database]]` blocks (managed Postgres). Multiple projects can share the same
+node — deploys merge per-project, never clobbering other projects' services.
 
 The authoritative schema is [`packages/shared/src/config.ts`](../packages/shared/src/config.ts)
 (`LaunchPadConfigSchema`), validated with Zod. Parsing uses TOML via `smol-toml`.
@@ -96,6 +97,8 @@ Rules and caveats:
   health check or DNS.
 - **Scheduled job:** a worker with a `cron` expression — the agent runs one container per
   fire and lets it exit, instead of keeping it alive. See [Scheduled jobs](#scheduled-jobs-cron).
+- **One-off job:** a top-level `[[job]]` block — not deployed by `launchpad deploy`; run
+  explicitly with `launchpad job run <name> --wait`. See [One-off jobs](#one-off-jobs).
 
 The schema enforces "both or neither."
 
@@ -172,6 +175,53 @@ Behavior and rules:
   created by a cron-aware CLI are fine).
   See [`examples/cron-task`](../examples/cron-task).
 
+### One-off jobs
+
+A top-level `[[job]]` block is a buildable worker image that runs only when explicitly
+requested. Normal `launchpad deploy` ignores jobs; it deploys `[[service]]` and `[[database]]`
+state only.
+
+```toml
+[[job]]
+name = "migrate"
+dockerfile = "Dockerfile"
+context = "."
+cpu = 256
+memory = 256
+secrets = ["DATABASE_URL"]
+env = { ROLE = "migrate" }
+```
+
+Run it once and block CI until it exits:
+
+```bash
+launchpad job run migrate --wait --yes
+```
+
+Behavior and rules:
+
+- **Manual only:** jobs do not run during `deploy`; every execution gets a fresh run id.
+- **No overlap:** if the same job is already running on the target node, a new run waits
+  pending until the previous one exits instead of starting a second container.
+- **Waitable:** `--wait` watches `status.json` for that exact run id and exits non-zero if
+  the container exits non-zero.
+- **Same-node service DNS:** jobs run on the deployed footprint's app node. When a managed
+  database is present, Launch Pad targets that database's sticky node, so the job can reach
+  it by service name (for example, `primary:5432`).
+- **Migration locking is application-owned:** Launch Pad prevents overlapping job containers,
+  but your migration library should still own the migration table, advisory lock / lock table,
+  transactions, and failed-migration handling.
+
+Recommended first-time database deploy flow:
+
+```bash
+launchpad deploy --service primary --yes
+launchpad job run migrate --wait --yes
+launchpad deploy --service api --yes
+```
+
+See [`examples/postgres-api-task`](../examples/postgres-api-task).
+
 ### Persistent volumes
 
 A service can declare persistent named volumes. The data lives on the node's disk (a docker
@@ -241,7 +291,7 @@ What a deploy does with it:
   `/var/lib/postgresql/data`, so it is **sticky single-node** and **config-locked** exactly like
   any `[[service.volumes]]` service. The image is *pulled*, never built — there's no Dockerfile.
 - **Requires a password secret.** Set the superuser password before the first deploy:
-  `launchpad secret set primary POSTGRES_PASSWORD <value>`. Deploy refuses to publish without it.
+  `launchpad secret set POSTGRES_PASSWORD --service primary`. Deploy refuses to publish without it.
   (You may also set `POSTGRES_USER` via the service `env`; it defaults to `postgres`.)
 - **Backs up to S3** when `[database.backup]` is present. On each fire the on-node agent runs
   `pg_dump` (gzip-compressed) for every target database and uploads it to a dedicated,
@@ -266,9 +316,11 @@ Notes and limits:
   disk you expect the node to have. Size the node accordingly.
 - **`databases` are not auto-created.** LaunchPad runs the engine and backs up whatever logical
   databases exist (or the ones you list); create them yourself (migrations / `psql`).
-- **App↔DB connectivity is out of scope (v1).** A managed database has no published port and no
-  cross-node service discovery — the cluster networks the edge to app nodes, not app-to-app. Wire
-  an app to the database yourself, and expect them to be reachable on the database's own node.
+- **App↔DB connectivity is same-node only.** Launch Pad attaches each footprint's containers
+  to a per-footprint Docker bridge network on the app node, with each service reachable by its
+  service name (for example, `primary:5432`). There is still no cross-node service discovery, so
+  an app can only use a managed database when the scheduler places both on the database's sticky
+  node. Keep the database and its API/task services small enough to fit together on one app node.
 - **Backups run on the reconcile tick.** The agent emits a liveness heartbeat between databases
   so a multi-database backup doesn't make the node look offline, but a very large dump still
   delays that node's other reconcile work until it completes. Pick an off-peak `schedule`.
@@ -291,7 +343,7 @@ HTTPS, public 80/443, Elastic IP), so every cluster runs at least **2 nodes**: t
 security group on the host-port range.
 
 **Empty-cluster bootstrap:** the first deploy to a cluster with **no nodes yet** doesn't
-error — `deploy` auto-provisions the dedicated edge (`edge-1`, default `t3.nano`) and a
+error — `deploy` auto-provisions the dedicated edge (`edge-1`, default `t4g.nano`) and a
 first app node (a generated `<noun>-<verb>-<adverb>` name, auto-sized to fit the footprint).
 This is spend-gated like any
 provision (confirm prompt, `--yes` in CI, `--no-create` to opt out). To use an existing

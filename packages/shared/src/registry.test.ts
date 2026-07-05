@@ -44,6 +44,7 @@ describe("parseNodeRegistryEntry — provisioning / BYOS fields", () => {
 
   it("defaults a legacy node.json to provisioning=ec2 with null advertiseIp/iamUserName", () => {
     const node = parseNodeRegistryEntry(legacyEc2);
+    expect(node.architecture).toBe("x86_64");
     expect(node.provisioning).toBe("ec2");
     expect(node.advertiseIp).toBeNull();
     expect(node.iamUserName).toBeNull();

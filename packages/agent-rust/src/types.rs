@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// v2: dropped the `both` node role and co-located Caddy — `ingress.edge` is a
 /// required node id. Every cluster is 1 dedicated edge + ≥1 app node.
-pub const PROTOCOL_VERSION: i64 = 2;
+/// v3: adds transient one-off job run requests/results for `launchpad job run`.
+pub const PROTOCOL_VERSION: i64 = 3;
 
 /// The implicit cluster a pre-cluster node belongs to (`constants.ts`).
 pub const DEFAULT_CLUSTER: &str = "default";
@@ -45,6 +46,9 @@ pub mod labels {
     /// started for. Presence distinguishes a cron run container from a long-running
     /// replica; the value is the durable "last fire" record the due-run check reads.
     pub const CRON_FIRE: &str = "launchpad.cronFire";
+    /// One-off job run request id. Presence distinguishes a manual job container from
+    /// a long-running replica or scheduled cron fire.
+    pub const JOB_RUN: &str = "launchpad.jobRun";
 }
 
 /// `${project}/${service}` — the stable composite key for a service on a node.
@@ -221,6 +225,16 @@ pub struct ServiceBackupConfig {
     pub prefix: String,
 }
 
+/// Transient one-off job run request (`JobRunRequestSchema`, shared `desired.ts`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobRunRequest {
+    /// Unique id for this requested run; the CLI waits for this exact id.
+    pub id: String,
+    /// UTC ISO time the run was requested.
+    pub requested_at: String,
+}
+
 /// One service inside a node's `desired.json` (`ServiceConfigSchema`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -261,6 +275,10 @@ pub struct ServiceConfig {
     /// Optional so non-database services parse unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<ServiceBackupConfig>,
+    /// Transient one-off job run request. Present only on desired entries written by
+    /// `launchpad job run`; normal deploy removes/ignores jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_run: Option<JobRunRequest>,
 }
 
 /// Fingerprint of runtime config the agent stamps on containers. Uses secret ref
@@ -406,6 +424,30 @@ pub struct CronRunStatus {
     pub next_run_at: Option<String>,
 }
 
+/// State of a one-off job run (`JobRunStateSchema`, shared `status.ts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobRunState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+/// Result rollup for a one-off `launchpad job run` request (`JobRunStatusSchema`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobRunStatus {
+    pub id: String,
+    pub requested_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i64>,
+    pub state: JobRunState,
+    #[serde(default)]
+    pub message: String,
+}
+
 /// Per-logical-database result inside a database service's backup rollup
 /// (`DatabaseBackupEntrySchema`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,6 +503,9 @@ pub struct ServiceStatus {
     /// Present only for managed database services with backups enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<DatabaseBackupStatus>,
+    /// Present only for a transient one-off job run request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_run: Option<JobRunStatus>,
     pub updated_at: String,
 }
 
@@ -594,6 +639,7 @@ mod tests {
                 }],
                 database: None,
                 backup: None,
+                job_run: None,
             }],
         };
         let json = serde_json::to_string(&desired).unwrap();
@@ -606,7 +652,7 @@ mod tests {
         // A service that omits replicas/env/secretRefs/cron/volumes/healthCheck/rollout
         // (pre-cron, pre-volumes document).
         let json = r#"{
-            "version": 2, "nodeId": "n1", "updatedAt": "t",
+            "version": 3, "nodeId": "n1", "updatedAt": "t",
             "services": [{ "project": "p", "service": "web", "image": "img", "cpu": 256, "memory": 256, "ingress": null }]
         }"#;
         let desired = parse_desired_state(json).unwrap();
@@ -631,7 +677,7 @@ mod tests {
     #[test]
     fn parse_desired_state_rejects_a_missing_required_field() {
         // No nodeId → serde rejects (required field).
-        let json = r#"{ "version": 2, "updatedAt": "t", "services": [] }"#;
+        let json = r#"{ "version": 3, "updatedAt": "t", "services": [] }"#;
         assert!(parse_desired_state(json).is_err());
     }
 
@@ -639,7 +685,7 @@ mod tests {
     fn ingress_edge_is_required_in_v2() {
         // v2 dropped nullable edge — a service whose ingress lacks `edge` must fail.
         let json = r#"{
-            "version": 2, "nodeId": "n1", "updatedAt": "t",
+            "version": 3, "nodeId": "n1", "updatedAt": "t",
             "services": [{ "project": "p", "service": "web", "image": "img", "cpu": 256, "memory": 256,
                            "ingress": { "domain": "d.example.com", "port": 3000 } }]
         }"#;
@@ -706,6 +752,7 @@ mod tests {
             running_replicas: 1,
             cron: None,
             backup: None,
+            job_run: None,
             updated_at: "t".into(),
         };
         let json = serde_json::to_string(&status).unwrap();
@@ -730,7 +777,7 @@ mod tests {
     fn database_and_backup_round_trip_and_default_for_non_database_services() {
         // A non-database desired.json (no database/backup keys) parses with None.
         let json = r#"{
-            "version": 2, "nodeId": "n1", "updatedAt": "t",
+            "version": 3, "nodeId": "n1", "updatedAt": "t",
             "services": [{ "project": "p", "service": "web", "image": "img", "cpu": 256, "memory": 256, "ingress": null }]
         }"#;
         let desired = parse_desired_state(json).unwrap();
@@ -739,7 +786,7 @@ mod tests {
 
         // A managed-database service with backup config round-trips through camelCase JSON.
         let db_json = r#"{
-            "version": 2, "nodeId": "n1", "updatedAt": "t",
+            "version": 3, "nodeId": "n1", "updatedAt": "t",
             "services": [{
                 "project": "p", "service": "db", "image": "public.ecr.aws/docker/library/postgres:16",
                 "cpu": 512, "memory": 512, "ingress": null,
@@ -761,7 +808,7 @@ mod tests {
 
         // database.databases defaults to empty when omitted.
         let no_dbs = r#"{
-            "version": 2, "nodeId": "n1", "updatedAt": "t",
+            "version": 3, "nodeId": "n1", "updatedAt": "t",
             "services": [{
                 "project": "p", "service": "db", "image": "img", "cpu": 512, "memory": 512, "ingress": null,
                 "database": { "engine": "postgres", "version": "16" }
@@ -810,6 +857,7 @@ mod tests {
             volumes: vec![],
             database: None,
             backup: None,
+            job_run: None,
         }
     }
 

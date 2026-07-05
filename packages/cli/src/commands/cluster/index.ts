@@ -755,7 +755,13 @@ async function runDestroy(name: string, opts: GroupOptions): Promise<void> {
   }
 
   const sg = spinner("deleting security groups…").start();
-  for (const node of nodes) {
+  // App node SGs reference the edge SG as their allowed source. Delete app SGs
+  // first so the edge SG is no longer referenced when it is removed.
+  const securityGroupNodes = [...nodes].sort((a, b) => {
+    if (a.role === b.role) return a.nodeId.localeCompare(b.nodeId);
+    return a.role === "edge" ? 1 : -1;
+  });
+  for (const node of securityGroupNodes) {
     if (!node.securityGroupId) continue;
     try {
       await deleteSecurityGroup(aws.ec2, node.securityGroupId);
