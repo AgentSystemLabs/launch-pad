@@ -22,8 +22,8 @@ node never runs containers and an app node never runs Caddy:
 
 No Node.js anywhere: the agent is a self-contained Rust binary (~11 MB static). Cutting
 Docker + Node.js from the edge frees the ~150–300 MB they idled at, so the default
-**t3.nano** edge (512 MB) runs with comfortable headroom — target steady state is **< 400 MB
-used** (OS + SSM + CloudWatch + Caddy + agent). `t3.micro` (1 GB) remains plenty of margin
+**t4g.nano** edge (512 MB) runs with comfortable headroom — target steady state is **< 400 MB
+used** (OS + SSM + CloudWatch + Caddy + agent). `t4g.micro` (1 GB) remains plenty of margin
 if you size up manually.
 
 Both AMIs build from the **standard** AL2023 base (not "minimal") — it ships the SSM agent
@@ -43,31 +43,31 @@ The script (requires **Packer**, the **Rust toolchain** (+ `cargo-zigbuild` off-
 ambient AWS credentials; region defaults to `us-east-1`):
 
 1. Builds the agent binaries if missing (`scripts/build-agent-binaries.sh` →
-   `packages/agent-rust/dist/agent-{edge,app}`, linux/amd64 static musl).
+   `packages/agent-rust/dist/{x86_64,arm64}/agent-{edge,app}`, static musl).
 2. Runs `packer init` + `packer build` per role
    ([`infra/packer/golden-ami-edge.pkr.hcl`](../infra/packer/golden-ami-edge.pkr.hcl) /
    [`golden-ami-app.pkr.hcl`](../infra/packer/golden-ami-app.pkr.hcl)).
 3. Post-processes each Packer manifest via
    [`scripts/update-golden-ami-manifest.mjs`](../scripts/update-golden-ami-manifest.mjs),
-   writing the per-role, per-region AMI id into
+   writing the per-role, per-architecture, per-region AMI id into
    [`packages/cli/src/provision/golden-ami-manifest.json`](../packages/cli/src/provision/golden-ami-manifest.json).
 
 That manifest is **committed** — it's how the CLI knows which golden AMI to use per role +
-region (`amis.edge[region]` / `amis.app[region]`, schema v2).
+architecture + region (`amis.edge.arm64[region]` / `amis.app.x86_64[region]`, schema v3).
 
 ## How the CLI picks an AMI
 
 Role → AMI selection is **automatic** — users never choose between edge/app images unless
 they opt in with `--ami`. `resolveNodeAmi()`
 ([`packages/cli/src/provision/golden-ami.ts`](../packages/cli/src/provision/golden-ami.ts))
-resolves by **role + region**, in precedence order:
+resolves by **role + architecture + region**, in precedence order:
 
 | Priority | Source | Bootstrap mode (default) |
 | -------- | ------ | ------------------------ |
 | 1 | `--ami <id>` flag | `full` (assumed not a golden image) |
 | 2 | `LAUNCHPAD_AMI_ID` env var (applies to both roles) | `golden` (assumed your own golden build) |
-| 3 | Golden manifest entry for the node's role + region (verified `available`) | `golden` |
-| 4 | Latest Amazon Linux 2023 (via SSM public parameter) | `full` (role-appropriate bootstrap) |
+| 3 | Golden manifest entry for the node's role + architecture + region (verified `available`) | `golden` |
+| 4 | Latest Amazon Linux 2023 for the node architecture (via SSM public parameter) | `full` (role-appropriate bootstrap) |
 
 `LAUNCHPAD_AMI_BOOTSTRAP=full|golden` overrides the bootstrap mode in any case — set
 `LAUNCHPAD_AMI_BOOTSTRAP=full` if your custom `LAUNCHPAD_AMI_ID` is *not* a Launch Pad
@@ -75,7 +75,7 @@ golden image.
 
 ## Bootstrap modes
 
-The agent is **not distributed via npm** — the role-specific binary is uploaded to S3
+The agent is **not distributed via npm** — the role- and architecture-specific binary is uploaded to S3
 (`nodes/<id>/agent`, also used by upgrades) and either baked into the golden AMI or
 downloaded via presigned URL on full bootstrap.
 

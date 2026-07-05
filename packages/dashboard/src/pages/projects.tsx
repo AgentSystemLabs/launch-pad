@@ -174,7 +174,7 @@ export function registerProjects(station: Station<AppCtx>) {
                       </form>
                       <form
                         p-action="projects:remove"
-                        onsubmit={`return confirm('Remove project ${p.name} from the dashboard? (does not touch AWS)')`}
+                        data-confirm={`Remove project ${p.name} from the dashboard? (does not touch AWS)`}
                       >
                         <input type="hidden" name="name" value={p.name} />
                         <button class="btn btn-ghost btn-xs">Remove</button>
@@ -370,7 +370,6 @@ export function registerProjects(station: Station<AppCtx>) {
         reply({ ok: false, error: message });
         return;
       }
-
       try {
         writeServiceEnv(project.dir, data.service, parseEnvText(data.env ?? ""));
         await runLaunchPad(["deploy", "--service", data.service, "--yes"], {

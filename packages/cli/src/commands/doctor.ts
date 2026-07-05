@@ -115,8 +115,8 @@ async function checkGoldenAmi(aws: AwsEnv): Promise<Check> {
   try {
     const base = { ec2: aws.ec2, ssm: aws.ssm, region: aws.region };
     const [edge, app] = await Promise.all([
-      resolveNodeAmi({ ...base, role: "edge" }),
-      resolveNodeAmi({ ...base, role: "app" }),
+      resolveNodeAmi({ ...base, role: "edge", architecture: "arm64" }),
+      resolveNodeAmi({ ...base, role: "app", architecture: "arm64" }),
     ]);
     if (edge.bootstrapMode === "golden" && app.bootstrapMode === "golden") {
       return { name, status: "pass", detail: `edge ${edge.imageId}, app ${app.imageId}` };

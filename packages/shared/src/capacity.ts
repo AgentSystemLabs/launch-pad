@@ -10,6 +10,7 @@
  * result with {@link rawToCapacity}.
  */
 
+import type { NodeArchitecture } from "./architecture";
 import { DEFAULT_RESERVED_CPU, DEFAULT_RESERVED_MEMORY } from "./constants";
 
 export const CPU_SHARES_PER_VCPU = 1024;
@@ -19,6 +20,7 @@ export interface RawInstanceCapacity {
   vcpu: number;
   /** RAM in MiB (treated as MB here for simplicity). */
   memoryMiB: number;
+  architecture: NodeArchitecture;
 }
 
 export interface InstanceCapacity {
@@ -26,33 +28,44 @@ export interface InstanceCapacity {
   totalCpu: number;
   /** Total memory in MB. */
   totalMemory: number;
+  architecture: NodeArchitecture;
 }
 
 /** Common instance types, so the happy path needs no AWS call. */
 export const INSTANCE_CAPACITY_TABLE: Record<string, RawInstanceCapacity> = {
-  "t3.nano": { vcpu: 2, memoryMiB: 512 },
-  "t3.micro": { vcpu: 2, memoryMiB: 1024 },
-  "t3.small": { vcpu: 2, memoryMiB: 2048 },
-  "t3.medium": { vcpu: 2, memoryMiB: 4096 },
-  "t3.large": { vcpu: 2, memoryMiB: 8192 },
-  "t3.xlarge": { vcpu: 4, memoryMiB: 16384 },
-  "t3a.micro": { vcpu: 2, memoryMiB: 1024 },
-  "t3a.small": { vcpu: 2, memoryMiB: 2048 },
-  "t3a.medium": { vcpu: 2, memoryMiB: 4096 },
-  "t3a.large": { vcpu: 2, memoryMiB: 8192 },
-  "t2.micro": { vcpu: 1, memoryMiB: 1024 },
-  "t2.small": { vcpu: 1, memoryMiB: 2048 },
-  "t2.medium": { vcpu: 2, memoryMiB: 4096 },
-  "m5.large": { vcpu: 2, memoryMiB: 8192 },
-  "m5.xlarge": { vcpu: 4, memoryMiB: 16384 },
-  "m6i.large": { vcpu: 2, memoryMiB: 8192 },
-  "m6i.xlarge": { vcpu: 4, memoryMiB: 16384 },
-  "c5.large": { vcpu: 2, memoryMiB: 4096 },
-  "c5.xlarge": { vcpu: 4, memoryMiB: 8192 },
+  "t4g.nano": { vcpu: 2, memoryMiB: 512, architecture: "arm64" },
+  "t4g.micro": { vcpu: 2, memoryMiB: 1024, architecture: "arm64" },
+  "t4g.small": { vcpu: 2, memoryMiB: 2048, architecture: "arm64" },
+  "t4g.medium": { vcpu: 2, memoryMiB: 4096, architecture: "arm64" },
+  "t4g.large": { vcpu: 2, memoryMiB: 8192, architecture: "arm64" },
+  "t4g.xlarge": { vcpu: 4, memoryMiB: 16384, architecture: "arm64" },
+  "t3.nano": { vcpu: 2, memoryMiB: 512, architecture: "x86_64" },
+  "t3.micro": { vcpu: 2, memoryMiB: 1024, architecture: "x86_64" },
+  "t3.small": { vcpu: 2, memoryMiB: 2048, architecture: "x86_64" },
+  "t3.medium": { vcpu: 2, memoryMiB: 4096, architecture: "x86_64" },
+  "t3.large": { vcpu: 2, memoryMiB: 8192, architecture: "x86_64" },
+  "t3.xlarge": { vcpu: 4, memoryMiB: 16384, architecture: "x86_64" },
+  "t3a.micro": { vcpu: 2, memoryMiB: 1024, architecture: "x86_64" },
+  "t3a.small": { vcpu: 2, memoryMiB: 2048, architecture: "x86_64" },
+  "t3a.medium": { vcpu: 2, memoryMiB: 4096, architecture: "x86_64" },
+  "t3a.large": { vcpu: 2, memoryMiB: 8192, architecture: "x86_64" },
+  "t2.micro": { vcpu: 1, memoryMiB: 1024, architecture: "x86_64" },
+  "t2.small": { vcpu: 1, memoryMiB: 2048, architecture: "x86_64" },
+  "t2.medium": { vcpu: 2, memoryMiB: 4096, architecture: "x86_64" },
+  "m5.large": { vcpu: 2, memoryMiB: 8192, architecture: "x86_64" },
+  "m5.xlarge": { vcpu: 4, memoryMiB: 16384, architecture: "x86_64" },
+  "m6i.large": { vcpu: 2, memoryMiB: 8192, architecture: "x86_64" },
+  "m6i.xlarge": { vcpu: 4, memoryMiB: 16384, architecture: "x86_64" },
+  "c5.large": { vcpu: 2, memoryMiB: 4096, architecture: "x86_64" },
+  "c5.xlarge": { vcpu: 4, memoryMiB: 8192, architecture: "x86_64" },
 };
 
 export function rawToCapacity(raw: RawInstanceCapacity): InstanceCapacity {
-  return { totalCpu: raw.vcpu * CPU_SHARES_PER_VCPU, totalMemory: raw.memoryMiB };
+  return {
+    totalCpu: raw.vcpu * CPU_SHARES_PER_VCPU,
+    totalMemory: raw.memoryMiB,
+    architecture: raw.architecture,
+  };
 }
 
 /** Capacity for a known instance type, or null if it isn't in the table. */
@@ -152,17 +165,19 @@ export interface SmallestTypeOptions {
   reservedCpu?: number;
   /** Held-back memory MB (default {@link DEFAULT_RESERVED_MEMORY}). */
   reservedMemory?: number;
-  /** Never return a type smaller than this (default "t3.small" — t3.micro's 1 GB is
-   * tight for the OS + agent + Caddy). */
+  /** Never return a type smaller than this (default "t4g.micro"). */
   floor?: string;
+  /** Restrict candidates to one CPU architecture. */
+  architecture?: NodeArchitecture;
 }
 
 /** Burstable t-series first (cheap, the right default for small nodes), then others. */
 function familyRank(instanceType: string): number {
-  if (instanceType.startsWith("t3.")) return 0;
-  if (instanceType.startsWith("t3a.")) return 1;
-  if (instanceType.startsWith("t2.")) return 2;
-  return 3;
+  if (instanceType.startsWith("t4g.")) return 0;
+  if (instanceType.startsWith("t3.")) return 1;
+  if (instanceType.startsWith("t3a.")) return 2;
+  if (instanceType.startsWith("t2.")) return 3;
+  return 4;
 }
 
 /**
@@ -178,10 +193,12 @@ export function smallestInstanceTypeFor(
 ): { instanceType: string; capacity: InstanceCapacity } | null {
   const reservedCpu = opts.reservedCpu ?? DEFAULT_RESERVED_CPU;
   const reservedMemory = opts.reservedMemory ?? DEFAULT_RESERVED_MEMORY;
-  const floorCap = lookupInstanceCapacity(opts.floor ?? "t3.small");
+  const floorCap = lookupInstanceCapacity(opts.floor ?? "t4g.micro");
+  const targetArchitecture = opts.architecture ?? floorCap?.architecture;
 
   const candidates = Object.entries(INSTANCE_CAPACITY_TABLE)
     .map(([instanceType, raw]) => ({ instanceType, capacity: rawToCapacity(raw) }))
+    .filter(({ capacity }) => (targetArchitecture ? capacity.architecture === targetArchitecture : true))
     .filter(({ capacity }) =>
       floorCap
         ? capacity.totalCpu >= floorCap.totalCpu && capacity.totalMemory >= floorCap.totalMemory

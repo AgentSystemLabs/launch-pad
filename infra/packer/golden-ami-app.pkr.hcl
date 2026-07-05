@@ -12,10 +12,14 @@ variable "region" {
   default = "us-east-1"
 }
 
-# Prebuilt linux/amd64 APP agent binary (scripts/build-agent-binaries.sh →
-# packages/agent-rust/dist/agent-app).
+# Prebuilt linux APP agent binary for var.architecture.
 variable "agent_binary_path" {
   type = string
+}
+
+variable "architecture" {
+  type    = string
+  default = "x86_64"
 }
 
 variable "agent_version" {
@@ -29,8 +33,9 @@ variable "ami_name_prefix" {
 }
 
 locals {
-  build_time = formatdate("YYYYMMDD-hhmmss", timestamp())
-  ami_name   = "${var.ami_name_prefix}-${var.agent_version}-${local.build_time}"
+  build_time            = formatdate("YYYYMMDD-hhmmss", timestamp())
+  ami_name              = "${var.ami_name_prefix}-${var.architecture}-${var.agent_version}-${local.build_time}"
+  builder_instance_type = var.architecture == "arm64" ? "t4g.small" : "t3.small"
 }
 
 # APP golden AMI: Docker + CloudWatch Agent + the Rust app agent. Deliberately NO
@@ -39,7 +44,7 @@ locals {
 # `node upgrade-agent` depends on.
 source "amazon-ebs" "launch_pad_golden_app" {
   region          = var.region
-  instance_type   = "t3.small"
+  instance_type   = local.builder_instance_type
   ssh_username    = "ec2-user"
   ami_name        = local.ami_name
   # Public on purpose: the AMI ids are committed to the CLI's manifest and launched
@@ -56,10 +61,10 @@ source "amazon-ebs" "launch_pad_golden_app" {
 
   source_ami_filter {
     filters = {
-      name                = "al2023-ami-*-kernel-*-x86_64"
+      name                = "al2023-ami-*-kernel-*-${var.architecture}"
       root-device-type    = "ebs"
       virtualization-type = "hvm"
-      architecture        = "x86_64"
+      architecture        = var.architecture
     }
     owners      = ["amazon"]
     most_recent = true
@@ -72,6 +77,7 @@ source "amazon-ebs" "launch_pad_golden_app" {
     LaunchPadRole = "app"
     AgentType     = "rust"
     AgentVersion  = var.agent_version
+    Architecture  = var.architecture
   }
 }
 
@@ -103,7 +109,7 @@ build {
       role          = "app"
       agent_type    = "rust"
       agent_version = var.agent_version
-      architecture  = "x86_64"
+      architecture  = var.architecture
     }
   }
 }

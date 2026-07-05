@@ -85,6 +85,52 @@ describe("parseLaunchPadConfig", () => {
       parseLaunchPadConfig({ project: "my-app", service: [worker], extra: true }),
     ).toThrow();
   });
+
+  it("parses one-off jobs and applies build/env defaults", () => {
+    const cfg = parseLaunchPadConfig({
+      project: "my-app",
+      service: [web],
+      job: [{ name: "migrate", cpu: 256, memory: 128, secrets: ["DATABASE_URL"] }],
+    });
+    expect(cfg.job?.[0]).toMatchObject({
+      name: "migrate",
+      dockerfile: "./Dockerfile",
+      context: ".",
+      env: {},
+      secrets: ["DATABASE_URL"],
+    });
+  });
+
+  it("rejects job names that collide with services, databases, or jobs", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [worker], job: [{ name: "worker", cpu: 1, memory: 1 }] }),
+    ).toThrow(/job name.*worker.*collides/);
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [worker],
+        database: [{ name: "primary" }],
+        job: [{ name: "primary", cpu: 1, memory: 1 }],
+      }),
+    ).toThrow(/job name.*primary.*collides/);
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [worker],
+        job: [{ name: "migrate", cpu: 1, memory: 1 }, { name: "migrate", cpu: 1, memory: 1 }],
+      }),
+    ).toThrow(/job name.*migrate.*collides/);
+  });
+
+  it("rejects unsupported keys inside a job", () => {
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [worker],
+        job: [{ name: "migrate", cpu: 256, memory: 128, cron: "* * * * *" }],
+      }),
+    ).toThrow(/job\[0\]\.cron: unsupported key/);
+  });
 });
 
 describe("component (federated multi-repo deploys)", () => {

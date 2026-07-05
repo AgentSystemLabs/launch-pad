@@ -9,7 +9,16 @@ import {
 
 describe("instance capacity", () => {
   it("derives shares + MB for a known type", () => {
-    expect(lookupInstanceCapacity("t3.small")).toEqual({ totalCpu: 2048, totalMemory: 2048 });
+    expect(lookupInstanceCapacity("t3.small")).toEqual({
+      totalCpu: 2048,
+      totalMemory: 2048,
+      architecture: "x86_64",
+    });
+    expect(lookupInstanceCapacity("t4g.micro")).toEqual({
+      totalCpu: 2048,
+      totalMemory: 1024,
+      architecture: "arm64",
+    });
   });
 
   it("returns null for an unknown type", () => {
@@ -17,9 +26,10 @@ describe("instance capacity", () => {
   });
 
   it("converts raw EC2 shape to shares", () => {
-    expect(rawToCapacity({ vcpu: 4, memoryMiB: 16384 })).toEqual({
+    expect(rawToCapacity({ vcpu: 4, memoryMiB: 16384, architecture: "arm64" })).toEqual({
       totalCpu: 4096,
       totalMemory: 16384,
+      architecture: "arm64",
     });
   });
 
@@ -109,29 +119,29 @@ describe("checkCapacity", () => {
 
 describe("smallestInstanceTypeFor", () => {
   it("returns the floor for zero demand (e.g. a dedicated edge)", () => {
-    expect(smallestInstanceTypeFor(0, 0)?.instanceType).toBe("t3.small");
+    expect(smallestInstanceTypeFor(0, 0)?.instanceType).toBe("t4g.micro");
   });
 
   it("never returns below the floor even for a tiny demand", () => {
-    // 256 shares / 256 MB would fit t3.micro, but the floor is t3.small.
-    expect(smallestInstanceTypeFor(256, 256)?.instanceType).toBe("t3.small");
+    // 256 shares / 256 MB would fit t4g.nano, but the floor is t4g.micro.
+    expect(smallestInstanceTypeFor(256, 256)?.instanceType).toBe("t4g.micro");
   });
 
   it("steps up to the next size when memory exceeds the floor's allocatable", () => {
-    // t3.small allocatable mem = 2048 − 512 = 1536; 3000 needs the 4096 tier.
-    expect(smallestInstanceTypeFor(0, 3000)?.instanceType).toBe("t3.medium");
+    // t4g.micro allocatable mem = 1024 − 512 = 512; 3000 needs the 4096 tier.
+    expect(smallestInstanceTypeFor(0, 3000)?.instanceType).toBe("t4g.medium");
   });
 
   it("respects reserved capacity at the boundary", () => {
-    // t3.small allocatable cpu = 2048 − 256 = 1792; exactly 1792 still fits.
-    expect(smallestInstanceTypeFor(1792, 0)?.instanceType).toBe("t3.small");
+    // t4g.micro allocatable cpu = 2048 − 256 = 1792; exactly 1792 still fits.
+    expect(smallestInstanceTypeFor(1792, 0)?.instanceType).toBe("t4g.micro");
     // one share over and no 2-vCPU type fits → smallest 4-vCPU box (by memory).
-    expect(smallestInstanceTypeFor(1793, 0)?.instanceType).toBe("c5.xlarge");
+    expect(smallestInstanceTypeFor(1793, 0)?.instanceType).toBe("t4g.xlarge");
   });
 
   it("prefers the t3 family over equal-capacity alternatives", () => {
-    // c5.large / t2.medium / t3.medium all = 2 vCPU · 4096 MB → t3 wins.
-    expect(smallestInstanceTypeFor(0, 3584)?.instanceType).toBe("t3.medium");
+    // c5.large / t2.medium / t3.medium / t4g.medium all = 2 vCPU · 4096 MB → t4g wins.
+    expect(smallestInstanceTypeFor(0, 3584)?.instanceType).toBe("t4g.medium");
   });
 
   it("returns null when nothing in the table fits", () => {
@@ -141,5 +151,11 @@ describe("smallestInstanceTypeFor", () => {
   it("honors a custom floor + reserved overrides", () => {
     const r = smallestInstanceTypeFor(0, 0, { floor: "t3.micro", reservedCpu: 0, reservedMemory: 0 });
     expect(r?.instanceType).toBe("t3.micro");
+  });
+
+  it("can restrict sizing to x86_64 for an existing x86 pool", () => {
+    const r = smallestInstanceTypeFor(0, 0, { architecture: "x86_64" });
+    expect(r?.instanceType).toBe("t3.micro");
+    expect(r?.capacity.architecture).toBe("x86_64");
   });
 });

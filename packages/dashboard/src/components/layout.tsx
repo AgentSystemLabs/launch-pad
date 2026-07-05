@@ -248,6 +248,28 @@ const copyPathScript = `
 })();
 `;
 
+/** A [data-confirm] form shows a confirm() dialog before submitting; cancels submission if declined. */
+const confirmSubmitScript = `
+(function () {
+  if (window.__lpConfirmSubmitBound) return;
+  window.__lpConfirmSubmitBound = true;
+
+  document.addEventListener(
+    "submit",
+    function (e) {
+      var form = e.target.closest && e.target.closest("[data-confirm]");
+      if (!form) return;
+      var message = form.getAttribute("data-confirm");
+      if (message && !window.confirm(message)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    },
+    true
+  );
+})();
+`;
+
 function NavLink({
   href,
   swap,
@@ -350,6 +372,7 @@ export function registerLayout(station: Station<AppCtx>) {
       <script dangerouslySetInnerHTML={{ __html: busySpinnerScript }} />
       <script dangerouslySetInnerHTML={{ __html: connectionStatusScript }} />
       <script dangerouslySetInnerHTML={{ __html: copyPathScript }} />
+      <script dangerouslySetInnerHTML={{ __html: confirmSubmitScript }} />
     </>
   ));
 

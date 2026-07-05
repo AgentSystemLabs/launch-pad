@@ -19,12 +19,12 @@ labels so a live node can migrate TS → Rust without rolling its containers.
 
 ```bash
 cargo test                # all modules (default features = edge + app)
-pnpm build:agent          # → dist/agent-edge + dist/agent-app
-                          #   linux/amd64 static musl release builds
+pnpm build:agent          # → dist/{x86_64,arm64}/agent-edge + agent-app
+                          #   static musl release builds
                           #   (cargo-zigbuild + zig on non-Linux hosts)
 ```
 
-The CLI resolves `dist/agent-<role>` through this package's npm name
+The CLI resolves `dist/<arch>/agent-<role>` through this package's npm name
 (`@agentsystemlabs/launch-pad-agent`) when it uploads the binary at
 provision/upgrade time; the golden AMI builds bake the same files.
 

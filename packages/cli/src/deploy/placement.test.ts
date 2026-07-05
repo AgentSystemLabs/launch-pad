@@ -15,6 +15,7 @@ import {
 function cnode(nodeId: string, over: Partial<CandidateNode> = {}): CandidateNode {
   return {
     nodeId,
+    architecture: "arm64",
     allocatableCpu: 2048,
     allocatableMemory: 2048,
     steadyCpu: 0,
@@ -47,6 +48,7 @@ describe("bootstrapCandidateNode (empty-cluster bootstrap)", () => {
   it("is an empty app candidate with the given id", () => {
     const n = bootstrapCandidateNode("app-1");
     expect(n.nodeId).toBe("app-1");
+    expect(n.architecture).toBe("arm64");
     expect(n.steadyCpu).toBe(0);
     expect(n.steadyMemory).toBe(0);
     expect(n.maxSurgeCpu).toBe(0);
@@ -68,6 +70,7 @@ describe("templateCandidateNode", () => {
     const t = templateCandidateNode("app-2", existing);
     expect(t.allocatableCpu).toBe(2048); // max(1024, 2048)
     expect(t.allocatableMemory).toBe(2048);
+    expect(t.architecture).toBe("arm64");
     expect(t.steadyCpu).toBe(0);
     expect(t.maxSurgeCpu).toBe(0);
   });

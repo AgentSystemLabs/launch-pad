@@ -89,6 +89,7 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
     clusterId,
     nodeId,
     role,
+    entry.architecture,
     UPGRADE_PRESIGN_TTL_SECONDS,
   );
 

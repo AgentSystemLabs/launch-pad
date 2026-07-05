@@ -12,6 +12,7 @@ import {
   edgeConfigKey,
   type LaunchPadConfig,
   type NodeRegistryEntry,
+  dockerPlatformForArchitecture,
   PROTOCOL_VERSION,
   type ServiceConfig,
   type ServiceDecl,
@@ -111,7 +112,7 @@ import { waitForConvergence, type WatchResult, type WatchTarget } from "../deplo
 import { CliError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
 import { DEFAULT_AGENT_TYPE } from "../provision/agent-bundle";
-import { provisionRoleOf, resolveNodeAmiByRole } from "../provision/golden-ami";
+import { nodeAmiLookupKey, provisionRoleOf, resolveNodeAmiByRole } from "../provision/golden-ami";
 import { provisionNode } from "../provision/provision-node";
 import { panel, table } from "../ui/box";
 import { isJsonMode, log, printJson, spinner } from "../ui/log";
@@ -132,7 +133,7 @@ const DEFAULT_CONVERGE_TIMEOUT_SECONDS = 180;
 
 /**
  * Name of the dedicated edge node auto-created when the cluster doesn't have one
- * yet. Every cluster runs exactly one Caddy edge on its own node (t3.nano by
+ * yet. Every cluster runs exactly one Caddy edge on its own node (t4g.nano by
  * default), so every deploy needs at least 2 nodes: the edge + ≥1 app node.
  */
 const EDGE_BOOTSTRAP_NODE_ID = "edge-1";
@@ -200,6 +201,7 @@ function synthesizeEntry(aws: AwsEnv, a: Extract<NodeAction, { kind: "create" }>
     clusterId: aws.clusterId,
     instanceId: null,
     instanceType: a.instanceType,
+    architecture: a.architecture,
     region: aws.region,
     availabilityZone: null,
     role: a.role,
@@ -865,10 +867,15 @@ async function recordPreviewState(
  * Build + push every not-yet-built service on AWS CodeBuild (`deploy --remote-build`):
  * ensure the cluster's build project, then per service pack the context tarball,
  * upload it under the footprint's `builds/` prefix, run one build, and clean the
- * tarball up. The resulting images are byte-for-byte the same contract as the local
- * buildx path (immutable tag, linux/amd64) — everything after the build is identical.
+ * tarball up. The resulting images use the same target platform as the local buildx
+ * path (immutable tag, architecture-matched) — everything after the build is identical.
  */
-async function runRemoteBuilds(aws: AwsEnv, built: BuiltService[], ownerProject: string): Promise<void> {
+async function runRemoteBuilds(
+  aws: AwsEnv,
+  built: BuiltService[],
+  ownerProject: string,
+  platformByService: Map<string, string>,
+): Promise<void> {
   const pending: BuiltService[] = [];
   for (const b of built) {
     // A managed database runs a pinned engine image — nothing to build or push.
@@ -918,6 +925,7 @@ async function runRemoteBuilds(aws: AwsEnv, built: BuiltService[], ownerProject:
         contextKey,
         imageUri: b.image,
         dockerfile,
+        platform: platformByService.get(b.decl.name) ?? "linux/arm64",
         ecrRegistry,
         onProgress: (text) => {
           spin.text = `${b.decl.name} → ${b.tag}: ${text}`;
@@ -1159,7 +1167,7 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
   });
 
   // The cluster's dedicated edge: cluster.json's defaultEdge, else the registry's
-  // single edge-role node, else a fresh `edge-1` auto-provisioned below (t3.nano).
+  // single edge-role node, else a fresh `edge-1` auto-provisioned below (t4g.nano).
   // Caddy never co-locates with app containers, so this node is ALWAYS separate
   // from the app pool — a deploy needs at least 2 nodes (edge + app).
   let edgeNodeId = clusterCfg?.defaultEdge ?? null;
@@ -1347,10 +1355,12 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     }
   }
 
+  const candidateArchitecture = new Map(candidateNodes.map((n) => [n.nodeId, n.architecture]));
   const demands: NodeDemand[] = [...appNodeIds].map((nodeId) => {
     const d = demandByNode.get(nodeId) ?? { cpu: 0, memory: 0, surgeCpu: 0, surgeMemory: 0 };
     return {
       nodeId,
+      architecture: candidateArchitecture.get(nodeId) ?? nodes.get(nodeId)?.architecture ?? "arm64",
       cpu: d.cpu,
       memory: d.memory,
       surgeCpu: d.surgeCpu,
@@ -1474,14 +1484,24 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
       // Resolve the AMIs + VPC once for the whole batch — one AMI per ROLE, since
       // the edge and app golden AMIs are different images.
       const rolesNeeded = new Set([
-        ...toCreate.map((a) => provisionRoleOf(a.role)),
+        ...toCreate.map((a) =>
+          nodeAmiLookupKey({ role: provisionRoleOf(a.role), architecture: a.architecture }),
+        ),
         ...repairs
           .filter((r) => r.drift.action.kind === "recreate")
-          .map((r) => provisionRoleOf(r.entry.role)),
+          .map((r) =>
+            nodeAmiLookupKey({
+              role: provisionRoleOf(r.entry.role),
+              architecture: r.entry.architecture,
+            }),
+          ),
       ]);
       const amiByRole = await resolveNodeAmiByRole(
         { ec2: aws.ec2, ssm: aws.ssm, region: aws.region, explicitAmiId: opts.ami },
-        rolesNeeded,
+        [...rolesNeeded].map((key) => {
+          const [role, architecture] = key.split(":");
+          return { role: role as "app" | "edge", architecture: architecture as "x86_64" | "arm64" };
+        }),
       );
       const vpcId = toCreate.length > 0 ? await getDefaultVpcId(aws.ec2) : undefined;
       const agentVersion = readVersion();
@@ -1493,7 +1513,9 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
       );
       for (const a of createOrder) {
         const spin = spinner(`provisioning ${a.nodeId} (${a.instanceType})…`).start();
-        const ami = amiByRole.get(provisionRoleOf(a.role));
+        const ami = amiByRole.get(
+          nodeAmiLookupKey({ role: provisionRoleOf(a.role), architecture: a.architecture }),
+        );
         try {
           const entry = await provisionNode({
             aws,
@@ -1525,7 +1547,12 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
       for (const r of repairOrder) {
         const verb = repairVerb(r.drift);
         const spin = spinner(`${verb.ing} ${r.entry.nodeId}…`).start();
-        const ami = amiByRole.get(provisionRoleOf(r.entry.role));
+        const ami = amiByRole.get(
+          nodeAmiLookupKey({
+            role: provisionRoleOf(r.entry.role),
+            architecture: r.entry.architecture,
+          }),
+        );
         try {
           const updated = await applyNodeDrift({
             aws,
@@ -1629,6 +1656,27 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     }
   }
 
+  const platformByService = new Map<string, string>();
+  for (const b of built) {
+    const r = resolved.get(b.decl.name) as Resolved;
+    const architectures = new Set(
+      r.placements.map((p) => {
+        const node = nodes.get(p.nodeId);
+        if (!node) {
+          throw new CliError(`service "${b.decl.name}" was placed on unknown node "${p.nodeId}"`);
+        }
+        return node.architecture;
+      }),
+    );
+    if (architectures.size > 1) {
+      throw new CliError(`service "${b.decl.name}" spans mixed app-node architectures`, {
+        hint: "keep app node pools homogeneous for now, or deploy the service to one architecture at a time",
+      });
+    }
+    const architecture = [...architectures][0] ?? "arm64";
+    platformByService.set(b.decl.name, dockerPlatformForArchitecture(architecture));
+  }
+
   // Nodes this footprint occupies today but the new placement no longer targets.
   // Skipped for partial (--service / --changed) deploys: a subset deploy can't see the
   // project's full intended placement, so "vacated" would wrongly include the other
@@ -1686,7 +1734,7 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
 
   if (!reuseExistingImages) {
     if (opts.remoteBuild === true) {
-      await runRemoteBuilds(aws, built, ownerProject);
+      await runRemoteBuilds(aws, built, ownerProject, platformByService);
     } else {
       const prep = spinner("preparing local Docker build environment…").start();
       try {
@@ -1707,12 +1755,14 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
           log.step(`${color.cyan(b.decl.name)}: image ${color.dim(b.tag)} already in ECR — skipping build`);
           continue;
         }
-        const spin = spinner(`building ${b.decl.name} → ${b.tag} (linux/amd64)`).start();
+        const platform = platformByService.get(b.decl.name) ?? "linux/arm64";
+        const spin = spinner(`building ${b.decl.name} → ${b.tag} (${platform})`).start();
         try {
           await buildAndPush({
             contextDir: b.contextDir,
             dockerfile: b.dockerfilePath,
             imageUri: b.image,
+            platform,
             verbose: opts.verbose,
           });
           spin.succeed(`built + pushed ${color.cyan(b.decl.name)} → ${color.dim(b.tag)}`);
@@ -2069,7 +2119,7 @@ export function registerDeploy(program: Command): void {
         "Placement is automatic: the scheduler bin-packs services across the cluster's app",
         "nodes by free CPU/memory (spreads across empty nodes when possible; stacks when",
         "necessary), auto-adding app nodes when the pool is full. Web traffic always routes",
-        "through the cluster's dedicated edge node (Caddy on its own t3.nano by default) —",
+        "through the cluster's dedicated edge node (Caddy on its own t4g.nano by default) —",
         "every cluster is at least 2 nodes: the edge + 1 app node. A service with",
         "[[service.volumes]] is sticky: it stays on the node it first landed on (its data",
         "lives on that node's disk). The resolved placement map prints on every deploy.",
@@ -2101,7 +2151,7 @@ export function registerDeploy(program: Command): void {
         "",
         "--remote-build builds every image on AWS CodeBuild instead of local docker: deploy",
         "uploads each service's build context (a tarball honoring .dockerignore) to the state",
-        "bucket, a per-cluster CodeBuild project builds + pushes the same immutable linux/amd64",
+        "bucket, a per-cluster CodeBuild project builds + pushes the same immutable architecture-matched",
         "tag the local path would, and the deploy continues unchanged. First use creates the",
         "project + a least-privilege service role (~30–60s); CodeBuild bills per build minute.",
         "Ideal for CI runners without a docker daemon: `launchpad deploy --remote-build --yes`.",

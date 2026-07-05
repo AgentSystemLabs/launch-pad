@@ -1,4 +1,6 @@
 import {
+  caddyArchForArchitecture,
+  type NodeArchitecture,
   SYSTEM_LOG_DIR,
   type SystemComponent,
   systemComponentsForRole,
@@ -17,6 +19,7 @@ export interface ExternalBootstrapParams {
   agentBinaryUrl: string;
   /** The systemd unit text (rendered with `EnvironmentFile=${AGENT_ENV_FILE}`). */
   systemdUnit: string;
+  architecture?: NodeArchitecture;
   aws: { accessKeyId: string; secretAccessKey: string; region: string };
 }
 
@@ -48,9 +51,9 @@ WantedBy=multi-user.target
 `;
 }
 
-function caddyBlock(): string {
+function caddyBlock(architecture: NodeArchitecture): string {
   return `# --- Caddy (edge role only; static binary, admin API on 127.0.0.1:2019) ---
-curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/local/bin/caddy
+curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${caddyArchForArchitecture(architecture)}" -o /usr/local/bin/caddy
 chmod +x /usr/local/bin/caddy
 mkdir -p /var/lib/caddy
 
@@ -97,6 +100,7 @@ systemctl enable --now caddy
  */
 export function renderExternalBootstrap(p: ExternalBootstrapParams): string {
   const { role, agentConfigJson, agentBinaryUrl, systemdUnit, aws } = p;
+  const architecture = p.architecture ?? "x86_64";
   const forwarders = systemComponentsForRole(role)
     .map((component) => {
       const unitName = `launch-pad-logforward-${component}`;
@@ -117,7 +121,7 @@ $PKG_INSTALL docker
 systemctl enable --now docker
 `
       : "";
-  const edgeBlock = role === "edge" ? caddyBlock() : "";
+  const edgeBlock = role === "edge" ? caddyBlock(architecture) : "";
 
   return `#!/bin/bash
 set -euxo pipefail

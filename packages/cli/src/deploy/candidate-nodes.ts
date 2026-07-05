@@ -107,6 +107,7 @@ export async function buildCandidateNodes(
     }
     candidateNodes.push({
       nodeId: id,
+      architecture: entry.architecture,
       allocatableCpu: allocatableCpu(entry),
       allocatableMemory: allocatableMemory(entry),
       steadyCpu,

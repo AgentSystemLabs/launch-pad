@@ -408,6 +408,7 @@ mod tests {
             service: service.into(),
             config_stamp: String::new(),
             cron_fire_ms: None,
+            job_run_id: None,
             exit_code: None,
         }
     }

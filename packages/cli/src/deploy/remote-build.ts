@@ -114,9 +114,9 @@ export function buildCodeBuildServicePolicy(params: CodeBuildPolicyParams): stri
  *   ECR_REGISTRY                 — `<acct>.dkr.ecr.<region>.amazonaws.com`
  *   IMAGE_URI                    — full immutable tag to build + push
  *   DOCKERFILE                   — context-relative dockerfile path
+ *   DOCKER_PLATFORM              — linux/amd64 or linux/arm64, based on placement
  *
- * `--platform linux/amd64` keeps the wire contract with nodes identical to the local
- * buildx path (nodes are x86_64); AWS_REGION is set by CodeBuild itself.
+ * AWS_REGION is set by CodeBuild itself.
  */
 export function remoteBuildSpec(): string {
   return [
@@ -139,7 +139,7 @@ export function remoteBuildSpec(): string {
     "    commands:",
     "      - |",
     "        n=0",
-    '        until docker build --platform linux/amd64 -t "$IMAGE_URI" -f "/tmp/build-context/$DOCKERFILE" /tmp/build-context; do',
+    '        until docker build --platform "$DOCKER_PLATFORM" -t "$IMAGE_URI" -f "/tmp/build-context/$DOCKERFILE" /tmp/build-context; do',
     "          n=$((n+1))",
     '          [ "$n" -ge 3 ] && exit 1',
     '          echo "docker build failed (attempt $n/3) — retrying in $((n*20))s (Docker Hub rate-limits CodeBuild IPs)"',

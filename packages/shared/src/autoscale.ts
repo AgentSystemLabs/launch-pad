@@ -12,6 +12,7 @@
  */
 
 import { z } from "zod";
+import type { NodeArchitecture } from "./architecture";
 import { lookupInstanceCapacity } from "./capacity";
 import { generateNodeName } from "./node-names";
 import { nodeHostsContainers } from "./node-role";
@@ -231,26 +232,29 @@ export interface ScaleOutNodeSpec {
   nodeId: string;
   role: "app";
   instanceType: string;
+  architecture: NodeArchitecture;
   /** The dedicated edge fronting the new app node. */
   edgeNodeId: string;
 }
 
 /**
  * What node a scale-out should create: a generated `<noun>-<verb>-<adverb>` id
- * (mirrors deploy's auto-add naming), sized like the largest node already in the
- * pool (floor t3.small), behind the cluster's dedicated edge. Pass `rng` for a
- * deterministic name in tests.
+ * (mirrors deploy's auto-add naming), sized like the largest same-architecture node
+ * already in the pool (default ARM floor t4g.micro), behind the cluster's dedicated
+ * edge. Pass `rng` for a deterministic name in tests.
  */
 export function scaleOutNodeSpec(input: {
   existingNodeIds: string[];
-  pool: Array<{ nodeId: string; instanceType: string }>;
+  pool: Array<{ nodeId: string; instanceType: string; architecture?: NodeArchitecture }>;
   defaultEdge: string;
   rng?: () => number;
 }): ScaleOutNodeSpec {
   const nodeId = generateNodeName(input.existingNodeIds, input.rng);
-  let instanceType = "t3.small";
+  const architecture = input.pool[0]?.architecture ?? "arm64";
+  let instanceType = architecture === "arm64" ? "t4g.micro" : "t3.small";
   let best = lookupInstanceCapacity(instanceType);
   for (const n of input.pool) {
+    if ((n.architecture ?? "x86_64") !== architecture) continue;
     const cap = lookupInstanceCapacity(n.instanceType);
     if (!cap) continue;
     if (
@@ -266,6 +270,7 @@ export function scaleOutNodeSpec(input: {
     nodeId,
     role: "app",
     instanceType,
+    architecture,
     edgeNodeId: input.defaultEdge,
   };
 }

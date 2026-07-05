@@ -68,13 +68,33 @@ test("scaffold a project then edit + save env", async ({ page }) => {
   await expect(textarea).toBeVisible();
   await expect(textarea).toHaveValue("NODE_ENV=production");
 
-  // Edit + save → toml on disk is rewritten and the service redeploys
+  mkdirSync(OTHER_PROJ_DIR, { recursive: true });
+  writeFileSync(
+    join(OTHER_PROJ_DIR, "launch-pad.toml"),
+    'project = "other"\n\n[[service]]\nname = "demo"\nenv = { NODE_ENV = "production" }\n',
+  );
+
+  // A forged form field must not redirect the save to a different local path.
+  await page
+    .getByTestId("env-editor")
+    .locator('form[p-action="projects:env:save"]')
+    .evaluate((form, dir) => {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "dir";
+      input.value = dir;
+      form.appendChild(input);
+    }, OTHER_PROJ_DIR);
+
+  // Edit + save → only the registered project's toml is rewritten and the service redeploys
   await textarea.fill("NODE_ENV=production\nFEATURE_X=on");
   await page.getByTestId("env-editor").getByRole("button", { name: "Save & redeploy" }).click();
   await expect(page.getByText(/Saved env \+ redeployed/)).toBeVisible();
 
   const toml = readFileSync(join(PROJ_DIR, "launch-pad.toml"), "utf8");
   expect(toml).toContain("FEATURE_X");
+  const otherToml = readFileSync(join(OTHER_PROJ_DIR, "launch-pad.toml"), "utf8");
+  expect(otherToml).not.toContain("FEATURE_X");
 });
 
 test("env save ignores a tampered project directory field", async ({ page }) => {
