@@ -17,8 +17,9 @@ import { SECRET_KEY_HINT, SECRET_KEY_REGEX } from "./secrets";
 /** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1–40 chars. */
 export const LABEL_REGEX = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
 
-/** Public hostname accepted for edge routing. */
-export const HOSTNAME_REGEX = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+/** Public hostname accepted for edge routing. Rejects IPv4 addresses, schemes, paths, ports, and wildcards. */
+export const HOSTNAME_REGEX =
+  /^(?!(\d{1,3}\.){3}\d{1,3}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 
 export const HOSTNAME_HINT =
   "a DNS hostname like api.example.com (no scheme, path, port, wildcard, or whitespace)";
@@ -77,7 +78,9 @@ export function domainPatternError(pattern: string): string | null {
   if (!tokens.includes("env")) {
     return "domainPattern must include the {env} token so environments don't collide on one domain";
   }
-  const projected = pattern.replace(/\{(env|service)\}/g, (_, k: string) => k);
+  // Project each token to its maximum allowed length (LABEL_REGEX max = 40 chars) so
+  // label-length overflow is caught at parse time rather than silently at deploy time.
+  const projected = pattern.replace(/\{(env|service)\}/g, () => "a".repeat(40));
   if (!HOSTNAME_REGEX.test(projected)) {
     return `domainPattern must resolve to ${HOSTNAME_HINT}`;
   }

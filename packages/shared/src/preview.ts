@@ -9,6 +9,10 @@ import { componentOwner, envProject, HOSTNAME_REGEX, LABEL_REGEX } from "./confi
  * of the CLI's own runtime guards.
  */
 const OWNER_REGEX = /^[a-z0-9][a-z0-9-]*$/;
+// HOSTNAME_REGEX (from config.ts) is intentionally stricter than the local regex it replaced:
+// labels must end with [a-z0-9], so hostnames like "foo-.example.com" are now rejected. Any
+// pre-existing S3 marker with a hyphen-terminated label is RFC-violating and can be re-written
+// by re-deploying the environment.
 
 /**
  * Preview-environment marker: one `projects/<project>-<env>/preview.json` per env

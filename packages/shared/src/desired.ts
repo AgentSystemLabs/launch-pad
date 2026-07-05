@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ServiceDatabaseSchema, VolumeDeclSchema } from "./config";
+import { HOSTNAME_HINT, HOSTNAME_REGEX, ServiceDatabaseSchema, VolumeDeclSchema } from "./config";
 import { PROTOCOL_VERSION } from "./constants";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import { SecretRefSchema } from "./secrets";
@@ -34,7 +34,7 @@ export type ServiceBackupConfig = z.infer<typeof ServiceBackupConfigSchema>;
  */
 export const IngressSchema = z
   .object({
-    domain: z.string().min(1),
+    domain: z.string().regex(HOSTNAME_REGEX, `domain must be ${HOSTNAME_HINT}`),
     port: z.number().int().min(1).max(65535),
     /** Node id of the dedicated edge that fronts this service. */
     edge: z.string().min(1),
