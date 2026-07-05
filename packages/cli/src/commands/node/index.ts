@@ -35,6 +35,7 @@ import {
   terminateInstance,
 } from "../../aws/ec2";
 import { awsErrorName, isDestroyAlreadyGoneError } from "../../aws/errors";
+import { parseSshCidr } from "../../aws/ssh-cidr";
 import {
   createExternalNodeAccessKey,
   deleteExternalNodeAccessKey,
@@ -177,6 +178,7 @@ interface CreateOptions extends GlobalOpts {
   role: string;
   edge?: string;
   keyName?: string;
+  sshCidr?: string;
   ami?: string;
   agentVersion?: string;
   amount?: string | number;
@@ -188,6 +190,14 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
   if (baseName !== undefined) assertValidNodeId(baseName);
   const amount = parseCreateAmount(opts.amount);
   if (opts.edge !== undefined) assertValidNodeId(opts.edge);
+  if (opts.sshCidr) {
+    parseSshCidr(opts.sshCidr);
+    if (!opts.keyName) {
+      throw new CliError("--ssh-cidr requires --key-name (the EC2 key pair to attach)", {
+        hint: "for remote shell without opening port 22, use AWS SSM Session Manager (enabled on launch-pad nodes)",
+      });
+    }
+  }
   const aws = await prepareAws(opts);
   // No name given → generate `<noun>-<verb>-<adverb>` id(s), unique against the
   // cluster's existing nodes. An explicit base name keeps the sequential behavior.
@@ -249,7 +259,8 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
           securityGroup: securityGroupName(name, aws.clusterId),
           iamRole: nodeRoleName(aws.clusterId, name),
           instanceProfile: nodeProfileName(aws.clusterId, name),
-          ssh: opts.keyName !== undefined,
+          sshCidr: opts.sshCidr ? parseSshCidr(opts.sshCidr) : undefined,
+          ssh: opts.sshCidr !== undefined,
           userData,
         });
       } else {
@@ -322,6 +333,7 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
         vpcId,
         edgeNodeId,
         keyName: opts.keyName,
+        sshCidr: opts.sshCidr ? parseSshCidr(opts.sshCidr) : undefined,
         onProgress: (t) => {
           spin.text = t;
         },
@@ -399,12 +411,13 @@ function printDryRun(
       securityGroup: securityGroupName(name, aws.clusterId),
       iamRole: nodeRoleName(aws.clusterId, name),
       instanceProfile: nodeProfileName(aws.clusterId, name),
-      ssh: opts.keyName !== undefined,
+      sshCidr: opts.sshCidr ? parseSshCidr(opts.sshCidr) : undefined,
+      ssh: opts.sshCidr !== undefined,
       userData,
     });
     return;
   }
-  const sshNote = opts.keyName ? " + 22" : "";
+  const sshNote = opts.sshCidr ? ` + 22 (${opts.sshCidr})` : "";
   const sgRule =
     opts.role === "app"
       ? `host ports ${color.dim(`(from edge ${opts.edge ?? "?"} only)`)}`
@@ -2375,7 +2388,11 @@ export function registerNode(program: Command): void {
     .option("--instance-type <type>", "EC2 instance type", "t4g.micro")
     .option("--role <role>", "node role: app | edge", "app")
     .option("--edge <nodeId>", "for an app node: the edge node that routes to it")
-    .option("--key-name <keypair>", "EC2 key pair for SSH (omit to disable SSH)")
+    .option("--key-name <keypair>", "EC2 key pair to attach (does not open port 22 unless --ssh-cidr is also set)")
+    .option(
+      "--ssh-cidr <cidr>",
+      "allow SSH (port 22) from this IPv4 CIDR only — requires --key-name; 0.0.0.0/0 is rejected",
+    )
     .option("--ami <id>", "AMI id (default: launchpad golden AMI, falling back to latest Amazon Linux 2023)")
     .option("--agent-version <semver>", "agent version to install (default: this CLI's version)")
     .option(

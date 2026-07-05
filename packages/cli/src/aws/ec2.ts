@@ -91,10 +91,46 @@ export async function describeInstanceTypeCapacity(
 }
 
 export interface SecurityGroupOptions {
-  ssh: boolean;
+  /** When set, allow SSH (port 22) from this CIDR only — never 0.0.0.0/0. */
+  sshCidr?: string | undefined;
   role: NodeRole;
   /** For an app node: the edge SG allowed to reach the host-port range (no public ingress). */
   edgeSecurityGroupId?: string | undefined;
+}
+
+/** Build ingress rules for a new node security group (pure — easy to unit test). */
+export function securityGroupIngressPermissions(opts: SecurityGroupOptions): IpPermission[] {
+  const perms: IpPermission[] = [];
+  if (opts.role === "edge") {
+    // Public HTTP/HTTPS — this node terminates TLS.
+    perms.push(
+      { IpProtocol: "tcp", FromPort: 80, ToPort: 80, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "http" }] },
+      { IpProtocol: "tcp", FromPort: 443, ToPort: 443, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "https" }] },
+    );
+  }
+  if (opts.role === "app") {
+    // App containers reachable ONLY by the edge SG, on the host-port range.
+    if (!opts.edgeSecurityGroupId) {
+      throw new CliError("an app node needs an edge to reach it", {
+        hint: "pass --edge <edge-node-id> when creating an app node",
+      });
+    }
+    perms.push({
+      IpProtocol: "tcp",
+      FromPort: HOST_PORT_MIN,
+      ToPort: HOST_PORT_MAX,
+      UserIdGroupPairs: [{ GroupId: opts.edgeSecurityGroupId, Description: "edge to app host ports" }],
+    });
+  }
+  if (opts.sshCidr) {
+    perms.push({
+      IpProtocol: "tcp",
+      FromPort: 22,
+      ToPort: 22,
+      IpRanges: [{ CidrIp: opts.sshCidr, Description: "ssh" }],
+    });
+  }
+  return perms;
 }
 
 export interface SecurityGroupTagContext {
@@ -161,36 +197,7 @@ export async function ensureSecurityGroup(
   if (!sgId) throw new CliError(`failed to create security group ${name}`);
   await ensureSecurityGroupTags(ec2, sgId, tags);
 
-  const perms: IpPermission[] = [];
-  if (opts.role === "edge") {
-    // Public HTTP/HTTPS — this node terminates TLS.
-    perms.push(
-      { IpProtocol: "tcp", FromPort: 80, ToPort: 80, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "http" }] },
-      { IpProtocol: "tcp", FromPort: 443, ToPort: 443, IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "https" }] },
-    );
-  }
-  if (opts.role === "app") {
-    // App containers reachable ONLY by the edge SG, on the host-port range.
-    if (!opts.edgeSecurityGroupId) {
-      throw new CliError("an app node needs an edge to reach it", {
-        hint: "pass --edge <edge-node-id> when creating an app node",
-      });
-    }
-    perms.push({
-      IpProtocol: "tcp",
-      FromPort: HOST_PORT_MIN,
-      ToPort: HOST_PORT_MAX,
-      UserIdGroupPairs: [{ GroupId: opts.edgeSecurityGroupId, Description: "edge to app host ports" }],
-    });
-  }
-  if (opts.ssh) {
-    perms.push({
-      IpProtocol: "tcp",
-      FromPort: 22,
-      ToPort: 22,
-      IpRanges: [{ CidrIp: "0.0.0.0/0", Description: "ssh" }],
-    });
-  }
+  const perms = securityGroupIngressPermissions(opts);
   if (perms.length > 0) {
     await ec2.send(new AuthorizeSecurityGroupIngressCommand({ GroupId: sgId, IpPermissions: perms }));
   }
