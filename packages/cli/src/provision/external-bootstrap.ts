@@ -7,6 +7,7 @@ import {
   systemLogFilePath,
 } from "@agentsystemlabs/launch-pad-shared";
 import { AGENT_INSTALL_PATH, AGENT_SYSTEMD_UNIT } from "./agent-upgrade";
+import { shellQuote } from "./shell-quote";
 
 /** Where external (BYOS) nodes keep their AWS credentials, loaded via systemd EnvironmentFile. */
 export const AGENT_ENV_FILE = "/etc/launch-pad/agent.env";
@@ -159,7 +160,7 @@ ${agentConfigJson}
 AGENTCONF
 
 # --- launchpad agent binary (role: ${role}) ---
-curl -fsSL "${agentBinaryUrl}" -o ${AGENT_INSTALL_PATH}
+curl -fsSL ${shellQuote(agentBinaryUrl)} -o ${AGENT_INSTALL_PATH}
 chmod 755 ${AGENT_INSTALL_PATH}
 
 # --- systemd unit ---

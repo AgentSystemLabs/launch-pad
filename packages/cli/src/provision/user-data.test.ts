@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { shellQuote } from "./shell-quote";
 import { renderSystemdUnit } from "./systemd-unit";
 import { type AgentConfig, renderUserData } from "./user-data";
 
@@ -41,6 +42,14 @@ describe("renderUserData (edge)", () => {
     expect(script).toContain("-o /opt/launch-pad/agent");
     expect(script).toContain("chmod +x /opt/launch-pad/agent");
     expect(script).toContain("systemctl enable --now launch-pad-agent");
+  });
+
+  it("shell-quotes the binary url before embedding it in user data", () => {
+    const hostileUrl = "https://example.com/agent?sig='$(touch /tmp/pwn)'";
+    const hostileScript = renderUserData({ agent: edgeAgent, agentBinaryUrl: hostileUrl });
+
+    expect(hostileScript).toContain(`curl -fsSL ${shellQuote(hostileUrl)} -o /opt/launch-pad/agent`);
+    expect(hostileScript).not.toContain(`curl -fsSL "${hostileUrl}"`);
   });
 
   it("runs Caddy on an edge node", () => {

@@ -4,6 +4,7 @@ import {
   type NodeRole,
 } from "@agentsystemlabs/launch-pad-shared";
 import { renderCloudWatchInstall } from "./cloudwatch";
+import { shellQuote } from "./shell-quote";
 import { renderSystemdUnit } from "./systemd-unit";
 
 export interface AgentConfig {
@@ -97,17 +98,18 @@ export function renderUserData(params: UserDataParams): string {
     installPackage: bootstrapMode === "full",
   });
 
-  if (bootstrapMode === "full" && !params.agentBinaryUrl) {
-    throw new Error("agentBinaryUrl is required for full bootstrap");
-  }
-
-  const fetchAgent =
-    bootstrapMode === "golden"
-      ? `# --- agent binary baked into the launchpad golden AMI ---
-test -x /opt/launch-pad/agent`
-      : `# --- launchpad agent binary (role: ${role}) ---
-curl -fsSL "${params.agentBinaryUrl}" -o /opt/launch-pad/agent
+  let fetchAgent: string;
+  if (bootstrapMode === "golden") {
+    fetchAgent = `# --- agent binary baked into the launchpad golden AMI ---
+test -x /opt/launch-pad/agent`;
+  } else {
+    if (!params.agentBinaryUrl) {
+      throw new Error("agentBinaryUrl is required for full bootstrap");
+    }
+    fetchAgent = `# --- launchpad agent binary (role: ${role}) ---
+curl -fsSL ${shellQuote(params.agentBinaryUrl)} -o /opt/launch-pad/agent
 chmod +x /opt/launch-pad/agent`;
+  }
 
   const dockerBlock =
     role === "app"

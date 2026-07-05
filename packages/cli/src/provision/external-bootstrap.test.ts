@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AGENT_ENV_FILE, renderExternalBootstrap, renderExternalCredentialsUpdate } from "./external-bootstrap";
+import { shellQuote } from "./shell-quote";
 import { renderSystemdUnit } from "./systemd-unit";
 
 const AWS = {
@@ -71,8 +72,20 @@ describe("renderExternalBootstrap (app role)", () => {
   });
 
   it("curls the binary url to /opt/launch-pad/agent and chmods it", () => {
-    expect(script).toContain(`curl -fsSL "${baseParams.agentBinaryUrl}" -o /opt/launch-pad/agent`);
+    expect(script).toContain(`curl -fsSL ${shellQuote(baseParams.agentBinaryUrl)} -o /opt/launch-pad/agent`);
     expect(script).toContain("chmod 755 /opt/launch-pad/agent");
+  });
+
+  it("shell-quotes the binary url before embedding it in the bootstrap script", () => {
+    const hostileUrl = "https://example.com/agent?sig='$(touch /tmp/pwn)'";
+    const hostileScript = renderExternalBootstrap({
+      role: "app",
+      ...baseParams,
+      agentBinaryUrl: hostileUrl,
+    });
+
+    expect(hostileScript).toContain(`curl -fsSL ${shellQuote(hostileUrl)} -o /opt/launch-pad/agent`);
+    expect(hostileScript).not.toContain(`curl -fsSL "${hostileUrl}"`);
   });
 
   it("writes and enables the systemd unit", () => {
