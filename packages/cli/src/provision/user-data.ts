@@ -124,7 +124,7 @@ systemctl enable --now docker
       : "";
 
   return `#!/bin/bash
-set -euxo pipefail
+set -euo pipefail
 
 # --- launchpad dirs ---
 mkdir -p /etc/launch-pad /var/lib/launch-pad /opt/launch-pad

@@ -33,9 +33,10 @@ const baseParams = {
 describe("renderExternalBootstrap (app role)", () => {
   const script = renderExternalBootstrap({ role: "app", ...baseParams });
 
-  it("is a bash script with strict mode", () => {
+  it("is a bash script with strict mode and no xtrace", () => {
     expect(script.startsWith("#!/bin/bash")).toBe(true);
-    expect(script).toContain("set -euxo pipefail");
+    expect(script).toContain("set -euo pipefail");
+    expect(script).not.toMatch(/set\s+-[a-z]*x/);
   });
 
   it("detects dnf AND apt-get, fails closed otherwise", () => {
