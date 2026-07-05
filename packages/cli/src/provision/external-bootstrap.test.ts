@@ -35,8 +35,7 @@ describe("renderExternalBootstrap (app role)", () => {
   it("is a bash script with strict mode and no xtrace", () => {
     expect(script.startsWith("#!/bin/bash")).toBe(true);
     expect(script).toContain("set -euo pipefail");
-    expect(script).not.toContain("set -x");
-    expect(script).not.toContain("set -eux");
+    expect(script).not.toMatch(/set\s+-[a-z]*x/);
   });
 
   it("detects dnf AND apt-get, fails closed otherwise", () => {

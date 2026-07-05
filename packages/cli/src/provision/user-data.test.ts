@@ -18,8 +18,10 @@ const agentBinaryUrl = "https://example.s3.amazonaws.com/nodes/node-prod-1/agent
 describe("renderUserData (edge)", () => {
   const script = renderUserData({ agent: edgeAgent, agentBinaryUrl });
 
-  it("is a bash script", () => {
+  it("is a bash script with strict mode and no xtrace", () => {
     expect(script.startsWith("#!/bin/bash")).toBe(true);
+    expect(script).toContain("set -euo pipefail");
+    expect(script).not.toMatch(/set\s+-[a-z]*x/);
   });
 
   it("embeds the agent config including cluster + role", () => {
