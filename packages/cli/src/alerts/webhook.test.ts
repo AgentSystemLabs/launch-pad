@@ -34,8 +34,17 @@ describe("isSecureWebhookUrl", () => {
     expect(isSecureWebhookUrl("https://hooks.slack.com/services/TOKEN")).toBe(true);
   });
 
-  it("rejects plaintext and malformed webhook URLs", () => {
+  it("accepts loopback HTTP URLs for local test receivers", () => {
+    expect(isSecureWebhookUrl("http://127.0.0.1:9000/hook")).toBe(true);
+    expect(isSecureWebhookUrl("http://localhost:9000/hook")).toBe(true);
+  });
+
+  it("rejects plaintext HTTP to non-loopback hosts", () => {
     expect(isSecureWebhookUrl("http://hooks.slack.com/services/TOKEN")).toBe(false);
+    expect(isSecureWebhookUrl("http://192.168.1.1/hook")).toBe(false);
+  });
+
+  it("rejects unsupported schemes and malformed URLs", () => {
     expect(isSecureWebhookUrl("ftp://example.com/hook")).toBe(false);
     expect(isSecureWebhookUrl("not a url")).toBe(false);
   });
