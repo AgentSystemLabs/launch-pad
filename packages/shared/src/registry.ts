@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { NodeArchitectureSchema } from "./architecture";
+import { ClusterIdSchema } from "./config";
 import { DEFAULT_CLUSTER } from "./constants";
 
 export const NodeStateSchema = z.enum([
@@ -38,7 +39,7 @@ export const NodeRegistryEntrySchema = z
   .object({
     nodeId: z.string().min(1),
     /** The cluster this node belongs to (defaults to "default" so pre-cluster node.json still parses). */
-    clusterId: z.string().min(1).default(DEFAULT_CLUSTER),
+    clusterId: ClusterIdSchema.default(DEFAULT_CLUSTER),
     instanceId: z.string().nullable(),
     instanceType: z.string().min(1),
     /** CPU architecture for the instance type. Old x86-only node.json files default here. */

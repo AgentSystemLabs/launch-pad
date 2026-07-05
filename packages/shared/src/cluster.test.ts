@@ -50,4 +50,16 @@ describe("parseClusterConfig", () => {
       parseClusterConfig({ clusterId: "lower", region: "us-east-1", createdAt: "t", createdBy: "x", extra: 1 }),
     ).toThrow();
   });
+
+  it("rejects cluster ids that would escape derived S3/SSM path segments", () => {
+    expect(() =>
+      parseClusterConfig({ clusterId: "prod/../default", region: "us-east-1", createdAt: "t", createdBy: "x" }),
+    ).toThrow(/cluster id/);
+  });
+
+  it("rejects cluster ids with IAM policy wildcard characters", () => {
+    expect(() =>
+      parseClusterConfig({ clusterId: "prod-*", region: "us-east-1", createdAt: "t", createdBy: "x" }),
+    ).toThrow(/cluster id/);
+  });
 });

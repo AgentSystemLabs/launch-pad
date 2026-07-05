@@ -14,8 +14,11 @@ import { cronExpressionError, nextCronFire, parseCronExpression } from "./cron";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import { SECRET_KEY_HINT, SECRET_KEY_REGEX } from "./secrets";
 
-/** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1–40 chars. */
+/** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1-40 chars. */
 export const LABEL_REGEX = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
+export const LABEL_HINT = "lowercase letters, numbers and hyphens (1-40 chars)";
+export const CLUSTER_ID_HINT = LABEL_HINT;
+export const ClusterIdSchema = z.string().regex(LABEL_REGEX, `cluster id must be ${CLUSTER_ID_HINT}`);
 
 /**
  * Separator between project and component in a derived footprint owner
@@ -50,7 +53,7 @@ export function nodeIdError(id: string): string | null {
 }
 
 const label = (what: string) =>
-  z.string().regex(LABEL_REGEX, `${what} must be lowercase letters, numbers and hyphens (1–40 chars)`);
+  z.string().regex(LABEL_REGEX, `${what} must be ${LABEL_HINT}`);
 
 /** Tokens a `domainPattern` may interpolate. `{env}` is required; `{service}` is optional. */
 const DOMAIN_PATTERN_TOKENS = new Set(["env", "service"]);

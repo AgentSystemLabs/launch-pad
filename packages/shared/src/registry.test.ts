@@ -69,4 +69,10 @@ describe("parseNodeRegistryEntry — provisioning / BYOS fields", () => {
     expect(node.advertiseIp).toBe("203.0.113.10");
     expect(node.iamUserName).toBe("launch-pad-node-default-byos-1");
   });
+
+  it("rejects cluster ids that are unsafe in derived resource paths", () => {
+    expect(() => parseNodeRegistryEntry({ ...legacyEc2, clusterId: "prod/../default" })).toThrow(
+      /cluster id/,
+    );
+  });
 });
