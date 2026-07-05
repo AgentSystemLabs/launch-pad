@@ -6,11 +6,13 @@ import { HOME_PATH, ROOT } from "../paths";
 
 const PROJ_DIR = join(ROOT, "test-results", "proj-demo");
 const OTHER_PROJ_DIR = join(ROOT, "test-results", "proj-other");
+const FORGED_DIR = join(ROOT, "test-results", "proj-forged");
 
 test.beforeEach(() => {
   resetFakeState();
   rmSync(PROJ_DIR, { recursive: true, force: true });
   rmSync(OTHER_PROJ_DIR, { recursive: true, force: true });
+  rmSync(FORGED_DIR, { recursive: true, force: true });
   mkdirSync(PROJ_DIR, { recursive: true });
   mkdirSync(OTHER_PROJ_DIR, { recursive: true });
   writeFileSync(join(PROJ_DIR, "Dockerfile"), "FROM node:24\n");
@@ -132,6 +134,51 @@ test("env save ignores a tampered project directory field", async ({ page }) => 
 
   expect(readFileSync(join(PROJ_DIR, "launch-pad.toml"), "utf8")).toContain("FEATURE_X");
   expect(readFileSync(join(OTHER_PROJ_DIR, "launch-pad.toml"), "utf8")).not.toContain("FEATURE_X");
+});
+
+test("env save ignores forged project directory fields", async ({ page }) => {
+  mkdirSync(HOME_PATH, { recursive: true });
+  mkdirSync(FORGED_DIR, { recursive: true });
+  writeFileSync(
+    join(PROJ_DIR, "launch-pad.toml"),
+    'project = "demo"\n\n[[service]]\nname = "demo"\nenv = { SAFE = "yes" }\n',
+  );
+  writeFileSync(
+    join(FORGED_DIR, "launch-pad.toml"),
+    'project = "demo"\n\n[[service]]\nname = "demo"\nenv = { SHOULD_STAY = "yes" }\n',
+  );
+  writeFileSync(
+    join(HOME_PATH, "config.json"),
+    JSON.stringify({ projects: [{ name: "demo", dir: PROJ_DIR }] }),
+  );
+
+  await page.goto("/projects");
+  await page.getByTestId("project-row-demo").getByRole("button", { name: "Env" }).click();
+  await page.getByTestId("env-text-demo").fill("SAFE=yes\nPWNED=true");
+  await page.locator('form[p-action="projects:env:save"]').evaluate((form, forgedDir) => {
+    for (const [name, value] of [
+      ["project", "demo"],
+      ["dir", forgedDir],
+    ]) {
+      let input = form.querySelector<HTMLInputElement>(`input[name="${name}"]`);
+      if (!input) {
+        input = document.createElement("input");
+        input.type = "hidden";
+        input.name = name;
+        form.append(input);
+      }
+      input.value = value;
+    }
+  }, FORGED_DIR);
+
+  await page.getByTestId("env-editor").getByRole("button", { name: "Save & redeploy" }).click();
+  await expect(page.getByText(/Saved env \+ redeployed demo\/demo/)).toBeVisible();
+
+  const registeredToml = readFileSync(join(PROJ_DIR, "launch-pad.toml"), "utf8");
+  const forgedToml = readFileSync(join(FORGED_DIR, "launch-pad.toml"), "utf8");
+  expect(registeredToml).toContain("PWNED");
+  expect(forgedToml).not.toContain("PWNED");
+  expect(forgedToml).toContain("SHOULD_STAY");
 });
 
 test("click to copy project directory path", async ({ page, context }) => {
