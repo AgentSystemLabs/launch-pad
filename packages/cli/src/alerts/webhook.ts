@@ -46,6 +46,9 @@ export function isSecureWebhookUrl(url: string): boolean {
 
 /** POST an alert payload to a webhook URL. Throws on a non-2xx response. */
 export async function postWebhook(url: string, payload: AlertPayload): Promise<void> {
+  if (!isSecureWebhookUrl(url)) {
+    throw new Error(`webhook URL must use HTTPS: ${safeOrigin(url)}`);
+  }
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
