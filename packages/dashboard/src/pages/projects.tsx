@@ -364,9 +364,10 @@ export function registerProjects(station: Station<AppCtx>) {
     }),
     handler: async ({ data, ctx, invalidate, reply }) => {
       const project = getProject(data.project);
-      if (!project) {
-        flash(ctx, invalidate, "error", `Unknown project "${data.project}"`);
-        reply({ ok: false });
+      if (!project || ctx.editing?.project !== project.name) {
+        const message = `Project "${data.project}" is not open for editing`;
+        flash(ctx, invalidate, "error", `Save failed: ${message}`);
+        reply({ ok: false, error: message });
         return;
       }
       try {
