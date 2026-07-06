@@ -1,7 +1,5 @@
 /** Small presentation helpers shared across pages. Reuses shared math where it exists. */
-import { sharesToVcpu, isHeartbeatStale } from "@agentsystemlabs/launch-pad-shared";
-
-export { sharesToVcpu, isHeartbeatStale };
+import { sharesToVcpu } from "@agentsystemlabs/launch-pad-shared";
 
 /** Join truthy class names. */
 export function cn(...parts: Array<string | false | null | undefined>): string {
