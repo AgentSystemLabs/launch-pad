@@ -37,6 +37,8 @@ const FOLLOW_INTERVAL_MS = 2000;
  */
 const FOLLOW_DEDUP_CACHE_MAX = 50_000;
 
+const SINCE_UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+
 /** Parse a relative window like `15m`, `1h`, `24h`, `7d` (also `s`) into milliseconds. */
 export function parseSince(input: string): number {
   const match = /^(\d+)(s|m|h|d)$/.exec(input.trim());
@@ -46,9 +48,8 @@ export function parseSince(input: string): number {
     });
   }
   const n = Number.parseInt(match[1] as string, 10);
-  const unit = match[2];
-  const ms = unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
-  return n * ms;
+  const unit = match[2] as keyof typeof SINCE_UNIT_MS;
+  return n * SINCE_UNIT_MS[unit];
 }
 
 /**
