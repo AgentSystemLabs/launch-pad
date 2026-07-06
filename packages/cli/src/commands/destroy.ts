@@ -57,6 +57,7 @@ import { deleteSecretParameter, listSecretsByPrefix } from "../aws/ssm-secrets";
 import { loadNodeDesiredStates, type NodeDesiredState } from "../deploy/deployed-footprint";
 import { findConfigPath, loadConfig } from "../config/load";
 import { CliError } from "../errors";
+import { resolveTimeoutMs } from "../parse-timeout";
 import { loadEnvMarkers } from "../preview/markers";
 import { loadProjectIndex, removeFromProjectIndex } from "../project/registry";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
@@ -379,15 +380,6 @@ async function purgeSecrets(
   return { deleted, failed };
 }
 
-function resolveTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return DEFAULT_DRAIN_TIMEOUT_SECONDS * 1000;
-  const seconds = Number.parseInt(raw, 10);
-  if (!Number.isInteger(seconds) || seconds < 1) {
-    throw new CliError(`invalid --timeout "${raw}"`, { hint: "pass whole seconds ≥ 1, e.g. --timeout 120" });
-  }
-  return seconds * 1000;
-}
-
 /** Read every node's desired state (empty when the bucket doesn't exist yet). */
 async function loadStates(aws: AwsEnv): Promise<NodeDesiredState[]> {
   try {
@@ -503,7 +495,7 @@ async function runFootprintDestroy(opts: DestroyOptions): Promise<void> {
       plan.nodes.map((n) => n.nodeId),
       ownerProject,
       removeSet,
-      resolveTimeoutMs(opts.timeout),
+      resolveTimeoutMs(opts.timeout, DEFAULT_DRAIN_TIMEOUT_SECONDS),
     );
     if (drain.drained) drainSpin?.succeed("containers stopped");
     else if (drain.unreachable.length > 0) {
@@ -786,7 +778,7 @@ async function runEnvDestroy(env: string, opts: DestroyOptions): Promise<void> {
   try {
     report = await destroyEnvFootprint(aws, marker, {
       wait: opts.wait !== false,
-      timeoutMs: resolveTimeoutMs(opts.timeout),
+      timeoutMs: resolveTimeoutMs(opts.timeout, DEFAULT_DRAIN_TIMEOUT_SECONDS),
       purgeSecrets: opts.purgeSecrets === true,
     });
     spin?.succeed(`environment ${color.cyan(env)} destroyed`);
@@ -836,7 +828,7 @@ async function destroyEnvMarkers(
     try {
       const report = await destroyEnvFootprint(aws, marker, {
         wait: opts.wait !== false,
-        timeoutMs: resolveTimeoutMs(opts.timeout),
+        timeoutMs: resolveTimeoutMs(opts.timeout, DEFAULT_DRAIN_TIMEOUT_SECONDS),
         purgeSecrets: opts.purgeSecrets === true,
       });
       reports.push(report);
@@ -908,7 +900,7 @@ async function runProjectDestroy(project: string, opts: DestroyOptions): Promise
     if (!ok) throw new CliError("aborted", { hint: "re-run with --yes to skip this prompt" });
   }
 
-  const timeoutMs = resolveTimeoutMs(opts.timeout);
+  const timeoutMs = resolveTimeoutMs(opts.timeout, DEFAULT_DRAIN_TIMEOUT_SECONDS);
   const destroyed: Array<{ component: string; owner: string; nodes: string[] }> = [];
   const envReports: EnvDestroyReport[] = [];
   const failed: Array<{ owner: string; error: string }> = [];
@@ -1024,7 +1016,7 @@ async function runPruneExpired(opts: DestroyOptions): Promise<void> {
     try {
       const report = await destroyEnvFootprint(aws, marker, {
         wait: opts.wait !== false,
-        timeoutMs: resolveTimeoutMs(opts.timeout),
+        timeoutMs: resolveTimeoutMs(opts.timeout, DEFAULT_DRAIN_TIMEOUT_SECONDS),
         purgeSecrets: false,
       });
       reports.push(report);
