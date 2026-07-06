@@ -57,6 +57,7 @@ import { deleteSecretParameter, listSecretsByPrefix } from "../aws/ssm-secrets";
 import { loadNodeDesiredStates, type NodeDesiredState } from "../deploy/deployed-footprint";
 import { findConfigPath, loadConfig } from "../config/load";
 import { CliError } from "../errors";
+import { resolveTimeoutMs as parseTimeoutFlagMs } from "../parse-timeout";
 import { loadEnvMarkers } from "../preview/markers";
 import { loadProjectIndex, removeFromProjectIndex } from "../project/registry";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
@@ -380,12 +381,7 @@ async function purgeSecrets(
 }
 
 function resolveTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return DEFAULT_DRAIN_TIMEOUT_SECONDS * 1000;
-  const seconds = Number.parseInt(raw, 10);
-  if (!Number.isInteger(seconds) || seconds < 1) {
-    throw new CliError(`invalid --timeout "${raw}"`, { hint: "pass whole seconds ≥ 1, e.g. --timeout 120" });
-  }
-  return seconds * 1000;
+  return parseTimeoutFlagMs(raw, { defaultSeconds: DEFAULT_DRAIN_TIMEOUT_SECONDS });
 }
 
 /** Read every node's desired state (empty when the bucket doesn't exist yet). */

@@ -41,6 +41,7 @@ import { loadDeployedPlacement } from "../deploy/deployed-footprint";
 import { dockerfileInContext } from "../deploy/remote-build";
 import { loadConfig } from "../config/load";
 import { CliError } from "../errors";
+import { resolveTimeoutMs as parseTimeoutFlagMs } from "../parse-timeout";
 import { applyGlobalOptions, mergedOpts, type GlobalOpts } from "../globals";
 import { isJsonMode, log, printJson, spinner } from "../ui/log";
 import { color } from "../ui/theme";
@@ -61,12 +62,7 @@ function nowIso(): string {
 }
 
 function resolveTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return DEFAULT_JOB_TIMEOUT_SECONDS * 1000;
-  const seconds = Number.parseInt(raw, 10);
-  if (!Number.isInteger(seconds) || seconds < 1) {
-    throw new CliError(`invalid --timeout "${raw}"`, { hint: "pass whole seconds >= 1, e.g. --timeout 300" });
-  }
-  return seconds * 1000;
+  return parseTimeoutFlagMs(raw, { defaultSeconds: DEFAULT_JOB_TIMEOUT_SECONDS });
 }
 
 async function assertJobSecretsPresent(aws: AwsEnv, job: JobDecl, ownerProject: string): Promise<void> {
