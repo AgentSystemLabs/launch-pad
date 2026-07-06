@@ -10,14 +10,17 @@ export const TIME_UNIT_MS = {
 
 export type TimeUnit = keyof typeof TIME_UNIT_MS;
 
+/** Pattern for rollout/health duration strings like "20s", "500ms", "1m". */
+const DURATION_PATTERN = /^(\d+)(ms|s|m)$/;
+
 /** A duration string like "20s", "500ms", "1m". */
 export const DurationSchema = z
   .string()
-  .regex(/^\d+(ms|s|m)$/, 'duration must look like "20s", "500ms", or "1m"');
+  .regex(DURATION_PATTERN, 'duration must look like "20s", "500ms", or "1m"');
 
 /** Parse a duration string to milliseconds. */
 export function parseDurationMs(duration: string): number {
-  const match = /^(\d+)(ms|s|m)$/.exec(duration);
+  const match = DURATION_PATTERN.exec(duration);
   if (!match) return 0;
   const n = Number(match[1]);
   switch (match[2]) {
