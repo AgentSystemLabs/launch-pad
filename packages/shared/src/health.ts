@@ -1,5 +1,15 @@
 import { z } from "zod";
 
+/** Milliseconds per relative-time unit (`15m`, `1h`, `7d`, etc.). */
+export const TIME_UNIT_MS = {
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+} as const;
+
+export type TimeUnit = keyof typeof TIME_UNIT_MS;
+
 /** A duration string like "20s", "500ms", "1m". */
 export const DurationSchema = z
   .string()
@@ -14,9 +24,9 @@ export function parseDurationMs(duration: string): number {
     case "ms":
       return n;
     case "s":
-      return n * 1000;
+      return n * TIME_UNIT_MS.s;
     case "m":
-      return n * 60_000;
+      return n * TIME_UNIT_MS.m;
     default:
       return 0;
   }

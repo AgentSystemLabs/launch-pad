@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PREVIEW_MARKER_VERSION } from "./constants";
 import { componentOwner, envProject, HOSTNAME_REGEX, LABEL_REGEX } from "./config";
+import { TIME_UNIT_MS } from "./health";
 
 /**
  * Strict field shapes: the marker is read back from S3 and drives DESTRUCTIVE actions
@@ -75,9 +76,8 @@ export function parsePreviewMarker(input: unknown): PreviewMarker {
 }
 
 /** Inclusive TTL bounds: a preview lives at least a minute and at most 90 days. */
-const TTL_MIN_MS = 60_000;
-const TTL_MAX_MS = 90 * 86_400_000;
-const TTL_UNIT_MS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
+const TTL_MIN_MS = TIME_UNIT_MS.m;
+const TTL_MAX_MS = 90 * TIME_UNIT_MS.d;
 
 /** Human hint for an invalid `--ttl`; kept next to the parser so the two can't drift. */
 export const PREVIEW_TTL_HINT = "pass <n>m, <n>h, or <n>d between 1m and 90d, e.g. --ttl 72h";
@@ -92,7 +92,7 @@ export function parsePreviewTtlMs(raw: string): number | null {
   if (!match) return null;
   const n = Number.parseInt(match[1] as string, 10);
   if (!Number.isSafeInteger(n) || n < 1) return null;
-  const ms = n * (TTL_UNIT_MS[match[2] as string] as number);
+  const ms = n * TIME_UNIT_MS[match[2] as keyof typeof TIME_UNIT_MS];
   if (!Number.isSafeInteger(ms) || ms < TTL_MIN_MS || ms > TTL_MAX_MS) return null;
   return ms;
 }
