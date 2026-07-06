@@ -1,22 +1,26 @@
 import { z } from "zod";
+import { MINUTE_MS, SECOND_MS } from "./time";
+
+/** Pattern for rollout/health duration strings like "20s", "500ms", "1m". */
+const DURATION_PATTERN = /^(\d+)(ms|s|m)$/;
 
 /** A duration string like "20s", "500ms", "1m". */
 export const DurationSchema = z
   .string()
-  .regex(/^\d+(ms|s|m)$/, 'duration must look like "20s", "500ms", or "1m"');
+  .regex(DURATION_PATTERN, 'duration must look like "20s", "500ms", or "1m"');
 
 /** Parse a duration string to milliseconds. */
 export function parseDurationMs(duration: string): number {
-  const match = /^(\d+)(ms|s|m)$/.exec(duration);
+  const match = DURATION_PATTERN.exec(duration);
   if (!match) return 0;
   const n = Number(match[1]);
   switch (match[2]) {
     case "ms":
       return n;
     case "s":
-      return n * 1000;
+      return n * SECOND_MS;
     case "m":
-      return n * 60_000;
+      return n * MINUTE_MS;
     default:
       return 0;
   }
