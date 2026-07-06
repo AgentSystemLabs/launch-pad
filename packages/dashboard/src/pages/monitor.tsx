@@ -1,4 +1,5 @@
 import type { Station } from "@orbital-js/station";
+import { hostMemoryPercent } from "@agentsystemlabs/launch-pad-shared";
 import { z } from "zod";
 import type { AppCtx } from "../index";
 import { runLaunchPad, streamLaunchPad } from "../lib/run-launch-pad";
@@ -9,10 +10,6 @@ import { Breadcrumbs } from "../components/breadcrumbs";
 import { mb, pct } from "../lib/format";
 import { errorMessage } from "../components/feedback";
 import type { StatsSample, MonitorHistoricJson, NodeShowJson } from "../lib/lp-types";
-
-function memPercent(s: StatsSample): number {
-  return s.host.memoryTotalMb > 0 ? (s.host.memoryUsedMb / s.host.memoryTotalMb) * 100 : 0;
-}
 
 /** Sum a service's cpu% / memory across its replicas in one sample. */
 function serviceTotals(s: StatsSample): Map<string, { cpu: number; mem: number }> {
@@ -91,14 +88,14 @@ export function registerMonitor(station: Station<AppCtx>) {
 
     const last = buffer[buffer.length - 1] as StatsSample;
     const cpuSeries = buffer.map((s) => s.host.cpuPercent);
-    const memSeries = buffer.map(memPercent);
+    const memSeries = buffer.map((s) => hostMemoryPercent(s.host));
     return (
       <>
         <MetricCard label="Host CPU" current={pct(last.host.cpuPercent)} percent={last.host.cpuPercent} values={cpuSeries} />
         <MetricCard
           label="Host Memory"
           current={`${mb(last.host.memoryUsedMb)} / ${mb(last.host.memoryTotalMb)}`}
-          percent={memPercent(last)}
+          percent={hostMemoryPercent(last.host)}
           values={memSeries}
         />
       </>
