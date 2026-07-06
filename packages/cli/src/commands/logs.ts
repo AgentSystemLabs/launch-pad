@@ -29,6 +29,13 @@ interface LogsOptions extends GlobalOpts {
 
 const DEFAULT_SINCE = "15m";
 const FOLLOW_INTERVAL_MS = 2000;
+/** Milliseconds per unit accepted by {@link parseSince}. */
+const SINCE_UNIT_MS: Record<"s" | "m" | "h" | "d", number> = {
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
 /**
  * Cap on the dedup set during `--follow`. Each polled event id is remembered so a
  * line isn't printed twice across overlapping poll windows; past this many ids we
@@ -46,9 +53,8 @@ export function parseSince(input: string): number {
     });
   }
   const n = Number.parseInt(match[1] as string, 10);
-  const unit = match[2];
-  const ms = unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
-  return n * ms;
+  const unit = match[2] as keyof typeof SINCE_UNIT_MS;
+  return n * SINCE_UNIT_MS[unit];
 }
 
 /**
