@@ -8,7 +8,7 @@ import type { SQSClient } from "@aws-sdk/client-sqs";
 import type { SSMClient } from "@aws-sdk/client-ssm";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
 import { DEFAULT_CLUSTER, stateBucketName } from "@agentsystemlabs/launch-pad-shared";
-import { loadLocalConfig } from "../config/local";
+import { assertValidClusterId, loadLocalConfig } from "../config/local";
 import { CliError } from "../errors";
 import type { GlobalOpts } from "../globals";
 import { createClients } from "./clients";
@@ -63,6 +63,7 @@ export async function prepareAws(
 ): Promise<AwsEnv> {
   const local = loadLocalConfig();
   const clusterId = opts.cluster ?? local.defaultCluster ?? DEFAULT_CLUSTER;
+  assertValidClusterId(clusterId);
   const target = local.clusters[clusterId];
 
   if (target?.roleArn) {

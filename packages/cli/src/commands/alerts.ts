@@ -7,7 +7,7 @@ import {
   statusKey,
 } from "@agentsystemlabs/launch-pad-shared";
 import { type Alert, type AlertNodeInput, evaluateAlerts } from "../alerts/evaluate";
-import { buildAlertPayload, postWebhook } from "../alerts/webhook";
+import { buildAlertPayload, isSecureWebhookUrl, postWebhook } from "../alerts/webhook";
 import { prepareAws } from "../aws/context";
 import { getJson, listNodeIds } from "../aws/s3-state";
 import { CliError } from "../errors";
@@ -34,8 +34,10 @@ function parseStaleMs(raw: string): number {
 function resolveWebhook(opts: AlertsCheckOptions): string | undefined {
   const url = opts.webhook ?? process.env.LAUNCHPAD_ALERT_WEBHOOK;
   if (url === undefined) return undefined;
-  if (!/^https?:\/\//.test(url)) {
-    throw new CliError(`invalid webhook URL "${url}"`, { hint: "pass an http(s) URL, e.g. --webhook https://hooks.slack.com/services/…" });
+  if (!isSecureWebhookUrl(url)) {
+    throw new CliError(`invalid webhook URL "${url}"`, {
+      hint: "pass an HTTPS URL, e.g. --webhook https://hooks.slack.com/services/…",
+    });
   }
   return url;
 }

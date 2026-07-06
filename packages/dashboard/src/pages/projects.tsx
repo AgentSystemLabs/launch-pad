@@ -220,7 +220,6 @@ export function registerProjects(station: Station<AppCtx>) {
           </p>
           {services.map((svc) => (
             <form p-action="projects:env:save" class="space-y-2 border-t border-base-content/10 pt-3">
-              <input type="hidden" name="project" value={editing.project} />
               <input type="hidden" name="service" value={svc.name} />
               <div class="flex items-center justify-between">
                 <span class="font-mono text-sm">{svc.name}</span>
@@ -358,14 +357,19 @@ export function registerProjects(station: Station<AppCtx>) {
 
   station.defineAction("projects:env:save", {
     input: z.object({
-      project: z.string().min(1),
       service: z.string().min(1),
       env: z.string().optional(),
     }),
     handler: async ({ data, ctx, invalidate, reply }) => {
-      const project = getProject(data.project);
-      if (!project || ctx.editing?.project !== project.name) {
-        flash(ctx, invalidate, "error", `Unknown project "${data.project}"`);
+      const editing = ctx.editing;
+      if (!editing) {
+        flash(ctx, invalidate, "error", "No project env editor is open");
+        reply({ ok: false });
+        return;
+      }
+      const project = getProject(editing.project);
+      if (!project) {
+        flash(ctx, invalidate, "error", `Unknown project "${editing.project}"`);
         reply({ ok: false });
         return;
       }
@@ -377,7 +381,7 @@ export function registerProjects(station: Station<AppCtx>) {
           profile: ctx.profile,
           region: ctx.region,
         });
-        flash(ctx, invalidate, "success", `Saved env + redeployed ${data.project}/${data.service}`);
+        flash(ctx, invalidate, "success", `Saved env + redeployed ${project.name}/${data.service}`);
         invalidate("projects:env");
         reply({ ok: true });
       } catch (err) {
