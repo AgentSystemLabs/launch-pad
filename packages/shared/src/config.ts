@@ -400,6 +400,11 @@ export const JobDeclSchema = z
   .strict();
 export type JobDecl = z.infer<typeof JobDeclSchema>;
 
+/** True when a service declaration exposes ingress (domain + port). */
+function serviceHasIngress(s: { domain?: unknown; port?: unknown }): boolean {
+  return s.domain !== undefined && s.port !== undefined;
+}
+
 /** One `[[service]]` block in launch-pad.toml. */
 export const ServiceDeclSchema = z
   .object({
@@ -443,8 +448,8 @@ export const ServiceDeclSchema = z
   })
   .strict()
   .superRefine((s, ctx) => {
+    const isWeb = serviceHasIngress(s);
     if (s.database !== undefined) {
-      const isWeb = s.domain !== undefined && s.port !== undefined;
       if (isWeb || s.cron !== undefined) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -474,7 +479,6 @@ export const ServiceDeclSchema = z
         path: ["domain"],
       });
     }
-    const isWeb = s.domain !== undefined && s.port !== undefined;
     if (s.domainPattern !== undefined) {
       if (!isWeb) {
         ctx.addIssue({
@@ -649,7 +653,7 @@ export function parseLaunchPadConfig(input: unknown): LaunchPadConfig {
 
 /** True when the service declares ingress (web) rather than being a worker. */
 export function isWebService(s: ServiceDecl): boolean {
-  return s.domain !== undefined && s.port !== undefined;
+  return serviceHasIngress(s);
 }
 
 /** Pinned engine image for a managed database — pulled, never built. */

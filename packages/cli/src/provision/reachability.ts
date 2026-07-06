@@ -2,6 +2,7 @@ import type { NodeRegistryEntry, NodeStatus } from "@agentsystemlabs/launch-pad-
 import { HOST_PORT_MIN } from "@agentsystemlabs/launch-pad-shared";
 import type { AwsEnv } from "../aws/context";
 import { runShellScriptOnInstances } from "../aws/run-command";
+import { shellQuote } from "./shell-quote";
 
 export interface ReachabilityTarget {
   nodeId: string;
@@ -18,10 +19,6 @@ export interface ReachabilityResult {
 }
 
 export const REACHABILITY_SAMPLE_PORT = HOST_PORT_MIN;
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
 
 export function renderTemporaryListenerScript(port = REACHABILITY_SAMPLE_PORT): string {
   return `python3 - <<'PY' >/tmp/launch-pad-reachability-${port}.log 2>&1 &
