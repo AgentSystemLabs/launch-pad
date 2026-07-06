@@ -41,6 +41,7 @@ import { loadDeployedPlacement } from "../deploy/deployed-footprint";
 import { dockerfileInContext } from "../deploy/remote-build";
 import { loadConfig } from "../config/load";
 import { CliError } from "../errors";
+import { parseTimeoutMs } from "../parse-timeout";
 import { applyGlobalOptions, mergedOpts, type GlobalOpts } from "../globals";
 import { isJsonMode, log, printJson, spinner } from "../ui/log";
 import { color } from "../ui/theme";
@@ -58,15 +59,6 @@ interface JobRunOptions extends GlobalOpts {
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function resolveTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return DEFAULT_JOB_TIMEOUT_SECONDS * 1000;
-  const seconds = Number.parseInt(raw, 10);
-  if (!Number.isInteger(seconds) || seconds < 1) {
-    throw new CliError(`invalid --timeout "${raw}"`, { hint: "pass whole seconds >= 1, e.g. --timeout 300" });
-  }
-  return seconds * 1000;
 }
 
 async function assertJobSecretsPresent(aws: AwsEnv, job: JobDecl, ownerProject: string): Promise<void> {
@@ -355,7 +347,14 @@ async function runJob(name: string, opts: JobRunOptions): Promise<void> {
   const spin = spinner(`waiting for job ${job.name}…`).start();
   let terminal = false;
   try {
-    const outcome = await waitForJob(aws, nodeId, ownerProject, job.name, runId, resolveTimeoutMs(opts.timeout));
+    const outcome = await waitForJob(
+      aws,
+      nodeId,
+      ownerProject,
+      job.name,
+      runId,
+      parseTimeoutMs(opts.timeout, DEFAULT_JOB_TIMEOUT_SECONDS, "pass whole seconds >= 1, e.g. --timeout 300"),
+    );
     terminal = true;
     if (!outcome.ok) {
       spin.fail(`job ${job.name} failed`);
