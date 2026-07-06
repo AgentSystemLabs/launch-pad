@@ -40,14 +40,14 @@ export interface FootprintListEntry {
   nodeIds: string[];
 }
 
+/** TTL / expiry phrase for a preview marker (e.g. "no TTL", "expires …", "EXPIRED …"). */
+export function describeMarkerExpiry(m: PreviewMarker, nowMs: number): string {
+  if (m.expiresAt === null) return "no TTL";
+  return isPreviewExpired(m, nowMs) ? `EXPIRED ${m.expiresAt}` : `expires ${m.expiresAt}`;
+}
+
 export function describeEnvMarker(m: PreviewMarker, nowMs: number): string {
-  const expiry =
-    m.expiresAt === null
-      ? "no TTL"
-      : isPreviewExpired(m, nowMs)
-        ? `EXPIRED ${m.expiresAt}`
-        : `expires ${m.expiresAt}`;
-  return `${m.project} · env ${m.env} · ${expiry}`;
+  return `${m.project} · env ${m.env} · ${describeMarkerExpiry(m, nowMs)}`;
 }
 
 /** Aggregate one footprint's services across nodes. Pure. */

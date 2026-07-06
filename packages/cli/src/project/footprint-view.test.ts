@@ -10,6 +10,8 @@ import {
   buildFootprintList,
   buildEnvFootprintSummaries,
   buildProjectComponentViews,
+  describeEnvMarker,
+  describeMarkerExpiry,
   resolveFootprintOwner,
   summarizeFootprintServices,
 } from "./footprint-view";
@@ -45,6 +47,36 @@ function marker(over: Partial<PreviewMarker> = {}): PreviewMarker {
     ...over,
   });
 }
+
+describe("describeMarkerExpiry", () => {
+  const nowMs = Date.parse("2026-06-12T00:00:00.000Z");
+
+  it("reports no TTL when expiresAt is null", () => {
+    expect(describeMarkerExpiry(marker(), nowMs)).toBe("no TTL");
+  });
+
+  it("reports expires when the marker is still valid", () => {
+    expect(describeMarkerExpiry(marker({ expiresAt: "2026-12-01T00:00:00.000Z" }), nowMs)).toBe(
+      "expires 2026-12-01T00:00:00.000Z",
+    );
+  });
+
+  it("reports EXPIRED when past the TTL", () => {
+    expect(describeMarkerExpiry(marker({ expiresAt: "2026-06-01T00:00:00.000Z" }), nowMs)).toBe(
+      "EXPIRED 2026-06-01T00:00:00.000Z",
+    );
+  });
+});
+
+describe("describeEnvMarker", () => {
+  const nowMs = Date.parse("2026-06-12T00:00:00.000Z");
+
+  it("joins project, env, and expiry with separators", () => {
+    expect(describeEnvMarker(marker({ expiresAt: "2026-12-01T00:00:00.000Z" }), nowMs)).toBe(
+      "shop · env pr-1 · expires 2026-12-01T00:00:00.000Z",
+    );
+  });
+});
 
 describe("summarizeFootprintServices", () => {
   it("aggregates replicas and node ids per service for one footprint owner", () => {

@@ -16,6 +16,7 @@ import {
   buildProjectComponentViews,
   componentDisplayName,
   describeEnvMarker,
+  describeMarkerExpiry,
   resolveFootprintOwner,
   summarizeFootprintServices,
   type FootprintListEntry,
@@ -75,7 +76,7 @@ function formatFootprintListLine(entry: FootprintListEntry, nowMs: number): stri
     entry.nodeIds.length > 0 ? color.dim(` · ${entry.nodeIds.join(", ")}`) : "";
   const expiry =
     entry.marker !== null
-      ? `  ${color.dim(describeEnvMarker(entry.marker, nowMs).split(" · ").slice(2).join(" · "))}`
+      ? `  ${color.dim(describeMarkerExpiry(entry.marker, nowMs))}`
       : "";
   const line = `${name}  ${services}${nodes}${expiry}`;
   return entry.expired ? color.yellow(line) : line;
@@ -248,7 +249,7 @@ async function runShow(name: string, opts: ProjectOptions): Promise<void> {
     ["services", String(services.length)],
   ];
   if (marker) {
-    rows.push(["expires", describeEnvMarker(marker, nowMs).split(" · ").slice(2).join(" · ")]);
+    rows.push(["expires", describeMarkerExpiry(marker, nowMs)]);
     if (marker.domains.length > 0) rows.push(["domains", marker.domains.join(", ")]);
   }
 
