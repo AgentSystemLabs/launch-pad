@@ -13,6 +13,7 @@ import {
   renderRemoteUpgradeScript,
   ssmRunBashScript,
 } from "./agent-upgrade";
+import { shellQuote } from "./shell-quote";
 import { parseSshHost, sshRunScript, type SshTarget } from "./ssh";
 
 /**
@@ -89,6 +90,7 @@ export async function upgradeAgentOnNode(p: UpgradeAgentParams): Promise<Upgrade
     clusterId,
     nodeId,
     role,
+    entry.architecture,
     UPGRADE_PRESIGN_TTL_SECONDS,
   );
 
@@ -194,7 +196,7 @@ export function manualUpgradeHint(
   // constant used to sign the URL, so it can't claim a wrong expiry.
   return [
     `  ${nodeId}:`,
-    `    f="$(mktemp)" && curl -fsSL '${bundleUrl}' -o "$f"`,
+    `    f="$(mktemp)" && curl -fsSL ${shellQuote(bundleUrl)} -o "$f"`,
     `    sudo install -m 755 "$f" ${AGENT_INSTALL_PATH} && rm -f "$f"`,
     `    sudo systemctl restart ${AGENT_SYSTEMD_UNIT}`,
     "    # if this node still runs the legacy TypeScript agent, also update the systemd",

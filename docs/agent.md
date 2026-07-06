@@ -189,10 +189,12 @@ re-provisioning.
 
 ## Distribution & migration from the TypeScript agent
 
-The agent is **not on npm**. `pnpm build:agent` cross-compiles both binaries for
-linux/amd64 (static musl, ~11 MB each); the CLI uploads the role-appropriate one to
-`nodes/<id>/agent` in S3, where cloud-init curls it via presigned URL on full bootstrap (or
-the [golden AMI](golden-ami.md) pre-bakes it). `launchpad node upgrade-agent` publishes a
+The agent is **not on npm**. `pnpm build:agent` cross-compiles both role binaries for
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`
+(`packages/agent-rust/dist/{x86_64,arm64}/agent-{edge,app}`); the CLI uploads the
+role- and architecture-appropriate one to `nodes/<id>/agent` in S3, where cloud-init curls
+it via presigned URL on full bootstrap (or the [golden AMI](golden-ami.md) pre-bakes it).
+`launchpad node upgrade-agent` publishes a
 fresh binary and restarts EC2 agents via SSM; named external (BYOS) app nodes use SSH with the
 same install script.
 

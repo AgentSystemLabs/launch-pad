@@ -3,14 +3,15 @@ import { parseDesiredState } from "./desired";
 import { parseNodeRegistryEntry } from "./registry";
 import { parseNodeStatus } from "./status";
 
-// Protocol v2: desired.json requires `version: 2` and a non-null `ingress.edge`
+// Protocol v3: desired.json requires `version: 3`, a non-null `ingress.edge`, and
+// parses optional one-off job run fields.
 // node.json requires an explicit role ("app" | "edge" | legacy "both").
-// Fields added AFTER v2 must still default so v2 documents keep parsing.
+// Additive fields within v3 must still default so older v3 documents keep parsing.
 
-describe("compatibility with protocol-v2 S3 documents", () => {
-  it("parses a minimal v2 desired.json (no replicas / healthCheck / rollout)", () => {
+describe("compatibility with protocol-v3 S3 documents", () => {
+  it("parses a minimal v3 desired.json (no replicas / healthCheck / rollout)", () => {
     const minimal = {
-      version: 2,
+      version: 3,
       nodeId: "node-prod-1",
       updatedAt: "2026-06-04T00:00:00Z",
       services: [
@@ -32,9 +33,9 @@ describe("compatibility with protocol-v2 S3 documents", () => {
     expect(d.services[0]?.ingress?.edge).toBe("edge-1");
   });
 
-  it("rejects a pre-v2 desired.json (version 1 / ingress without an edge)", () => {
+  it("rejects a pre-v3 desired.json (version 2)", () => {
     const old = {
-      version: 1,
+      version: 2,
       nodeId: "node-prod-1",
       updatedAt: "2026-06-04T00:00:00Z",
       services: [
@@ -45,7 +46,7 @@ describe("compatibility with protocol-v2 S3 documents", () => {
           cpu: 512,
           memory: 512,
           env: { NODE_ENV: "production" },
-          ingress: { domain: "x.example.com", port: 3000 },
+          ingress: { domain: "x.example.com", port: 3000, edge: "edge-1" },
         },
       ],
     };

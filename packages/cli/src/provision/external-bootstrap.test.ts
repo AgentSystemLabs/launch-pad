@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AGENT_ENV_FILE, renderExternalBootstrap, renderExternalCredentialsUpdate } from "./external-bootstrap";
+import { shellQuote } from "./shell-quote";
 import { renderSystemdUnit } from "./systemd-unit";
 
 const AWS = {
@@ -32,9 +33,10 @@ const baseParams = {
 describe("renderExternalBootstrap (app role)", () => {
   const script = renderExternalBootstrap({ role: "app", ...baseParams });
 
-  it("is a bash script with strict mode", () => {
+  it("is a bash script with strict mode and no xtrace", () => {
     expect(script.startsWith("#!/bin/bash")).toBe(true);
-    expect(script).toContain("set -euxo pipefail");
+    expect(script).toContain("set -euo pipefail");
+    expect(script).not.toMatch(/set\s+-[a-z]*x/);
   });
 
   it("detects dnf AND apt-get, fails closed otherwise", () => {
@@ -71,8 +73,20 @@ describe("renderExternalBootstrap (app role)", () => {
   });
 
   it("curls the binary url to /opt/launch-pad/agent and chmods it", () => {
-    expect(script).toContain(`curl -fsSL "${baseParams.agentBinaryUrl}" -o /opt/launch-pad/agent`);
+    expect(script).toContain(`curl -fsSL ${shellQuote(baseParams.agentBinaryUrl)} -o /opt/launch-pad/agent`);
     expect(script).toContain("chmod 755 /opt/launch-pad/agent");
+  });
+
+  it("shell-quotes the binary url before embedding it in the bootstrap script", () => {
+    const hostileUrl = "https://example.com/agent?sig='$(touch /tmp/pwn)'";
+    const hostileScript = renderExternalBootstrap({
+      role: "app",
+      ...baseParams,
+      agentBinaryUrl: hostileUrl,
+    });
+
+    expect(hostileScript).toContain(`curl -fsSL ${shellQuote(hostileUrl)} -o /opt/launch-pad/agent`);
+    expect(hostileScript).not.toContain(`curl -fsSL "${hostileUrl}"`);
   });
 
   it("writes and enables the systemd unit", () => {
@@ -117,6 +131,16 @@ describe("renderExternalBootstrap (edge role)", () => {
     expect(script).toContain("caddy run --config /etc/launch-pad/caddy-init.json");
     expect(script).toContain("AmbientCapabilities=CAP_NET_BIND_SERVICE");
     expect(script).toContain("systemctl enable --now caddy");
+  });
+
+  it("downloads the ARM Caddy binary for an ARM edge", () => {
+    const arm = renderExternalBootstrap({
+      role: "edge",
+      ...baseParams,
+      architecture: "arm64",
+      systemdUnit: renderSystemdUnit("edge", { environmentFile: AGENT_ENV_FILE }),
+    });
+    expect(arm).toContain('curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=arm64"');
   });
 
   it("still writes credentials, binary, and unit", () => {

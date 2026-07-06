@@ -80,10 +80,72 @@ describe("parseLaunchPadConfig", () => {
     expect(() => parseLaunchPadConfig({ project: "My_App", service: [worker] })).toThrow();
   });
 
+  it("rejects domains that are not hostnames", () => {
+    for (const domain of ["*", "https://app.example.com", "app.example.com/path", "app.example.com:443"]) {
+      expect(() =>
+        parseLaunchPadConfig({ project: "my-app", service: [{ ...web, domain }] }),
+      ).toThrow(/domain must be a DNS hostname/);
+    }
+  });
+
+  it("rejects IPv4 addresses as domains", () => {
+    for (const domain of ["192.168.1.1", "10.0.0.1", "1.2.3.4"]) {
+      expect(() =>
+        parseLaunchPadConfig({ project: "my-app", service: [{ ...web, domain }] }),
+      ).toThrow(/domain must be a DNS hostname/);
+    }
+  });
+
   it("rejects unknown top-level keys", () => {
     expect(() =>
       parseLaunchPadConfig({ project: "my-app", service: [worker], extra: true }),
     ).toThrow();
+  });
+
+  it("parses one-off jobs and applies build/env defaults", () => {
+    const cfg = parseLaunchPadConfig({
+      project: "my-app",
+      service: [web],
+      job: [{ name: "migrate", cpu: 256, memory: 128, secrets: ["DATABASE_URL"] }],
+    });
+    expect(cfg.job?.[0]).toMatchObject({
+      name: "migrate",
+      dockerfile: "./Dockerfile",
+      context: ".",
+      env: {},
+      secrets: ["DATABASE_URL"],
+    });
+  });
+
+  it("rejects job names that collide with services, databases, or jobs", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [worker], job: [{ name: "worker", cpu: 1, memory: 1 }] }),
+    ).toThrow(/job name.*worker.*collides/);
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [worker],
+        database: [{ name: "primary" }],
+        job: [{ name: "primary", cpu: 1, memory: 1 }],
+      }),
+    ).toThrow(/job name.*primary.*collides/);
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [worker],
+        job: [{ name: "migrate", cpu: 1, memory: 1 }, { name: "migrate", cpu: 1, memory: 1 }],
+      }),
+    ).toThrow(/job name.*migrate.*collides/);
+  });
+
+  it("rejects unsupported keys inside a job", () => {
+    expect(() =>
+      parseLaunchPadConfig({
+        project: "p",
+        service: [worker],
+        job: [{ name: "migrate", cpu: 256, memory: 128, cron: "* * * * *" }],
+      }),
+    ).toThrow(/job\[0\]\.cron: unsupported key/);
   });
 });
 
@@ -302,6 +364,23 @@ describe("domainPattern validation", () => {
     ).toThrow(/unknown token/);
   });
 
+  it("rejects patterns that do not resolve to hostnames", () => {
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...web, domainPattern: "https://api-{env}.acme.com" }] }),
+    ).toThrow(/domainPattern must resolve to a DNS hostname/);
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", domainPattern: "*.{env}.acme.com", service: [web] }),
+    ).toThrow(/domainPattern must resolve to a DNS hostname/);
+  });
+
+  it("rejects patterns whose labels overflow 63 chars with max-length token values", () => {
+    // 24 static chars + "-" + {env} max 40 = 65 > 63 — must be caught at parse time
+    const longPrefix = "a".repeat(24);
+    expect(() =>
+      parseLaunchPadConfig({ project: "p", service: [{ ...web, domainPattern: `${longPrefix}-{env}.acme.com` }] }),
+    ).toThrow(/domainPattern must resolve to a DNS hostname/);
+  });
+
   it("rejects a domainPattern on a worker", () => {
     expect(() =>
       parseLaunchPadConfig({
@@ -312,12 +391,13 @@ describe("domainPattern validation", () => {
   });
 
   it("accepts a valid service-level and project-level pattern", () => {
+    // {service}-{env} in one label overflows (40+1+40=81 chars), so use separate labels
     const cfg = parseLaunchPadConfig({
       project: "p",
-      domainPattern: "{service}-{env}.acme.com",
+      domainPattern: "{service}.{env}.acme.com",
       service: [{ ...web, domainPattern: "api-{env}.acme.com" }],
     });
-    expect(cfg.domainPattern).toBe("{service}-{env}.acme.com");
+    expect(cfg.domainPattern).toBe("{service}.{env}.acme.com");
     expect(cfg.service[0]?.domainPattern).toBe("api-{env}.acme.com");
   });
 });

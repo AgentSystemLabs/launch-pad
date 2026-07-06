@@ -14,8 +14,18 @@ import { cronExpressionError, nextCronFire, parseCronExpression } from "./cron";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import { SECRET_KEY_HINT, SECRET_KEY_REGEX } from "./secrets";
 
-/** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1–40 chars. */
+/** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1-40 chars. */
 export const LABEL_REGEX = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
+export const LABEL_HINT = "lowercase letters, numbers and hyphens (1-40 chars)";
+export const CLUSTER_ID_HINT = LABEL_HINT;
+export const ClusterIdSchema = z.string().regex(LABEL_REGEX, `cluster id must be ${CLUSTER_ID_HINT}`);
+
+/** Public hostname accepted for edge routing. Rejects IPv4 addresses, schemes, paths, ports, and wildcards. */
+export const HOSTNAME_REGEX =
+  /^(?!(\d{1,3}\.){3}\d{1,3}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+export const HOSTNAME_HINT =
+  "a DNS hostname like api.example.com (no scheme, path, port, wildcard, or whitespace)";
 
 /**
  * Separator between project and component in a derived footprint owner
@@ -50,7 +60,9 @@ export function nodeIdError(id: string): string | null {
 }
 
 const label = (what: string) =>
-  z.string().regex(LABEL_REGEX, `${what} must be lowercase letters, numbers and hyphens (1–40 chars)`);
+  z.string().regex(LABEL_REGEX, `${what} must be ${LABEL_HINT}`);
+
+const hostname = (what: string) => z.string().regex(HOSTNAME_REGEX, `${what} must be ${HOSTNAME_HINT}`);
 
 /** Tokens a `domainPattern` may interpolate. `{env}` is required; `{service}` is optional. */
 const DOMAIN_PATTERN_TOKENS = new Set(["env", "service"]);
@@ -68,6 +80,12 @@ export function domainPatternError(pattern: string): string | null {
   }
   if (!tokens.includes("env")) {
     return "domainPattern must include the {env} token so environments don't collide on one domain";
+  }
+  // Project each token to its maximum allowed length (LABEL_REGEX max = 40 chars) so
+  // label-length overflow is caught at parse time rather than silently at deploy time.
+  const projected = pattern.replace(/\{(env|service)\}/g, () => "a".repeat(40));
+  if (!HOSTNAME_REGEX.test(projected)) {
+    return `domainPattern must resolve to ${HOSTNAME_HINT}`;
   }
   return null;
 }
@@ -100,7 +118,7 @@ const DEPRECATED_SERVICE_KEYS: ReadonlyMap<string, string> = new Map([
   ],
 ]);
 
-const SUPPORTED_TOP_LEVEL_KEYS = new Set(["project", "component", "domainPattern", "service", "database"]);
+const SUPPORTED_TOP_LEVEL_KEYS = new Set(["project", "component", "domainPattern", "service", "database", "job"]);
 
 /** Keys allowed in a `[[database]]` block — rejects typos before Zod runs. */
 const SUPPORTED_DATABASE_KEYS = new Set([
@@ -133,6 +151,17 @@ const SUPPORTED_SERVICE_KEYS = new Set([
   "rollout",
   "secrets",
   "volumes",
+]);
+
+/** Keys allowed in a `[[job]]` block — one-off containers run via `launchpad job run`. */
+const SUPPORTED_JOB_KEYS = new Set([
+  "name",
+  "dockerfile",
+  "context",
+  "cpu",
+  "memory",
+  "env",
+  "secrets",
 ]);
 
 /**
@@ -170,20 +199,32 @@ export function assertSupportedLaunchPadConfigRaw(input: unknown): void {
   }
 
   const services = root.service;
-  if (!Array.isArray(services)) return;
+  if (Array.isArray(services)) {
+    services.forEach((raw, i) => {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
+      for (const key of Object.keys(raw)) {
+        const deprecated = DEPRECATED_SERVICE_KEYS.get(key);
+        if (deprecated !== undefined) {
+          throw new Error(`service[${i}].${key}: ${deprecated}`);
+        }
+        if (!SUPPORTED_SERVICE_KEYS.has(key)) {
+          throw new Error(`service[${i}].${key}: unsupported key "${key}"`);
+        }
+      }
+    });
+  }
 
-  services.forEach((raw, i) => {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
-    for (const key of Object.keys(raw)) {
-      const deprecated = DEPRECATED_SERVICE_KEYS.get(key);
-      if (deprecated !== undefined) {
-        throw new Error(`service[${i}].${key}: ${deprecated}`);
+  const jobs = root.job;
+  if (Array.isArray(jobs)) {
+    jobs.forEach((raw, i) => {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
+      for (const key of Object.keys(raw)) {
+        if (!SUPPORTED_JOB_KEYS.has(key)) {
+          throw new Error(`job[${i}].${key}: unsupported key "${key}"`);
+        }
       }
-      if (!SUPPORTED_SERVICE_KEYS.has(key)) {
-        throw new Error(`service[${i}].${key}: unsupported key "${key}"`);
-      }
-    }
-  });
+    });
+  }
 }
 
 /** @deprecated Removed — cluster placement always bin-packs by free CPU/memory. Kept so old config-baselines parse. */
@@ -338,6 +379,27 @@ export const ServiceDatabaseSchema = z
   .strict();
 export type ServiceDatabase = z.infer<typeof ServiceDatabaseSchema>;
 
+/** One `[[job]]` block: a one-off worker image users run with `launchpad job run`. */
+export const JobDeclSchema = z
+  .object({
+    name: label("job name"),
+    dockerfile: z.string().default("./Dockerfile"),
+    /** Docker build context, relative to the launch-pad.toml directory. */
+    context: z.string().default("."),
+    cpu: z
+      .number()
+      .int()
+      .min(SERVICE_NUMERIC_FIELD_MIN.cpu, "cpu must be a positive integer (vCPU shares, 1024 = 1 vCPU)"),
+    memory: z.number().int().min(SERVICE_NUMERIC_FIELD_MIN.memory, "memory must be a positive integer (MB)"),
+    env: z.record(z.string(), z.string()).default({}),
+    /** Secret key names — values live in SSM; maintained by `launchpad secret set`. */
+    secrets: z
+      .array(z.string().regex(SECRET_KEY_REGEX, `secret name must be ${SECRET_KEY_HINT}`))
+      .default([]),
+  })
+  .strict();
+export type JobDecl = z.infer<typeof JobDeclSchema>;
+
 /** One `[[service]]` block in launch-pad.toml. */
 export const ServiceDeclSchema = z
   .object({
@@ -362,7 +424,7 @@ export const ServiceDeclSchema = z
     secrets: z
       .array(z.string().regex(SECRET_KEY_REGEX, `secret name must be ${SECRET_KEY_HINT}`))
       .default([]),
-    domain: z.string().min(1).optional(),
+    domain: hostname("domain").optional(),
     /** Template for the domain under `--env <e>`; `{env}`/`{service}` are interpolated. */
     domainPattern: z.string().min(1).optional(),
     port: z.number().int().min(1).max(65535).optional(),
@@ -512,6 +574,11 @@ export const LaunchPadConfigSchema = z
      * predate databases keep type-checking; new readers use `?? []`.
      */
     database: z.array(DatabaseDeclSchema).optional(),
+    /**
+     * One-off jobs are buildable worker images that normal deploy ignores. They are
+     * run explicitly via `launchpad job run <name>`.
+     */
+    job: z.array(JobDeclSchema).optional(),
   })
   .strict()
   .superRefine((cfg, ctx) => {
@@ -558,6 +625,16 @@ export const LaunchPadConfigSchema = z
         });
       }
       seen.add(db.name);
+    });
+    (cfg.job ?? []).forEach((job, i) => {
+      if (seen.has(job.name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `job name "${job.name}" collides with an existing service, database, or job name`,
+          path: ["job", i, "name"],
+        });
+      }
+      seen.add(job.name);
     });
   });
 

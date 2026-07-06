@@ -36,6 +36,9 @@ pub struct ManagedReplica {
     /// Cron fire time (epoch ms) this container ran for — None for long-running replicas.
     #[serde(rename = "cronFireMs", default)]
     pub cron_fire_ms: Option<i64>,
+    /// One-off job run id this container is executing — None for services/cron.
+    #[serde(rename = "jobRunId", default)]
+    pub job_run_id: Option<String>,
     /// Container exit code — meaningful only when state is "exited"/"dead".
     #[serde(rename = "exitCode", default)]
     pub exit_code: Option<i64>,
@@ -44,6 +47,11 @@ pub struct ManagedReplica {
 /// `launchpad_{project}_{service}_{index}` — the managed container name.
 pub fn container_name(project: &str, service: &str, index: i64) -> String {
     format!("launchpad_{project}_{service}_{index}")
+}
+
+/// Per-footprint bridge network for same-node service discovery.
+pub fn network_name(project: &str) -> String {
+    format!("launchpadnet_{project}")
 }
 
 /// Deterministic docker volume name for a service's persistent volume. Encodes the
@@ -161,6 +169,7 @@ pub fn parse_inspect(json: &str) -> Result<BTreeMap<String, Vec<ManagedReplica>>
             .get(labels::CRON_FIRE)
             .and_then(|s| s.parse::<i64>().ok())
             .filter(|&n| n != 0);
+        let job_run_id = lbls.get(labels::JOB_RUN).filter(|s| !s.is_empty()).cloned();
         let name = c.name.unwrap_or_default();
         let name = name.strip_prefix('/').unwrap_or(&name).to_string();
         let state = c
@@ -184,6 +193,7 @@ pub fn parse_inspect(json: &str) -> Result<BTreeMap<String, Vec<ManagedReplica>>
             host_port,
             config_stamp,
             cron_fire_ms,
+            job_run_id,
             exit_code,
         });
     }
@@ -208,6 +218,9 @@ pub struct RunSpec<'a> {
     /// executes for. Switches the restart policy to `no` (the container runs once
     /// and exits) and stamps the fire label the due-run check reads.
     pub cron_fire_ms: Option<i64>,
+    /// Set for a one-off `launchpad job run` request. Switches restart policy to `no`
+    /// and stamps the request id the CLI waits on.
+    pub job_run_id: Option<&'a str>,
 }
 
 /// Build the `docker run` argv for a replica. Pure (env is resolved by the caller) so
@@ -224,6 +237,10 @@ pub fn build_run_args(
         "-d".into(),
         "--name".into(),
         container_name(&c.project, &c.service, spec.index),
+        "--network".into(),
+        network_name(&c.project),
+        "--network-alias".into(),
+        c.service.clone(),
         "--label".into(),
         format!("{}=true", labels::MANAGED),
         "--label".into(),
@@ -247,6 +264,11 @@ pub fn build_run_args(
         // the last started run (it survives agent restarts).
         args.push("--label".into());
         args.push(format!("{}={}", labels::CRON_FIRE, fire_ms));
+        args.push("--restart".into());
+        args.push("no".into());
+    } else if let Some(job_run_id) = spec.job_run_id {
+        args.push("--label".into());
+        args.push(format!("{}={}", labels::JOB_RUN, job_run_id));
         args.push("--restart".into());
         args.push("no".into());
     } else {
@@ -341,6 +363,38 @@ pub fn inspect_managed() -> Result<BTreeMap<String, Vec<ManagedReplica>>, String
 
 pub fn pull(image: &str) -> Result<(), String> {
     run_docker(&["pull", image])
+}
+
+pub fn ensure_network(project: &str) -> Result<(), String> {
+    let name = network_name(project);
+    let inspect = Command::new("docker")
+        .args(["network", "inspect", &name])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if inspect.status.success() {
+        return Ok(());
+    }
+    run_docker(&["network", "create", &name])
+}
+
+/// Idempotently attach an existing managed container to the per-footprint network.
+/// Docker exits non-zero when a container is already connected; that is success here
+/// because this runs as a repair pass on every tick.
+pub fn ensure_network_member(project: &str, service: &str, container: &str) -> Result<(), String> {
+    ensure_network(project)?;
+    let network = network_name(project);
+    let out = Command::new("docker")
+        .args(["network", "connect", "--alias", service, &network, container])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("already exists") || stderr.contains("is already connected") {
+        return Ok(());
+    }
+    Err(format!("docker network: {}", stderr.trim()))
 }
 
 pub fn start_container(id: &str) -> Result<(), String> {
@@ -494,6 +548,7 @@ mod tests {
             volumes: vec![],
             database: None,
             backup: None,
+            job_run: None,
         }
     }
 
@@ -589,11 +644,14 @@ mod tests {
             host_port: Some(20001),
             bind_host: "0.0.0.0",
             cron_fire_ms: None,
+            job_run_id: None,
         };
         let env = BTreeMap::from([("NODE_ENV".to_string(), "production".to_string())]);
         let args = build_run_args(&spec, &env, "stamp-x");
         let joined = args.join(" ");
         assert!(joined.contains("--name launchpad_blog_web_0"));
+        assert!(joined.contains("--network launchpadnet_blog"));
+        assert!(joined.contains("--network-alias web"));
         assert!(joined.contains("--label launchpad.managed=true"));
         assert!(joined.contains("--label launchpad.configStamp=stamp-x"));
         assert!(joined.contains("--restart unless-stopped"));
@@ -618,6 +676,7 @@ mod tests {
             host_port: Some(20002),
             bind_host: "0.0.0.0",
             cron_fire_ms: None,
+            job_run_id: None,
         };
         let args = build_run_args(&spec, &BTreeMap::new(), "s");
         let joined = args.join(" ");
@@ -638,6 +697,7 @@ mod tests {
             host_port: None,
             bind_host: "127.0.0.1",
             cron_fire_ms: Some(1_765_500_000_000),
+            job_run_id: None,
         };
         let args = build_run_args(&spec, &BTreeMap::new(), "s");
         let joined = args.join(" ");
@@ -648,8 +708,34 @@ mod tests {
     }
 
     #[test]
+    fn build_run_args_for_a_job_run_uses_restart_no_and_the_run_label() {
+        let mut config = web_config();
+        config.ingress = None;
+        let spec = RunSpec {
+            config: &config,
+            index: 0,
+            host_port: None,
+            bind_host: "127.0.0.1",
+            cron_fire_ms: None,
+            job_run_id: Some("run-123"),
+        };
+        let args = build_run_args(&spec, &BTreeMap::new(), "s");
+        let joined = args.join(" ");
+        assert!(joined.contains("--label launchpad.jobRun=run-123"));
+        assert!(joined.contains("--restart no"));
+        assert!(!joined.contains("cronFire"));
+        assert!(!joined.contains("--restart unless-stopped"));
+    }
+
+    #[test]
     fn volume_name_encodes_the_tuple() {
         assert_eq!(volume_name("blog", "db", "data"), "launchpadvol_blog_db_data");
+    }
+
+    #[test]
+    fn network_name_is_scoped_to_the_project() {
+        assert_eq!(network_name("blog"), "launchpadnet_blog");
+        assert_eq!(network_name("shop-prod"), "launchpadnet_shop-prod");
     }
 
     #[test]

@@ -4,11 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { CliError } from "../errors";
 import { type GoldenAmiEntry, type GoldenAmiManifest, resolveNodeAmi, resolveNodeAmiByRole } from "./golden-ami";
 
-function entry(role: "edge" | "app", amiId: string): GoldenAmiEntry {
+function entry(role: "edge" | "app", amiId: string, architecture: "x86_64" | "arm64" = "x86_64"): GoldenAmiEntry {
   return {
     amiId,
     region: "us-east-1",
-    architecture: "x86_64",
+    architecture,
     role,
     agentType: "rust",
     agentVersion: "0.0.0",
@@ -17,18 +17,26 @@ function entry(role: "edge" | "app", amiId: string): GoldenAmiEntry {
 }
 
 const manifest: GoldenAmiManifest = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   defaultAgentType: "rust",
   amis: {
-    edge: { "us-east-1": entry("edge", "ami-golden-edge") },
-    app: { "us-east-1": entry("app", "ami-golden-app") },
+    edge: {
+      x86_64: { "us-east-1": entry("edge", "ami-golden-edge-x86") },
+      arm64: { "us-east-1": entry("edge", "ami-golden-edge-arm", "arm64") },
+    },
+    app: {
+      x86_64: { "us-east-1": entry("app", "ami-golden-app-x86") },
+      arm64: { "us-east-1": entry("app", "ami-golden-app-arm", "arm64") },
+    },
   },
 };
 
 function ec2(
   images: unknown[] = [
-    { ImageId: "ami-golden-edge", State: "available" },
-    { ImageId: "ami-golden-app", State: "available" },
+    { ImageId: "ami-golden-edge-x86", State: "available" },
+    { ImageId: "ami-golden-app-x86", State: "available" },
+    { ImageId: "ami-golden-edge-arm", State: "available" },
+    { ImageId: "ami-golden-app-arm", State: "available" },
   ],
 ) {
   return {
@@ -58,6 +66,7 @@ describe("resolveNodeAmi", () => {
         ssm: fakeSsm as never,
         region: "us-east-1",
         role: "app",
+        architecture: "x86_64",
         explicitAmiId: "ami-custom",
         env: {},
       },
@@ -76,6 +85,7 @@ describe("resolveNodeAmi", () => {
         ssm: ssm() as never,
         region: "us-east-1",
         role: "edge",
+        architecture: "arm64",
         env: { LAUNCHPAD_AMI_ID: "ami-env" },
       },
       manifest,
@@ -86,17 +96,18 @@ describe("resolveNodeAmi", () => {
 
   it("picks the ROLE-specific manifest entry when the AMI is visible and available", async () => {
     const edge = await resolveNodeAmi(
-      { ec2: ec2() as never, ssm: ssm() as never, region: "us-east-1", role: "edge", env: {} },
+      { ec2: ec2() as never, ssm: ssm() as never, region: "us-east-1", role: "edge", architecture: "arm64", env: {} },
       manifest,
     );
-    expect(edge).toMatchObject({ imageId: "ami-golden-edge", source: "golden", bootstrapMode: "golden" });
+    expect(edge).toMatchObject({ imageId: "ami-golden-edge-arm", source: "golden", bootstrapMode: "golden" });
     expect(edge.manifestEntry?.role).toBe("edge");
+    expect(edge.manifestEntry?.architecture).toBe("arm64");
 
     const app = await resolveNodeAmi(
-      { ec2: ec2() as never, ssm: ssm() as never, region: "us-east-1", role: "app", env: {} },
+      { ec2: ec2() as never, ssm: ssm() as never, region: "us-east-1", role: "app", architecture: "x86_64", env: {} },
       manifest,
     );
-    expect(app).toMatchObject({ imageId: "ami-golden-app", source: "golden", bootstrapMode: "golden" });
+    expect(app).toMatchObject({ imageId: "ami-golden-app-x86", source: "golden", bootstrapMode: "golden" });
     expect(app.manifestEntry?.agentType).toBe("rust");
   });
 
@@ -107,6 +118,7 @@ describe("resolveNodeAmi", () => {
         ssm: ssm("ami-fallback") as never,
         region: "us-east-1",
         role: "app",
+        architecture: "arm64",
         env: {},
       },
       manifest,
@@ -122,7 +134,7 @@ describe("resolveNodeAmi", () => {
       amis: { edge: { "us-east-1": entry("edge", "ami-golden-edge") }, app: {} },
     };
     const resolved = await resolveNodeAmi(
-      { ec2: ec2() as never, ssm: ssm("ami-fallback") as never, region: "us-east-1", role: "app", env: {} },
+      { ec2: ec2() as never, ssm: ssm("ami-fallback") as never, region: "us-east-1", role: "app", architecture: "x86_64", env: {} },
       edgeOnly,
     );
     expect(resolved).toMatchObject({ imageId: "ami-fallback", source: "al2023", bootstrapMode: "full" });
@@ -136,6 +148,7 @@ describe("resolveNodeAmi", () => {
           ssm: ssm() as never,
           region: "us-east-1",
           role: "app",
+          architecture: "x86_64",
           explicitAmiId: "ami-custom",
           env: { LAUNCHPAD_AMI_BOOTSTRAP: "fast" },
         },
@@ -149,11 +162,15 @@ describe("resolveNodeAmiByRole", () => {
   it("resolves one AMI per distinct role in a mixed batch", async () => {
     const byRole = await resolveNodeAmiByRole(
       { ec2: ec2() as never, ssm: ssm() as never, region: "us-east-1", env: {} },
-      ["app", "edge", "app"],
+      [
+        { role: "app", architecture: "arm64" },
+        { role: "edge", architecture: "arm64" },
+        { role: "app", architecture: "arm64" },
+      ],
       manifest,
     );
-    expect(byRole.get("edge")?.imageId).toBe("ami-golden-edge");
-    expect(byRole.get("app")?.imageId).toBe("ami-golden-app");
+    expect(byRole.get("edge:arm64")?.imageId).toBe("ami-golden-edge-arm");
+    expect(byRole.get("app:arm64")?.imageId).toBe("ami-golden-app-arm");
     expect(byRole.size).toBe(2);
   });
 });

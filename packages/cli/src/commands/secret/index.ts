@@ -77,6 +77,7 @@ async function resolveSecretContext(opts: SecretOptions, requireService: boolean
     });
   }
   const { config } = loadConfig();
+  const targetNames = [...config.service.map((s) => s.name), ...(config.job ?? []).map((j) => j.name)];
 
   if (opts.env !== undefined && !LABEL_REGEX.test(opts.env)) {
     throw new CliError(`invalid --env "${opts.env}"`, {
@@ -88,22 +89,21 @@ async function resolveSecretContext(opts: SecretOptions, requireService: boolean
   if (!serviceName) {
     if (requireService) {
       throw new CliError("--service is required", {
-        hint: `available: ${config.service.map((s) => s.name).join(", ")}`,
+        hint: `available: ${targetNames.join(", ")}`,
       });
     }
-    if (config.service.length === 1) {
-      serviceName = config.service[0]!.name;
+    if (targetNames.length === 1) {
+      serviceName = targetNames[0] as string;
     } else {
       throw new CliError("--service is required when launch-pad.toml has multiple services", {
-        hint: `available: ${config.service.map((s) => s.name).join(", ")}`,
+        hint: `available: ${targetNames.join(", ")}`,
       });
     }
   }
 
-  const decl = config.service.find((s) => s.name === serviceName);
-  if (!decl) {
+  if (!targetNames.includes(serviceName)) {
     throw new CliError(`no service named "${serviceName}" in launch-pad.toml`, {
-      hint: `available: ${config.service.map((s) => s.name).join(", ")}`,
+      hint: `available: ${targetNames.join(", ")}`,
     });
   }
 

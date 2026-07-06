@@ -58,6 +58,13 @@ describe("local config", () => {
     expect(loadLocalConfig().defaultCluster).toBe("prod");
   });
 
+  it("rejects path-like cluster ids before writing local config", () => {
+    expect(() => upsertClusterTarget("prod/../default", { region: "us-east-1" })).toThrow(
+      /invalid cluster name/,
+    );
+    expect(loadLocalConfig()).toEqual({ clusters: {} });
+  });
+
   it("clears the default cluster (reverting to implicit `default`)", () => {
     upsertClusterTarget("lower", { region: "us-east-1" });
     expect(loadLocalConfig().defaultCluster).toBe("lower");
@@ -121,6 +128,12 @@ describe("effectiveCluster", () => {
       { defaultCluster: "prod", clusters: { prod: { region: "us-west-2" } } },
     );
     expect(eff.overridden).toBe(false);
+  });
+
+  it("rejects path-like --cluster values before AWS resource names are derived", () => {
+    expect(() => effectiveCluster({ cluster: "prod/../default" }, { clusters: {} })).toThrow(
+      /invalid cluster name/,
+    );
   });
 
   it("--region / --profile flags win over the saved target", () => {

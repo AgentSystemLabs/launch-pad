@@ -1,10 +1,13 @@
 import {
+  caddyArchForArchitecture,
+  type NodeArchitecture,
   SYSTEM_LOG_DIR,
   type SystemComponent,
   systemComponentsForRole,
   systemLogFilePath,
 } from "@agentsystemlabs/launch-pad-shared";
 import { AGENT_INSTALL_PATH, AGENT_SYSTEMD_UNIT } from "./agent-upgrade";
+import { shellQuote } from "./shell-quote";
 
 /** Where external (BYOS) nodes keep their AWS credentials, loaded via systemd EnvironmentFile. */
 export const AGENT_ENV_FILE = "/etc/launch-pad/agent.env";
@@ -17,6 +20,7 @@ export interface ExternalBootstrapParams {
   agentBinaryUrl: string;
   /** The systemd unit text (rendered with `EnvironmentFile=${AGENT_ENV_FILE}`). */
   systemdUnit: string;
+  architecture?: NodeArchitecture;
   aws: { accessKeyId: string; secretAccessKey: string; region: string };
 }
 
@@ -48,9 +52,9 @@ WantedBy=multi-user.target
 `;
 }
 
-function caddyBlock(): string {
+function caddyBlock(architecture: NodeArchitecture): string {
   return `# --- Caddy (edge role only; static binary, admin API on 127.0.0.1:2019) ---
-curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/local/bin/caddy
+curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${caddyArchForArchitecture(architecture)}" -o /usr/local/bin/caddy
 chmod +x /usr/local/bin/caddy
 mkdir -p /var/lib/caddy
 
@@ -97,6 +101,7 @@ systemctl enable --now caddy
  */
 export function renderExternalBootstrap(p: ExternalBootstrapParams): string {
   const { role, agentConfigJson, agentBinaryUrl, systemdUnit, aws } = p;
+  const architecture = p.architecture ?? "x86_64";
   const forwarders = systemComponentsForRole(role)
     .map((component) => {
       const unitName = `launch-pad-logforward-${component}`;
@@ -117,10 +122,10 @@ $PKG_INSTALL docker
 systemctl enable --now docker
 `
       : "";
-  const edgeBlock = role === "edge" ? caddyBlock() : "";
+  const edgeBlock = role === "edge" ? caddyBlock(architecture) : "";
 
   return `#!/bin/bash
-set -euxo pipefail
+set -euo pipefail
 
 # --- detect package manager (dnf: Amazon Linux/Fedora/RHEL; apt-get: Debian/Ubuntu) ---
 if command -v dnf >/dev/null 2>&1; then
@@ -155,7 +160,7 @@ ${agentConfigJson}
 AGENTCONF
 
 # --- launchpad agent binary (role: ${role}) ---
-curl -fsSL "${agentBinaryUrl}" -o ${AGENT_INSTALL_PATH}
+curl -fsSL ${shellQuote(agentBinaryUrl)} -o ${AGENT_INSTALL_PATH}
 chmod 755 ${AGENT_INSTALL_PATH}
 
 # --- systemd unit ---

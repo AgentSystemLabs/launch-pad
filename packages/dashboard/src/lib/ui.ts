@@ -18,7 +18,3 @@ export function clearFlash(ctx: AppCtx, invalidate: (key: string) => void): void
   invalidate("notice");
 }
 
-/** Build a confirm() submit handler without interpolating raw text into JavaScript. */
-export function confirmSubmit(message: string): string {
-  return `return confirm(${JSON.stringify(message)})`;
-}

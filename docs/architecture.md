@@ -43,8 +43,9 @@ crashes — the next tick reconciles back.
    baseline (only the operational fields —
    `cpu`/`memory`/`replicas`/`env`/`secrets`/`domain`/`domainPattern` — may change after the first
    deploy; identity/shape is frozen).
-2. `docker buildx` for `linux/amd64`; push to ECR under an **immutable content-addressed
-   tag** (git SHA / content hash — never `:latest`).
+2. `docker buildx` for the placed app node architecture (`linux/arm64` on Graviton,
+   `linux/amd64` on x86); push to ECR under an **immutable content-addressed tag**
+   (git SHA / content hash — never `:latest`).
 3. **Plan placement** — the scheduler bin-packs services across the cluster's app nodes by
    free CPU/memory, then runs the **capacity admission check**: steady-state demand plus the
    largest single rollout surge must fit each target node (with reserved host headroom).
@@ -80,7 +81,7 @@ keeps the legacy un-prefixed root so pre-cluster nodes need no migration.
 | `app` | Containers only. **Private** — no public IP; reachable only by its edge's security group over the VPC. |
 
 Every cluster has exactly **one dedicated edge node** — auto-provisioned as `edge-1`
-(default instance type `t3.nano`, `DEFAULT_EDGE_INSTANCE_TYPE` in
+(default instance type `t4g.nano`, `DEFAULT_EDGE_INSTANCE_TYPE` in
 `shared/src/constants.ts`) on the first deploy, or chosen via `cluster.json`'s
 `defaultEdge` / `cluster set-edge`. Every deploy therefore needs at least **2 nodes**:
 the edge + ≥1 app node.
@@ -210,3 +211,5 @@ These are load-bearing — see [`CLAUDE.md`](../CLAUDE.md) for the contributor-f
 3. No node ever reads another node's state (push-based shards + least-privilege IAM).
 4. Image tags are immutable and content-addressed — never `:latest`.
 5. Web services always have health checks; capacity always reserves rollout surge.
+6. New managed clusters default to ARM/Graviton (`t4g.*`); existing x86 app pools stay
+   x86 unless the operator explicitly adds ARM nodes and migrates.

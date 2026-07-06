@@ -1,8 +1,14 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "defaultAgentType": "rust",
   "amis": {
-    "edge": {},
-    "app": {}
+    "edge": {
+      "x86_64": {},
+      "arm64": {}
+    },
+    "app": {
+      "x86_64": {},
+      "arm64": {}
+    }
   }
 }

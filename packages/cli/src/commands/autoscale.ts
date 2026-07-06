@@ -268,7 +268,11 @@ function specForScaleOut(pool: PoolEntry[], defaultEdge: string | null) {
   }
   return scaleOutNodeSpec({
     existingNodeIds: pool.map((p) => p.entry.nodeId),
-    pool: appPool.map((p) => ({ nodeId: p.entry.nodeId, instanceType: p.entry.instanceType })),
+    pool: appPool.map((p) => ({
+      nodeId: p.entry.nodeId,
+      instanceType: p.entry.instanceType,
+      architecture: p.entry.architecture,
+    })),
     defaultEdge: edgeNodeId,
   });
 }
@@ -285,6 +289,7 @@ async function applyScaleOut(
     ssm: aws.ssm,
     region: aws.region,
     role: spec.role === "app" ? "app" : "edge",
+    architecture: spec.architecture,
   });
   const vpcId = await getDefaultVpcId(aws.ec2);
 

@@ -35,6 +35,7 @@ import {
   terminateInstance,
 } from "../../aws/ec2";
 import { awsErrorName, isDestroyAlreadyGoneError } from "../../aws/errors";
+import { parseSshCidr } from "../../aws/ssh-cidr";
 import {
   createExternalNodeAccessKey,
   deleteExternalNodeAccessKey,
@@ -53,7 +54,7 @@ import { type NodeDrift, planNodeDrift } from "../../deploy/drift-plan";
 import { findConfigPath, loadConfig } from "../../config/load";
 import { CliError, EvacuationBlockedError } from "../../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../../globals";
-import { provisionRoleOf, resolveNodeAmi, resolveNodeAmiByRole } from "../../provision/golden-ami";
+import { nodeAmiLookupKey, provisionRoleOf, resolveNodeAmi, resolveNodeAmiByRole } from "../../provision/golden-ami";
 import { installLoggingOnNode } from "../../provision/install-logging";
 import { parseCreateAmount, planNodeCreateNames } from "./create-names";
 import { type InitOptions, runInit } from "./init";
@@ -177,6 +178,7 @@ interface CreateOptions extends GlobalOpts {
   role: string;
   edge?: string;
   keyName?: string;
+  sshCidr?: string;
   ami?: string;
   agentVersion?: string;
   amount?: string | number;
@@ -188,6 +190,14 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
   if (baseName !== undefined) assertValidNodeId(baseName);
   const amount = parseCreateAmount(opts.amount);
   if (opts.edge !== undefined) assertValidNodeId(opts.edge);
+  if (opts.sshCidr) {
+    parseSshCidr(opts.sshCidr);
+    if (!opts.keyName) {
+      throw new CliError("--ssh-cidr requires --key-name (the EC2 key pair to attach)", {
+        hint: "for remote shell without opening port 22, use AWS SSM Session Manager (enabled on launch-pad nodes)",
+      });
+    }
+  }
   const aws = await prepareAws(opts);
   // No name given → generate `<noun>-<verb>-<adverb>` id(s), unique against the
   // cluster's existing nodes. An explicit base name keeps the sequential behavior.
@@ -209,6 +219,7 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
     ssm: aws.ssm,
     region: aws.region,
     role,
+    architecture: capacity.architecture,
     explicitAmiId: opts.ami,
   });
   const amiId = ami.imageId;
@@ -227,6 +238,7 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
           clusterId: aws.clusterId,
           role,
         },
+        architecture: capacity.architecture,
         agentBinaryUrl: needsDownload
           ? "https://<state-bucket>.../agent?<presigned-at-launch>"
           : undefined,
@@ -247,7 +259,8 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
           securityGroup: securityGroupName(name, aws.clusterId),
           iamRole: nodeRoleName(aws.clusterId, name),
           instanceProfile: nodeProfileName(aws.clusterId, name),
-          ssh: opts.keyName !== undefined,
+          sshCidr: opts.sshCidr ? parseSshCidr(opts.sshCidr) : undefined,
+          ssh: opts.sshCidr !== undefined,
           userData,
         });
       } else {
@@ -320,6 +333,7 @@ async function runCreate(baseName: string | undefined, opts: CreateOptions): Pro
         vpcId,
         edgeNodeId,
         keyName: opts.keyName,
+        sshCidr: opts.sshCidr ? parseSshCidr(opts.sshCidr) : undefined,
         onProgress: (t) => {
           spin.text = t;
         },
@@ -347,6 +361,7 @@ function reportCreated(entry: NodeRegistryEntry): void {
     ["instance", entry.instanceId ?? color.yellow("pending")],
     ["cluster", entry.clusterId],
     ["instance type", entry.instanceType],
+    ["architecture", entry.architecture],
     ["region / az", `${entry.region} ${color.dim(entry.availabilityZone ?? "")}`],
   ];
   if (entry.role === "app") {
@@ -396,12 +411,13 @@ function printDryRun(
       securityGroup: securityGroupName(name, aws.clusterId),
       iamRole: nodeRoleName(aws.clusterId, name),
       instanceProfile: nodeProfileName(aws.clusterId, name),
-      ssh: opts.keyName !== undefined,
+      sshCidr: opts.sshCidr ? parseSshCidr(opts.sshCidr) : undefined,
+      ssh: opts.sshCidr !== undefined,
       userData,
     });
     return;
   }
-  const sshNote = opts.keyName ? " + 22" : "";
+  const sshNote = opts.sshCidr ? ` + 22 (${opts.sshCidr})` : "";
   const sgRule =
     opts.role === "app"
       ? `host ports ${color.dim(`(from edge ${opts.edge ?? "?"} only)`)}`
@@ -413,6 +429,7 @@ function printDryRun(
   ];
   if (opts.role === "app") planRows.push(["public ip", color.dim("none (VPC-private)")]);
   planRows.push(["instance type", `${opts.instanceType} ${color.dim(`(${sharesToVcpu(capacity.totalCpu)} vCPU · ${capacity.totalMemory} MB)`)}`]);
+  planRows.push(["architecture", capacity.architecture]);
   planRows.push(["ami", `${amiId} ${color.dim(`(${amiSource}, ${amiBootstrapMode} bootstrap)`)}`]);
   planRows.push(["vpc", vpcId]);
   planRows.push(["security group", `${securityGroupName(name, aws.clusterId)} ${color.dim(`(${sgRule})`)}`]);
@@ -615,7 +632,7 @@ async function runList(opts: GlobalOpts): Promise<void> {
     const badge = isExternal ? null : driftBadge(driftOf(node));
     const legacyBadge = node.role === "both" ? color.yellow("legacy both") : null;
     log.plain(
-      `  ${color.cyan(node.nodeId)}  ${color.dim(`${node.role} · ${node.instanceType}`)}  ${beat}  ${where}${legacyBadge ? `  ${legacyBadge}` : ""}${badge ? `  ${badge}` : ""}`,
+      `  ${color.cyan(node.nodeId)}  ${color.dim(`${node.role} · ${node.instanceType} · ${node.architecture}`)}  ${beat}  ${where}${legacyBadge ? `  ${legacyBadge}` : ""}${badge ? `  ${badge}` : ""}`,
     );
     log.plain(
       `    ${color.dim(
@@ -685,6 +702,7 @@ async function runShow(name: string, opts: GlobalOpts): Promise<void> {
     ["role", node.role],
     ["provisioning", node.provisioning],
     ["instance type", node.instanceType],
+    ["architecture", node.architecture],
     ["private ip", node.privateIp ?? color.dim("—")],
     ...(isExternal ? ([["advertise ip", node.advertiseIp ?? color.dim("—")]] as Array<[string, string]>) : []),
     ["region / az", `${node.region} ${color.dim(node.availabilityZone ?? "")}`],
@@ -1514,6 +1532,15 @@ async function runResize(name: string, opts: ResizeOptions): Promise<void> {
   }
 
   const capacity = await resolveCapacity(aws, instanceType);
+  if (node.architecture !== capacity.architecture) {
+    throw new CliError(
+      `cannot resize node "${name}" across architectures (${node.architecture} → ${capacity.architecture})`,
+      {
+        hint:
+          "create a new node with the target instance type, rebalance/evacuate services onto it, then destroy the old node",
+      },
+    );
+  }
 
   // Guard a shrink: the services already scheduled on this node (plus a rolling
   // update's surge) must still fit the target instance.
@@ -2180,7 +2207,10 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
     { ec2: aws.ec2, ssm: aws.ssm, region: aws.region },
     repairs
       .filter((i) => i.drift.action.kind === "recreate")
-      .map((i) => provisionRoleOf(i.entry.role)),
+      .map((i) => ({
+        role: provisionRoleOf(i.entry.role),
+        architecture: i.entry.architecture,
+      })),
   );
   // Edge/both before app — ingress first.
   const order = [...repairs].sort(
@@ -2205,7 +2235,12 @@ async function runReconcile(name: string | undefined, opts: ReconcileOptions): P
   }
   for (const i of order) {
     const spin = spinner(`reconciling ${i.entry.nodeId} (${i.drift.action.kind})…`).start();
-    const recreateAmi = recreateAmiByRole.get(provisionRoleOf(i.entry.role));
+    const recreateAmi = recreateAmiByRole.get(
+      nodeAmiLookupKey({
+        role: provisionRoleOf(i.entry.role),
+        architecture: i.entry.architecture,
+      }),
+    );
     try {
       await applyNodeDrift({
         aws,
@@ -2350,10 +2385,14 @@ export function registerNode(program: Command): void {
     .description(
       "Provision an EC2 node, install the agent, and register it (name is generated when omitted)",
     )
-    .option("--instance-type <type>", "EC2 instance type", "t3.small")
+    .option("--instance-type <type>", "EC2 instance type", "t4g.micro")
     .option("--role <role>", "node role: app | edge", "app")
     .option("--edge <nodeId>", "for an app node: the edge node that routes to it")
-    .option("--key-name <keypair>", "EC2 key pair for SSH (omit to disable SSH)")
+    .option("--key-name <keypair>", "EC2 key pair to attach (does not open port 22 unless --ssh-cidr is also set)")
+    .option(
+      "--ssh-cidr <cidr>",
+      "allow SSH (port 22) from this IPv4 CIDR only — requires --key-name; 0.0.0.0/0 is rejected",
+    )
     .option("--ami <id>", "AMI id (default: launchpad golden AMI, falling back to latest Amazon Linux 2023)")
     .option("--agent-version <semver>", "agent version to install (default: this CLI's version)")
     .option(
@@ -2531,7 +2570,7 @@ export function registerNode(program: Command): void {
         "Examples:",
         "  $ launchpad node resize node-prod-1 --instance-type t3.large",
         "  $ launchpad node resize node-prod-1 --instance-type t3.large --evacuate --yes",
-        "  $ launchpad node resize node-prod-1 --instance-type t3.small --dry-run",
+        "  $ launchpad node resize node-prod-1 --instance-type t4g.small --dry-run",
       ].join("\n"),
     )
     .action(async (name: string, _opts, command: Command) => {

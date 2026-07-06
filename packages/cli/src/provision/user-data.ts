@@ -1,5 +1,10 @@
-import type { NodeRole } from "@agentsystemlabs/launch-pad-shared";
+import {
+  caddyArchForArchitecture,
+  type NodeArchitecture,
+  type NodeRole,
+} from "@agentsystemlabs/launch-pad-shared";
 import { renderCloudWatchInstall } from "./cloudwatch";
+import { shellQuote } from "./shell-quote";
 import { renderSystemdUnit } from "./systemd-unit";
 
 export interface AgentConfig {
@@ -19,6 +24,7 @@ export interface AgentConfig {
 
 export interface UserDataParams {
   agent: AgentConfig;
+  architecture: NodeArchitecture;
   /** Presigned S3 URL the node curls to fetch the agent binary (full bootstrap only). */
   agentBinaryUrl?: string;
   /** Golden AMIs already include host dependencies and the role's agent binary. */
@@ -26,7 +32,7 @@ export interface UserDataParams {
 }
 
 /** Caddy install + permissive-admin systemd service (only for the edge node). */
-function caddyBlock(installBinary: boolean): string {
+function caddyBlock(installBinary: boolean, architecture: NodeArchitecture): string {
   const unit = `[Unit]
 Description=Caddy
 After=network-online.target
@@ -45,7 +51,7 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 `;
   const binaryBlock = installBinary
-    ? `curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/local/bin/caddy
+    ? `curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${caddyArchForArchitecture(architecture)}" -o /usr/local/bin/caddy
 chmod +x /usr/local/bin/caddy`
     : "test -x /usr/local/bin/caddy";
 
@@ -84,7 +90,7 @@ export function renderUserData(params: UserDataParams): string {
   const role = params.agent.role;
   const agentJson = JSON.stringify(params.agent, null, 2);
   const unit = renderSystemdUnit(role === "app" ? "app" : "edge");
-  const caddy = role === "app" ? "" : `\n${caddyBlock(bootstrapMode === "full")}`;
+  const caddy = role === "app" ? "" : `\n${caddyBlock(bootstrapMode === "full", params.architecture)}`;
   const cloudwatch = renderCloudWatchInstall({
     clusterId: params.agent.clusterId,
     nodeId: params.agent.nodeId,
@@ -92,17 +98,18 @@ export function renderUserData(params: UserDataParams): string {
     installPackage: bootstrapMode === "full",
   });
 
-  if (bootstrapMode === "full" && !params.agentBinaryUrl) {
-    throw new Error("agentBinaryUrl is required for full bootstrap");
-  }
-
-  const fetchAgent =
-    bootstrapMode === "golden"
-      ? `# --- agent binary baked into the launchpad golden AMI ---
-test -x /opt/launch-pad/agent`
-      : `# --- launchpad agent binary (role: ${role}) ---
-curl -fsSL "${params.agentBinaryUrl}" -o /opt/launch-pad/agent
+  let fetchAgent: string;
+  if (bootstrapMode === "golden") {
+    fetchAgent = `# --- agent binary baked into the launchpad golden AMI ---
+test -x /opt/launch-pad/agent`;
+  } else {
+    if (!params.agentBinaryUrl) {
+      throw new Error("agentBinaryUrl is required for full bootstrap");
+    }
+    fetchAgent = `# --- launchpad agent binary (role: ${role}) ---
+curl -fsSL ${shellQuote(params.agentBinaryUrl)} -o /opt/launch-pad/agent
 chmod +x /opt/launch-pad/agent`;
+  }
 
   const dockerBlock =
     role === "app"
@@ -117,7 +124,7 @@ systemctl enable --now docker
       : "";
 
   return `#!/bin/bash
-set -euxo pipefail
+set -euo pipefail
 
 # --- launchpad dirs ---
 mkdir -p /etc/launch-pad /var/lib/launch-pad /opt/launch-pad

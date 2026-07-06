@@ -2,8 +2,9 @@ import { Command } from "commander";
 import {
   type ClusterConfig,
   CLUSTERS_PREFIX,
+  CLUSTER_ID_HINT,
+  ClusterIdSchema,
   DEFAULT_CLUSTER,
-  LABEL_REGEX,
   type NodeRegistryEntry,
   nodeFrontsIngress,
   nodeRegistryKey,
@@ -59,8 +60,8 @@ function assertClusterName(name: string): void {
       hint: "pick another name, e.g. `lower` or `prod`",
     });
   }
-  if (!LABEL_REGEX.test(name)) {
-    throw new CliError(`invalid cluster name "${name}" (lowercase letters, numbers and hyphens, 1–40 chars)`);
+  if (!ClusterIdSchema.safeParse(name).success) {
+    throw new CliError(`invalid cluster name "${name}" (${CLUSTER_ID_HINT})`);
   }
 }
 
@@ -754,7 +755,13 @@ async function runDestroy(name: string, opts: GroupOptions): Promise<void> {
   }
 
   const sg = spinner("deleting security groups…").start();
-  for (const node of nodes) {
+  // App node SGs reference the edge SG as their allowed source. Delete app SGs
+  // first so the edge SG is no longer referenced when it is removed.
+  const securityGroupNodes = [...nodes].sort((a, b) => {
+    if (a.role === b.role) return a.nodeId.localeCompare(b.nodeId);
+    return a.role === "edge" ? 1 : -1;
+  });
+  for (const node of securityGroupNodes) {
     if (!node.securityGroupId) continue;
     try {
       await deleteSecurityGroup(aws.ec2, node.securityGroupId);

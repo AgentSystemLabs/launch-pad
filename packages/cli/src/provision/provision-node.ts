@@ -92,6 +92,8 @@ export interface ProvisionNodeParams {
   /** The edge node fronting this node — required when role === "app". */
   edgeNodeId?: string;
   keyName?: string;
+  /** When set with keyName, open port 22 in the node security group to this CIDR only. */
+  sshCidr?: string;
   /** Spinner bridge: called with the current step label. */
   onProgress?: (text: string) => void;
 }
@@ -106,7 +108,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
   const report = p.onProgress ?? (() => {});
 
   const capacity = p.capacity ?? (await resolveCapacity(aws, p.instanceType));
-  const amiId = p.amiId ?? (await resolveLatestAl2023Ami(aws.ssm));
+  const amiId = p.amiId ?? (await resolveLatestAl2023Ami(aws.ssm, capacity.architecture));
   const vpcId = p.vpcId ?? (await getDefaultVpcId(aws.ec2));
 
   const agentConfig = {
@@ -122,14 +124,19 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
   const needsDownload = amiBootstrapMode === "full";
   const binaryRole = role === "app" ? "app" : "edge";
   report("uploading agent binary");
-  await uploadAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId, binaryRole);
+  await uploadAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId, binaryRole, capacity.architecture);
   let agentBinaryUrl: string | undefined;
   if (needsDownload) {
     agentBinaryUrl = await presignAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId);
   } else {
     report("using baked agent binary");
   }
-  const userData = renderUserData({ agent: agentConfig, agentBinaryUrl, bootstrapMode: amiBootstrapMode });
+  const userData = renderUserData({
+    agent: agentConfig,
+    architecture: capacity.architecture,
+    agentBinaryUrl,
+    bootstrapMode: amiBootstrapMode,
+  });
 
   report("ensuring IAM role + instance profile");
   const { profileName } = await ensureNodeIam(aws.iam, {
@@ -169,7 +176,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
     securityGroupName(nodeId, aws.clusterId),
     vpcId,
     {
-      ssh: p.keyName !== undefined,
+      sshCidr: p.sshCidr,
       role,
       edgeSecurityGroupId,
     },
@@ -227,6 +234,7 @@ export async function provisionNode(p: ProvisionNodeParams): Promise<NodeRegistr
       clusterId: aws.clusterId,
       instanceId,
       instanceType: p.instanceType,
+      architecture: capacity.architecture,
       region: aws.region,
       availabilityZone: network.availabilityZone,
       role,
@@ -338,6 +346,15 @@ export async function resizeNode(p: ResizeNodeParams): Promise<NodeRegistryEntry
   if (!node.instanceId) {
     throw new CliError(`node "${node.nodeId}" has no instance to resize`);
   }
+  if (node.architecture !== p.capacity.architecture) {
+    throw new CliError(
+      `cannot resize node "${node.nodeId}" across architectures (${node.architecture} → ${p.capacity.architecture})`,
+      {
+        hint:
+          "create a new node with the target instance type, rebalance/evacuate services onto it, then destroy the old node",
+      },
+    );
+  }
 
   // Preserve running/paused intent: only restart if the instance was up to begin
   // with. A terminated instance can't be resized — point the user at reconcile.
@@ -405,7 +422,7 @@ export async function replaceInstance(p: ReplaceInstanceParams): Promise<NodeReg
     );
   }
 
-  const amiId = p.amiId ?? (await resolveLatestAl2023Ami(aws.ssm));
+  const amiId = p.amiId ?? (await resolveLatestAl2023Ami(aws.ssm, node.architecture));
 
   const agentConfig = {
     nodeId,
@@ -419,14 +436,19 @@ export async function replaceInstance(p: ReplaceInstanceParams): Promise<NodeReg
   const amiBootstrapMode = p.amiBootstrapMode ?? "full";
   const needsDownload = amiBootstrapMode === "full";
   report("uploading agent binary");
-  await uploadAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId, role === "app" ? "app" : "edge");
+  await uploadAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId, role === "app" ? "app" : "edge", node.architecture);
   let agentBinaryUrl: string | undefined;
   if (needsDownload) {
     agentBinaryUrl = await presignAgentBinary(aws.s3, aws.bucket, aws.clusterId, nodeId);
   } else {
     report("using baked agent binary");
   }
-  const userData = renderUserData({ agent: agentConfig, agentBinaryUrl, bootstrapMode: amiBootstrapMode });
+  const userData = renderUserData({
+    agent: agentConfig,
+    architecture: node.architecture,
+    agentBinaryUrl,
+    bootstrapMode: amiBootstrapMode,
+  });
 
   report(`launching ${node.instanceType}`);
   const instanceId = await runNode(aws.ec2, {

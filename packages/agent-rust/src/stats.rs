@@ -552,6 +552,7 @@ mod tests {
             host_port: None,
             config_stamp: String::new(),
             cron_fire_ms: None,
+            job_run_id: None,
             exit_code: None,
         }
     }

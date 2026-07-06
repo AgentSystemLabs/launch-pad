@@ -23,6 +23,7 @@ public 80/443). A first deploy on an empty cluster auto-provisions `edge-1` +
 | Multi-service capacity bin-packing (web + worker) | [`cluster-capacity-split`](cluster-capacity-split) |
 | Scheduled job (cron worker, one container per fire) | [`cron-task`](cron-task) |
 | Persistent named volume (sticky placement) | [`worker-with-volume`](worker-with-volume) |
+| Managed Postgres + API + one-off migration job | [`postgres-api-task`](postgres-api-task) |
 | Headless cursor-agent swarm (WAL locks + GitHub issues) | [`swarm`](swarm) |
 
 ## Coverage matrix
@@ -38,6 +39,7 @@ public 80/443). A first deploy on an empty cluster auto-provisions `edge-1` +
 | `cluster-capacity-split` | edge + 2 app (named cluster) | — | yes (4) | yes | yes | yes |
 | `cron-task` | edge + 1 app (auto) | — | — | — | yes (cron) | — |
 | `worker-with-volume` | edge + 1 app (auto) | — | — | — | yes | — |
+| `postgres-api-task` | edge + 1 app (auto) | — | — | yes | yes (job) | api + migrate job + db |
 | `swarm` | edge + N app (scale out) | — | yes (workers) | — | yes | wal + engineer |
 
 ## Edge cases exercised
@@ -62,6 +64,8 @@ public 80/443). A first deploy on an empty cluster auto-provisions `edge-1` +
 - **Web vs worker:** `web-worker` — `domain`+`port` vs worker with neither.
 - **Sticky volumes:** `worker-with-volume` — the scheduler places a volume-bearing
   service once and keeps it there; rebalance/evacuate refuse to move it.
+- **Managed Postgres:** `postgres-api-task` — the API and one-off migration job reach
+  the sticky database on the same app node through service DNS alias `primary`.
 - **DNS patterns:** wildcard at the edge (`edge-1-app-deploy-env-flat-domains`,
   `edge-1-app-deploy-env-shop-domains`); nested zone wildcard
   (`edge-1-app-deploy-env-nested-multi-dns`: `multi` + `*.multi`); single A record

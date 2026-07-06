@@ -16,6 +16,7 @@ function entry(nodeId: string, privateIp: string | null): NodeRegistryEntry {
     clusterId: "default",
     instanceId: "i-1",
     instanceType: "t3.small",
+    architecture: "x86_64",
     region: "us-east-1",
     availabilityZone: "us-east-1a",
     role: "app",
@@ -46,7 +47,7 @@ function replica(index: number, hostPort: number, state: string, healthy: boolea
 
 function desired(nodeId: string, edge: string): DesiredState {
   return {
-    version: 2,
+    version: 3,
     nodeId,
     updatedAt: "t",
     services: [

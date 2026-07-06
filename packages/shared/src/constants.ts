@@ -12,14 +12,15 @@
  * v2: dropped the `both` node role and co-located Caddy — `ingress.edge` is now a
  * required node id (was nullable, null = co-located). Every cluster is 1 dedicated
  * edge + ≥1 app node.
+ * v3: adds transient one-off job run requests/results for `launchpad job run`.
  */
-export const PROTOCOL_VERSION = 2 as const;
+export const PROTOCOL_VERSION = 3 as const;
 
 /**
  * Instance type for an auto-provisioned dedicated edge node. The edge only runs
  * Caddy (no app containers), so the smallest burstable type is plenty.
  */
-export const DEFAULT_EDGE_INSTANCE_TYPE = "t3.nano";
+export const DEFAULT_EDGE_INSTANCE_TYPE = "t4g.nano";
 
 /**
  * Managed-database defaults. A `[[database]]` block desugars into a worker service
@@ -106,6 +107,11 @@ export const LABELS = {
    * replica; the value is the durable "last fire" record the due-run check reads.
    */
   cronFire: "launchpad.cronFire",
+  /**
+   * One-off job run request id. Presence distinguishes a manual job container from
+   * a long-running replica or scheduled cron fire.
+   */
+  jobRun: "launchpad.jobRun",
 } as const;
 
 /**

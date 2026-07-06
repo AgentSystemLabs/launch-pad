@@ -1,6 +1,7 @@
 import {
   DEFAULT_EDGE_INSTANCE_TYPE,
   type InstanceCapacity,
+  type NodeArchitecture,
   type NodeRegistryEntry,
   type NodeRole,
   lookupInstanceCapacity,
@@ -17,6 +18,7 @@ import { CliError } from "../errors";
  */
 export interface NodeDemand {
   nodeId: string;
+  architecture: NodeArchitecture;
   /** Summed cpu/memory demand placed here (shares / MB, already × replicas). */
   cpu: number;
   memory: number;
@@ -39,6 +41,7 @@ export type NodeAction =
       role: NodeRole;
       edgeNodeId?: string;
       instanceType: string;
+      architecture: NodeArchitecture;
       capacity: InstanceCapacity;
     };
 
@@ -50,7 +53,7 @@ export interface BuildProvisionPlanArgs {
   load: (nodeId: string) => Promise<NodeRegistryEntry | null>;
   /** When false, a missing node is a hard error (the pre-auto-provision behavior). */
   allowCreate: boolean;
-  /** Auto-size floor passed to {@link smallestInstanceTypeFor} (default "t3.small"). */
+  /** Auto-size floor passed to {@link smallestInstanceTypeFor} (default "t4g.micro"). */
   floor?: string;
 }
 
@@ -95,6 +98,7 @@ export async function planEdgeAction(args: {
     nodeId: args.edgeNodeId,
     role: "edge",
     instanceType: DEFAULT_EDGE_INSTANCE_TYPE,
+    architecture: capacity.architecture,
     capacity,
   };
 }
@@ -132,7 +136,10 @@ export async function buildProvisionPlan(args: BuildProvisionPlanArgs): Promise<
     // state, so the node can do a zero-downtime surge from its first deploy on.
     const peakCpu = d.cpu + (d.surgeCpu ?? 0);
     const peakMemory = d.memory + (d.surgeMemory ?? 0);
-    const sized = smallestInstanceTypeFor(peakCpu, peakMemory, { floor: args.floor });
+    const sized = smallestInstanceTypeFor(peakCpu, peakMemory, {
+      floor: args.floor,
+      architecture: d.architecture,
+    });
     if (!sized) {
       throw new CliError(
         `no instance type fits node "${d.nodeId}" (${peakCpu} cpu shares · ${peakMemory} MB incl. rollout surge + reserved)`,
@@ -145,6 +152,7 @@ export async function buildProvisionPlan(args: BuildProvisionPlanArgs): Promise<
       role: "app",
       edgeNodeId: args.edgeNodeId,
       instanceType: sized.instanceType,
+      architecture: sized.capacity.architecture,
       capacity: sized.capacity,
     });
   }

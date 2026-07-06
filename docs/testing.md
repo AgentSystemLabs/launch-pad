@@ -60,6 +60,7 @@ LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-changed # monorepo depl
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:deploy-image  # deploy --image rollback to an existing tag
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:rollback      # rollback auto-picks the previous build (+ --to)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:remote-build  # deploy --remote-build builds on CodeBuild (local docker shimmed to fail)
+LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:empty-cluster # ARM/T4G empty-cluster bootstrap + remote-build deploy
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:history       # deploy history events (who/when/image/converged)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:node-iam      # node destroy deletes the per-node IAM role/profile (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:operator-iam  # the generated operator IAM policy is sufficient (and scoped)
@@ -73,6 +74,14 @@ LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:destroy-env    # named envs: d
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:idle          # cost flags an idle (paused) node (no deploy)
 LAUNCHPAD_E2E=1 AWS_PROFILE=your-profile pnpm e2e:alerts        # alerts check fires on a dead node (heartbeat-stale) + webhook
 ```
+
+`e2e:empty-cluster` is the Graviton bootstrap verifier. It uses a random named cluster
+and temporary `LAUNCHPAD_HOME` (never `default`), deploys the worker fixture with
+`--remote-build` into an empty cluster, and asserts the auto-created edge is
+`t4g.nano`/`arm64`, the generated app node is `t4g.micro`/`arm64`, both agents publish
+status, the worker reaches `running`, and a second deploy is idempotent. Teardown destroys
+the named cluster unless `--keep` /
+`LAUNCHPAD_E2E_KEEP=1` is set.
 
 `e2e:alerts` deploys a worker (node healthy), asserts `alerts check` is clean, then **terminates
 the EC2 instance out-of-band** so the registry still says the node is up while the agent stops
@@ -91,6 +100,11 @@ though a cron service keeps **zero** long-running replicas, that the first fire 
 the status `cron` rollup (`lastRunAt` set, `lastExitCode` 0, `nextRunAt` scheduled), that a
 **second** fire advances `lastRunAt` (periodic, not one-shot), that the config lock refuses a
 post-deploy cron-expression change, and that `destroy` removes the job from the node.
+
+One-off jobs are verified through focused unit tests plus the live
+[`examples/postgres-api-task`](../examples/postgres-api-task) flow: deploy the managed
+Postgres service, run `launchpad job run migrate --wait`, then deploy the API and assert
+`/db` returns the migration row over HTTPS.
 
 `e2e:autoscale` deploys a BURN-toggled worker (its env flips it between idling and holding
 ~1.3 GB of memory — `env` is operationally mutable, so `config set` re-rolls it; memory rather
@@ -161,9 +175,10 @@ stays TS-only so contributors without a Rust toolchain aren't blocked.
 
 ## Golden AMI build
 
-`pnpm build:golden-ami` cross-compiles the Rust agent binaries and bakes BOTH role-specific
-AMIs (edge + app) with Packer, updating the committed manifest the CLI reads. Run it when
-the agent or baked dependencies change. Details: [golden-ami.md](golden-ami.md).
+`pnpm build:golden-ami` cross-compiles the Rust agent binaries for both supported
+architectures and bakes role + architecture-specific AMIs (edge/app × x86_64/arm64) with
+Packer, updating the committed manifest the CLI reads. Run it when the agent or baked
+dependencies change. Details: [golden-ami.md](golden-ami.md).
 
 ## CI status
 

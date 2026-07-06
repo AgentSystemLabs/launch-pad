@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build BOTH role-specific golden AMIs (edge + app) and write their ids into the
+# Build role + architecture-specific golden AMIs and write their ids into the
 # CLI's committed manifest. Pass `edge` or `app` as $1 to build just one role.
+# Set LAUNCHPAD_AMI_ARCH=x86_64|arm64 to build one architecture; default builds both.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,6 +12,11 @@ PACKER_DIR="$ROOT/infra/packer"
 CLI_MANIFEST="$ROOT/packages/cli/src/provision/golden-ami-manifest.json"
 ROLES=("${1:-edge}")
 if [[ $# -eq 0 ]]; then ROLES=(edge app); fi
+if [[ -n "${LAUNCHPAD_AMI_ARCH:-}" ]]; then
+  ARCHES=("$LAUNCHPAD_AMI_ARCH")
+else
+  ARCHES=(x86_64 arm64)
+fi
 
 cd "$ROOT"
 
@@ -20,7 +26,7 @@ if ! command -v packer >/dev/null 2>&1; then
 fi
 
 # The AMIs bake the Rust agent binaries — build them first if missing.
-if [[ ! -f "$DIST/agent-edge" || ! -f "$DIST/agent-app" ]]; then
+if [[ ! -f "$DIST/x86_64/agent-edge" || ! -f "$DIST/x86_64/agent-app" || ! -f "$DIST/arm64/agent-edge" || ! -f "$DIST/arm64/agent-app" ]]; then
   echo "agent binaries missing — building (pnpm build:agent)…" >&2
   bash "$ROOT/scripts/build-agent-binaries.sh"
 fi
@@ -30,16 +36,23 @@ for ROLE in "${ROLES[@]}"; do
     echo "usage: build-golden-ami.sh [edge|app]   (no arg = both)" >&2
     exit 1
   fi
-  TEMPLATE="$PACKER_DIR/golden-ami-$ROLE.pkr.hcl"
-  PACKER_MANIFEST="$PACKER_DIR/latest-manifest-$ROLE.json"
+  for ARCH in "${ARCHES[@]}"; do
+    if [[ "$ARCH" != "x86_64" && "$ARCH" != "arm64" ]]; then
+      echo "LAUNCHPAD_AMI_ARCH must be x86_64 or arm64" >&2
+      exit 1
+    fi
+    TEMPLATE="$PACKER_DIR/golden-ami-$ROLE.pkr.hcl"
+    PACKER_MANIFEST="$PACKER_DIR/latest-manifest-$ROLE.json"
 
-  echo "building $ROLE golden AMI in $REGION…"
-  packer init "$TEMPLATE"
-  packer build \
-    -var "region=$REGION" \
-    -var "agent_binary_path=$DIST/agent-$ROLE" \
-    -var "agent_version=$AGENT_VERSION" \
-    "$TEMPLATE"
+    echo "building $ROLE $ARCH golden AMI in $REGION…"
+    packer init "$TEMPLATE"
+    packer build \
+      -var "region=$REGION" \
+      -var "architecture=$ARCH" \
+      -var "agent_binary_path=$DIST/$ARCH/agent-$ROLE" \
+      -var "agent_version=$AGENT_VERSION" \
+      "$TEMPLATE"
 
-  node "$ROOT/scripts/update-golden-ami-manifest.mjs" "$PACKER_MANIFEST" "$CLI_MANIFEST" "$AGENT_VERSION" "$ROLE"
+    node "$ROOT/scripts/update-golden-ami-manifest.mjs" "$PACKER_MANIFEST" "$CLI_MANIFEST" "$AGENT_VERSION" "$ROLE" "$ARCH"
+  done
 done

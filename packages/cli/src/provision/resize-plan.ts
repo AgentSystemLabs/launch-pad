@@ -41,6 +41,7 @@ export function planResizedEntry(args: PlanResizedEntryArgs): NodeRegistryEntry 
   const base = {
     ...node,
     instanceType,
+    architecture: capacity.architecture,
     totalCpu: capacity.totalCpu,
     totalMemory: capacity.totalMemory,
   };

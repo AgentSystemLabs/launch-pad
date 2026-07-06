@@ -13,7 +13,8 @@ and tearing things down safely. Every command here is real; deeper references li
 
 ## 0. Prerequisites (once)
 
-- **Docker** running locally (with `buildx`) — images build for `linux/amd64`.
+- **Docker** running locally (with `buildx`) — images build for the target node platform
+  (`linux/arm64` on new Graviton app nodes, `linux/amd64` on x86 nodes).
 - **AWS credentials** for an IAM user/role with rights to EC2, IAM, S3, ECR, SSM, STS, and
   CloudWatch Logs in your target region (see [getting-started.md](getting-started.md#aws-account)).
 - A **domain** you control, if you want HTTPS (a registrar + a DNS host you can edit).
@@ -62,7 +63,7 @@ npx @agentsystemlabs/launch-pad deploy --yes
 ```
 
 `deploy` builds your image, pushes it to ECR with an **immutable** content-addressed tag,
-**auto-provisions** the missing nodes — the cluster's dedicated edge (`edge-1`, a `t3.nano`
+**auto-provisions** the missing nodes — the cluster's dedicated edge (`edge-1`, a `t4g.nano`
 Caddy router) plus an auto-sized app node (a confirmation prompt unless `--yes`) — publishes
 desired state, and waits for the agent to report convergence. Placement is automatic: the
 scheduler picks the app node(s); you never name machines in the TOML. It prints a

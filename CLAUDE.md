@@ -98,7 +98,7 @@ deploy's bootstrap/auto-add, autoscale scale-out; the dedicated edge keeps `edge
 
 ### `packages/cli` — the product surface (`commander`-based)
 
-What the user runs. Commands: `init` · `doctor` · `setup` · `deploy` · `destroy` ·
+What the user runs. Commands: `init` · `doctor` · `setup` · `deploy` · `job` · `destroy` ·
 `rollback` · `rebalance` · `autoscale` · `status` · `history` · `node` · `project` · `cluster` (registered
 in `src/index.ts`). Named environments are `deploy --env` + `destroy --env` (no separate
 command): an env deploy writes a
@@ -158,7 +158,13 @@ fallback). `deploy` is the heart: load `launch-pad.toml` → docker buildx
 (`linux/amd64`) → push to ECR with an **immutable content-addressed tag** (git SHA / content
 hash, **never `:latest`**) → capacity admission check → ownership-aware **merge** into the
 node's `desired.json` (never clobbers other projects' services) → conditional S3 write → watch
-`status.json` to convergence. It also **auto-provisions** missing/paused nodes referenced by
+`status.json` to convergence. `job run <name> --wait` is the explicit one-off execution path:
+top-level `[[job]]` blocks are ignored by normal deploy, then built/pushed and published as a
+transient `jobRun` desired entry only when requested; the app agent runs one `--restart no`
+container, reports the matching run id/exit code in `status.json`, and the CLI removes the
+transient desired entry after terminal success/failure. Use this for migrations before rolling
+the API (`deploy --service primary` → `job run migrate --wait` → `deploy --service api`). Deploy
+also **auto-provisions** missing/paused nodes referenced by
 the config before publishing (spend-gated: `--yes` / `--no-create` / `--dry-run`), including
 the cluster's **dedicated edge** (`edge-1`, `DEFAULT_EDGE_INSTANCE_TYPE` t3.nano) when the
 cluster doesn't have one — every deploy needs at least 2 nodes (edge + ≥1 app). Two no-build
@@ -210,7 +216,7 @@ over each service's repo-relative `context`/`dockerfile`, with `collectChangedPa
 **Rust**, one crate, two role-specific static binaries (`src/bin/agent-app.rs` /
 `src/bin/agent-edge.rs`, cargo features `app`/`edge`; `cargo test` runs with both). The
 **app** binary's tick: read `desired.json` → `plan_reconcile` (pure, in `reconcile.rs`;
-includes `plan_cron_service`) diffs desired vs. live containers → `apply_actions`
+includes `plan_cron_service` and one-off `jobRun` planning) diffs desired vs. live containers → `apply_actions`
 (start/stop/replace via `docker.rs` subprocess calls, ECR auth via `ecr.rs`, SSM secrets via
 `secrets.rs`) → publish upstream shards → write `status.json` + heartbeat (`status.rs`,
 `status_write.rs`). The **edge** binary reads only its own `upstream/*` shards and programs
@@ -329,8 +335,10 @@ launch-pad-backups-<acct>-<region>/<cluster>/<owner>/<service>/<database>/<times
   role (no AWS creds in the container), then prunes per `retentionDays`. The object timestamp is
   derived from the scheduled `fire_ms` (idempotent crash-retry). `node destroy` refuses a node
   holding ANY volume-bearing service unless `--delete-data` (NOT bypassable by `--force`;
-  unparseable desired.json fails closed). No app↔DB service discovery in v1 (a DB has no published
-  port). Backup IAM (`buildAppPolicy`) is cluster-prefix-scoped, app-only.
+  unparseable desired.json fails closed). App↔DB connectivity is same-node only: the app
+  agent attaches each footprint's containers to a per-footprint Docker bridge network, and
+  services resolve each other by service name (for example `primary:5432`); there is still no
+  cross-node service discovery. Backup IAM (`buildAppPolicy`) is cluster-prefix-scoped, app-only.
 - **Partial (subset) deploys** (`deploy --service` / `deploy --changed`, and the `scale`/`config
   set` edits that wrap a single-service deploy): the per-node publish must **upsert** the
   project's services (`mergeProjectServicesPartial`), never replace its whole footprint. A subset

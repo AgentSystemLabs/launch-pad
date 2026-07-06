@@ -130,7 +130,7 @@ async function main(): Promise<boolean> {
   const nodeB = "rz-b";
   const project = "resz";
   const service = "worker";
-  const targetType = "t3.medium"; // nodes are created as the default t3.small
+  const targetType = "t4g.medium"; // nodes are created as the default t4g.micro/t4g.small sizing
 
   const home = mkdtempSync(join(tmpdir(), "launch-pad-home-"));
   const cli = makeCli({ home, region });
@@ -235,7 +235,7 @@ async function main(): Promise<boolean> {
     await softStep("`resize --evacuate` on a paused node refuses (nothing running to protect)", async () => {
       await cli.run(["node", "pause", nodeB, "--cluster", cluster], { cwd: dir });
       const res = await cli.run(
-        ["node", "resize", nodeB, "--cluster", cluster, "--instance-type", "t3.small", "--evacuate", "--yes"],
+        ["node", "resize", nodeB, "--cluster", cluster, "--instance-type", "t4g.micro", "--evacuate", "--yes"],
         { cwd: dir, allowFail: true },
       );
       assert(res.exitCode !== 0, `resize --evacuate on a paused node refused (exit ${res.exitCode})`);

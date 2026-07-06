@@ -24,6 +24,7 @@ function node(
     clusterId: "default",
     instanceId: "i-123",
     instanceType: "t3.small",
+    architecture: "x86_64",
     region: "us-east-1",
     availabilityZone: "us-east-1a",
     role: "app",
@@ -119,5 +120,6 @@ describe("buildCandidateNodes", () => {
     ]);
     expect(result.clusterAppNodeIds).toEqual(["ec2-1", "fresh-byos"]);
     expect(result.candidateNodes.map((n) => n.nodeId)).toEqual(["ec2-1", "fresh-byos"]);
+    expect(result.candidateNodes.map((n) => n.architecture)).toEqual(["x86_64", "x86_64"]);
   });
 });

@@ -11,7 +11,7 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::types::{DatabaseBackupStatus, EdgeRouteStatus, NodeStatus, ReplicaStatus, ServiceState, ServiceStatus, UpstreamBackend, UpstreamShard};
+use crate::types::{DatabaseBackupStatus, EdgeRouteStatus, JobRunState, NodeStatus, ReplicaStatus, ServiceState, ServiceStatus, UpstreamBackend, UpstreamShard};
 use crate::types::service_key;
 
 fn sha256_hex(input: &str) -> String {
@@ -62,6 +62,18 @@ struct FpService {
     // (which predate backups) stay byte-identical for non-database services.
     #[serde(skip_serializing_if = "Option::is_none")]
     backup: Option<DatabaseBackupStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_run: Option<FpJobRun>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FpJobRun {
+    id: String,
+    requested_at: String,
+    exit_code: Option<i64>,
+    state: JobRunState,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -116,6 +128,13 @@ pub fn fingerprint_status(status: &NodeStatus) -> String {
                     })
                     .collect(),
                 backup: s.backup.clone(),
+                job_run: s.job_run.as_ref().map(|j| FpJobRun {
+                    id: j.id.clone(),
+                    requested_at: j.requested_at.clone(),
+                    exit_code: j.exit_code,
+                    state: j.state,
+                    message: j.message.clone(),
+                }),
             }
         })
         .collect();
@@ -342,6 +361,7 @@ mod tests {
                 running_replicas: 1,
                 cron: None,
                 backup: None,
+                job_run: None,
                 updated_at: "2026-06-04T00:00:00.000Z".into(),
             }],
             caddy: CaddyStatus {

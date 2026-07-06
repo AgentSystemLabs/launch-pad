@@ -325,7 +325,7 @@ Each node has a **role** (`launchpad node create [name] --role …` — the name
 
 Every cluster has exactly **one dedicated edge node** — Caddy with automatic HTTPS on
 its own machine, auto-provisioned as `edge-1` on the first deploy (default
-`t3.nano`), or chosen via the cluster's `defaultEdge` / `cluster set-edge`. `app`
+`t4g.nano`), or chosen via the cluster's `defaultEdge` / `cluster set-edge`. `app`
 nodes run only containers and are private (the edge reaches them over the VPC at
 `<privateIp>:<hostPort>`). Every deploy therefore needs at least **2 nodes**: the
 edge + ≥1 app node.
@@ -339,8 +339,9 @@ runs. So you can clone a repo and `launchpad deploy` straight onto a shared clus
 (or onto nothing) with no separate node-creation step.
 
 - **Instances are auto-sized** to the smallest type that fits the services placed on
-  that node (summed cpu/memory × replicas, plus reserved headroom), floor `t3.small`.
-  The dedicated edge carries no app load → `t3.nano`.
+  that node (summed cpu/memory × replicas, plus reserved headroom), floor `t4g.micro`
+  for new ARM clusters. Existing x86 app pools keep x86 sizing unless you explicitly
+  migrate them. The dedicated edge carries no app load → `t4g.nano`.
 - **The edge is created before app nodes**, because an app node's security group
   references the edge's security group.
 - **Spend is gated.** Nodes are billed EC2 on *your* account, so deploy prints the plan
