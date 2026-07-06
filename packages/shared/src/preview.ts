@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PREVIEW_MARKER_VERSION } from "./constants";
+import { DAY_MS, HOUR_MS, MINUTE_MS } from "./time";
 import { componentOwner, envProject, HOSTNAME_REGEX, LABEL_REGEX } from "./config";
 
 /**
@@ -75,9 +76,9 @@ export function parsePreviewMarker(input: unknown): PreviewMarker {
 }
 
 /** Inclusive TTL bounds: a preview lives at least a minute and at most 90 days. */
-const TTL_MIN_MS = 60_000;
-const TTL_MAX_MS = 90 * 86_400_000;
-const TTL_UNIT_MS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
+const TTL_MIN_MS = MINUTE_MS;
+const TTL_MAX_MS = 90 * DAY_MS;
+const TTL_UNIT_MS: Record<string, number> = { m: MINUTE_MS, h: HOUR_MS, d: DAY_MS };
 
 /** Human hint for an invalid `--ttl`; kept next to the parser so the two can't drift. */
 export const PREVIEW_TTL_HINT = "pass <n>m, <n>h, or <n>d between 1m and 90d, e.g. --ttl 72h";

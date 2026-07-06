@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MINUTE_MS, SECOND_MS } from "./time";
 
 /** Pattern for rollout/health duration strings like "20s", "500ms", "1m". */
 const DURATION_PATTERN = /^(\d+)(ms|s|m)$/;
@@ -17,9 +18,9 @@ export function parseDurationMs(duration: string): number {
     case "ms":
       return n;
     case "s":
-      return n * 1000;
+      return n * SECOND_MS;
     case "m":
-      return n * 60_000;
+      return n * MINUTE_MS;
     default:
       return 0;
   }
