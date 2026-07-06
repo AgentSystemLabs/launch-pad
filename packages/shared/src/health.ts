@@ -1,13 +1,16 @@
 import { z } from "zod";
 
+/** Matches duration strings like "20s", "500ms", "1m". Shared by schema validation and parsing. */
+const DURATION_RE = /^(\d+)(ms|s|m)$/;
+
 /** A duration string like "20s", "500ms", "1m". */
 export const DurationSchema = z
   .string()
-  .regex(/^\d+(ms|s|m)$/, 'duration must look like "20s", "500ms", or "1m"');
+  .regex(DURATION_RE, 'duration must look like "20s", "500ms", or "1m"');
 
 /** Parse a duration string to milliseconds. */
 export function parseDurationMs(duration: string): number {
-  const match = /^(\d+)(ms|s|m)$/.exec(duration);
+  const match = DURATION_RE.exec(duration);
   if (!match) return 0;
   const n = Number(match[1]);
   switch (match[2]) {
