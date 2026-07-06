@@ -12,9 +12,9 @@ const TAMPER_DIR = join(ROOT, "test-results", "proj-tamper");
 test.beforeEach(() => {
   resetFakeState();
   rmSync(PROJ_DIR, { recursive: true, force: true });
+  rmSync(TAMPER_DIR, { recursive: true, force: true });
   rmSync(OTHER_PROJ_DIR, { recursive: true, force: true });
   rmSync(FORGED_DIR, { recursive: true, force: true });
-  rmSync(TAMPER_DIR, { recursive: true, force: true });
   mkdirSync(PROJ_DIR, { recursive: true });
   mkdirSync(OTHER_PROJ_DIR, { recursive: true });
   writeFileSync(join(PROJ_DIR, "Dockerfile"), "FROM node:24\n");
