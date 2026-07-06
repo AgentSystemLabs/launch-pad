@@ -5,6 +5,8 @@ import {
   LABEL_REGEX,
   logGroupName,
   parseLogStreamName,
+  type RelativeTimeUnit,
+  RELATIVE_TIME_UNIT_MS,
 } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import {
@@ -37,13 +39,6 @@ const FOLLOW_INTERVAL_MS = 2000;
  */
 const FOLLOW_DEDUP_CACHE_MAX = 50_000;
 
-const SINCE_UNIT_MS: Record<string, number> = {
-  s: 1_000,
-  m: 60_000,
-  h: 3_600_000,
-  d: 86_400_000,
-};
-
 /** Parse a relative window like `15m`, `1h`, `24h`, `7d` (also `s`) into milliseconds. */
 export function parseSince(input: string): number {
   const match = /^(\d+)(s|m|h|d)$/.exec(input.trim());
@@ -53,7 +48,8 @@ export function parseSince(input: string): number {
     });
   }
   const n = Number.parseInt(match[1] as string, 10);
-  return n * (SINCE_UNIT_MS[match[2] as string] as number);
+  const unit = match[2] as RelativeTimeUnit;
+  return n * RELATIVE_TIME_UNIT_MS[unit];
 }
 
 /**
