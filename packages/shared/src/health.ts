@@ -1,25 +1,28 @@
 import { z } from "zod";
 
+/** Units accepted by {@link DurationSchema} and {@link parseDurationMs}. */
+const DURATION_UNIT_SUFFIX = "(ms|s|m)";
+const DURATION_REGEX = new RegExp(`^\\d+${DURATION_UNIT_SUFFIX}$`);
+const DURATION_PARSE_REGEX = new RegExp(`^(\\d+)${DURATION_UNIT_SUFFIX}$`);
+
+const DURATION_UNIT_MS: Record<"ms" | "s" | "m", number> = {
+  ms: 1,
+  s: 1_000,
+  m: 60_000,
+};
+
 /** A duration string like "20s", "500ms", "1m". */
 export const DurationSchema = z
   .string()
-  .regex(/^\d+(ms|s|m)$/, 'duration must look like "20s", "500ms", or "1m"');
+  .regex(DURATION_REGEX, 'duration must look like "20s", "500ms", or "1m"');
 
 /** Parse a duration string to milliseconds. */
 export function parseDurationMs(duration: string): number {
-  const match = /^(\d+)(ms|s|m)$/.exec(duration);
+  const match = DURATION_PARSE_REGEX.exec(duration);
   if (!match) return 0;
   const n = Number(match[1]);
-  switch (match[2]) {
-    case "ms":
-      return n;
-    case "s":
-      return n * 1000;
-    case "m":
-      return n * 60_000;
-    default:
-      return 0;
-  }
+  const unit = match[2] as keyof typeof DURATION_UNIT_MS;
+  return n * DURATION_UNIT_MS[unit];
 }
 
 /**
