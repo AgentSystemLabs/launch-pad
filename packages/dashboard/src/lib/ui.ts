@@ -17,3 +17,4 @@ export function clearFlash(ctx: AppCtx, invalidate: (key: string) => void): void
   ctx.notice = null;
   invalidate("notice");
 }
+
