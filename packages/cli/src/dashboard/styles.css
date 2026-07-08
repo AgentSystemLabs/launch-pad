@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .lp-focus-ring:focus-visible {
+    outline: 2px solid oklch(var(--p));
+    outline-offset: 2px;
+  }
+}

@@ -7,6 +7,7 @@ import { registerAlerts } from "./commands/alerts";
 import { registerAutoscale } from "./commands/autoscale";
 import { registerCompletions } from "./commands/completions";
 import { registerCost } from "./commands/cost";
+import { registerDashboard } from "./commands/dashboard";
 import { registerDeploy } from "./commands/deploy";
 import { registerDestroy } from "./commands/destroy";
 import { registerDns } from "./commands/dns";
@@ -128,6 +129,7 @@ registerCluster(program);
 registerBackup(program);
 registerCost(program);
 registerAlerts(program);
+registerDashboard(program);
 registerCompletions(program);
 
 async function main(): Promise<void> {

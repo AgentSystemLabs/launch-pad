@@ -23,14 +23,17 @@
     "access": "public"
   },
   "scripts": {
-    "prelink": "pnpm --filter @agentsystemlabs/launch-pad-shared build && tsup",
-    "build": "pnpm --filter @agentsystemlabs/launch-pad-shared build && tsup",
+    "prelink": "pnpm --filter @agentsystemlabs/launch-pad-shared build && tsup && pnpm run build:css",
+    "build": "pnpm --filter @agentsystemlabs/launch-pad-shared build && tsup && pnpm run build:css",
+    "build:css": "tailwindcss -c tailwind.config.cjs -i src/dashboard/styles.css -o dist/dashboard.css --minify",
     "prepublishOnly": "pnpm run build",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@hono/node-server": "^1.13.7",
     "@aws-sdk/client-cloudwatch-logs": "^3.726.0",
     "@aws-sdk/client-codebuild": "^3.1065.0",
     "@aws-sdk/client-ec2": "^3.726.0",
@@ -44,6 +47,7 @@
     "@aws-sdk/s3-request-presigner": "^3.726.0",
     "commander": "^12.1.0",
     "execa": "^9.5.2",
+    "hono": "^4.6.14",
     "ora": "^8.1.1",
     "picocolors": "^1.1.1",
     "smol-toml": "^1.3.1",
@@ -52,6 +56,9 @@
   },
   "devDependencies": {
     "@agentsystemlabs/launch-pad-agent": "workspace:*",
-    "@agentsystemlabs/launch-pad-shared": "workspace:*"
+    "@agentsystemlabs/launch-pad-shared": "workspace:*",
+    "@playwright/test": "^1.49.0",
+    "daisyui": "^4.12.10",
+    "tailwindcss": "^3.4.6"
   }
 }

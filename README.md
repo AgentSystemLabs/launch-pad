@@ -75,11 +75,11 @@ Full prerequisites (Docker, AWS credentials, DNS) and a guided first deploy:
 | [docs/happy-path.md](docs/happy-path.md) | The indie-hacker happy path end-to-end: AWS → first deploy + HTTPS → scale/secrets/rollback → grow to a cluster → tear down safely |
 | [docs/getting-started.md](docs/getting-started.md) | Prerequisites, AWS permissions, DNS, first deploy |
 | [docs/configuration.md](docs/configuration.md) | The `launch-pad.toml` schema — services, placement, health checks, rollouts, secrets, environments, config lock |
-| [docs/cli.md](docs/cli.md) | Complete CLI reference: `init` · `doctor` · `setup` · `deploy` · `job` · `destroy` · `rollback` · `rebalance` · `scale` · `config` · `status` · `history` · `logs` · `secret` · `dns` · `node` · `project` · `cluster` · `backup` / `restore` · `cost` |
+| [docs/cli.md](docs/cli.md) | Complete CLI reference: `init` · `doctor` · `setup` · `deploy` · `job` · `destroy` · `rollback` · `rebalance` · `scale` · `config` · `status` · `history` · `logs` · `secret` · `dns` · `node` · `project` · `cluster` · `backup` / `restore` · `cost` · `dashboard` |
 | [docs/architecture.md](docs/architecture.md) | How it works: the S3 contract, node roles, edge routing, capacity, invariants |
 | [docs/agent.md](docs/agent.md) | The node reconciler (Rust; edge + app binaries) |
 | [docs/golden-ami.md](docs/golden-ami.md) | The Packer-built golden AMI and node provisioning/bootstrap |
-| [docs/dashboard.md](docs/dashboard.md) | The local web dashboard (work in progress) |
+| [docs/dashboard.md](docs/dashboard.md) | The built-in read-only web dashboard (`launchpad dashboard`) |
 | [docs/testing.md](docs/testing.md) | Unit tests, the real-AWS e2e harness, build processes, CI status |
 | [docs/releasing.md](docs/releasing.md) | Publishing the CLI to npm via GitHub Actions OIDC Trusted Publishing |
 | [docs/codebase-layout.md](docs/codebase-layout.md) | Map of the repo — where each concern lives, where to change what |
@@ -90,9 +90,9 @@ Full prerequisites (Docker, AWS credentials, DNS) and a guided first deploy:
 
 ```
 packages/shared       the typed CLI ↔ agent contract (Zod schemas)
-packages/cli          the CLI — what users run (npx @agentsystemlabs/launch-pad)
+packages/cli          the CLI — what users run (npx @agentsystemlabs/launch-pad);
+                      includes the read-only web dashboard (`launchpad dashboard`)
 packages/agent-rust   the node agent (Rust) — edge + app binaries reconciling Caddy / Docker
-packages/dashboard    local web UI (Bun; work in progress)
 e2e/                  real-AWS end-to-end test harness (opt-in)
 examples/             runnable example apps, one per feature combination
 infra/packer/         golden AMI template; scripts/ builds it
@@ -103,7 +103,7 @@ Details and a "where to change what" table: [docs/codebase-layout.md](docs/codeb
 ## Project status
 
 Working and verified end-to-end against real AWS (see [docs/testing.md](docs/testing.md)),
-pre-1.0. The **dashboard is a work in progress**. Tests run locally (no test CI yet); releases
+pre-1.0. Tests run locally (no test CI yet); releases
 publish the CLI to npm via GitHub Actions OIDC Trusted Publishing — see
 [docs/releasing.md](docs/releasing.md).
 

@@ -164,7 +164,9 @@ power. See [e2e/README.md](../e2e/README.md) for the full matrix.
 
 ## Dashboard tests
 
-Playwright e2e against a fake CLI — see [dashboard.md](dashboard.md#testing).
+Playwright e2e in `packages/cli/e2e/` run the built-in dashboard (`launchpad dashboard`)
+against a fake CLI (`e2e/fake-cli/launch-pad.mjs` via `LAUNCH_PAD_BIN`) — `pnpm test:e2e`
+in `packages/cli`. See [dashboard.md](dashboard.md#testing).
 
 ## Agent (Rust) tests
 

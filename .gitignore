@@ -10,3 +10,8 @@ infra/packer/latest-manifest*.json
 
 # launch-pad local prefs/cache should never be committed from a project
 .launch-pad-cache/
+
+# dashboard e2e harness (Playwright, packages/cli)
+packages/cli/e2e/.tmp/
+test-results/
+playwright-report/

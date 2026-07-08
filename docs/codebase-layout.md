@@ -13,13 +13,13 @@ launch-pad/
 ├── packages/
 │   ├── shared/                # the typed CLI ↔ agent contract (Zod schemas)
 │   ├── cli/                   # the product: init/deploy/status/logs/secret/node/cluster
-│   ├── agent-rust/            # the node reconciler (Rust; edge + app binaries)
-│   └── dashboard/             # local web UI (Bun; excluded from pnpm workspace)
+│   │                          #   + the read-only web dashboard (`launchpad dashboard`)
+│   └── agent-rust/            # the node reconciler (Rust; edge + app binaries)
 ├── e2e/                       # real-AWS end-to-end harness (opt-in, costs money)
 ├── examples/                  # runnable example apps — one per feature combination
 ├── infra/packer/              # golden AMI Packer template + build manifest
 ├── scripts/                   # golden AMI build + manifest update scripts
-├── pnpm-workspace.yaml        # workspace: packages/* (minus dashboard), examples/*, e2e
+├── pnpm-workspace.yaml        # workspace: packages/*, examples/*, e2e
 └── tsconfig.base.json         # strict + noUncheckedIndexedAccess + verbatimModuleSyntax
 ```
 
@@ -87,11 +87,14 @@ planners; `pnpm build:agent` cross-compiles the linux binaries the CLI distribut
 | `ecr-auth.ts` / `health.ts` | Cached ECR login; HTTP health probing |
 | `cloudwatch-logs.ts` / `stats.ts` | Log-shipping config reconciliation; resource sampling |
 
-## `packages/dashboard` — local web UI (WIP)
+## The dashboard — `packages/cli/src/dashboard/`
 
-Bun + orbital-js app that drives the CLI as a subprocess (`src/lib/run-launch-pad.ts`),
-pages in `src/pages/`, Playwright tests against a fake CLI in `tests/`. Excluded from the
-pnpm workspace. See [dashboard.md](dashboard.md).
+The read-only web viewer behind `launchpad dashboard` (registered in
+`src/commands/dashboard/`). A Hono-on-Node server that drives this same CLI as a
+subprocess (`cli-driver.ts`), server-rendered hono/jsx pages in `pages/`, ref-counted
+live streams (`stream-registry.ts` → SSE via `sse.ts`), token auth in `auth.ts`.
+Playwright tests against a fake CLI live in `packages/cli/e2e/`. See
+[dashboard.md](dashboard.md).
 
 ## `e2e/`, `examples/`, `infra/`, `scripts/`
 

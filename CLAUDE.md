@@ -99,8 +99,11 @@ deploy's bootstrap/auto-add, autoscale scale-out; the dedicated edge keeps `edge
 ### `packages/cli` — the product surface (`commander`-based)
 
 What the user runs. Commands: `init` · `doctor` · `setup` · `deploy` · `job` · `destroy` ·
-`rollback` · `rebalance` · `autoscale` · `status` · `history` · `node` · `project` · `cluster` (registered
-in `src/index.ts`). Named environments are `deploy --env` + `destroy --env` (no separate
+`rollback` · `rebalance` · `autoscale` · `status` · `history` · `node` · `project` · `cluster` ·
+`dashboard` (registered in `src/index.ts`). `dashboard` is the built-in READ-ONLY web viewer
+(`src/dashboard/` — Hono on Node, spawns this same CLI with `--json`/`--follow`, SSE for live
+monitor/logs, token auth for non-loopback binds; Playwright e2e in `packages/cli/e2e/` against
+a fake CLI; see `docs/dashboard.md`). Named environments are `deploy --env` + `destroy --env` (no separate
 command): an env deploy writes a
 `projects/<owner>/preview.json` marker (shared `preview.ts`: zod schema, `parsePreviewTtlMs`
 for `deploy --ttl 30m/72h/7d`, expiry + prune planners — the internal env registry; "preview"

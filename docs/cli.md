@@ -1484,6 +1484,30 @@ gate on it; with `--webhook` it also POSTs a Slack/Discord-compatible payload (`
 structured `alerts`). The webhook URL is operator-supplied (keep it out of source — use the env
 var or a CI secret).
 
+## `dashboard`
+
+Run the built-in **read-only web dashboard** — clusters, nodes, services, environments,
+deploy history, live CPU/memory, and live logs, rendered from this same CLI's `--json`
+output. It never mutates anything; deploys and changes stay in the CLI/CI.
+
+```bash
+launchpad dashboard                          # → http://127.0.0.1:4000
+launchpad dashboard --project ~/code/my-app  # register a project dir for logs/history
+```
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--port <port>` | Listen port (default `PORT` env or 4000). |
+| `--host <host>` | Bind interface (default `127.0.0.1`). Non-loopback **requires** `LAUNCH_PAD_DASHBOARD_TOKEN`. |
+| `--project <dir...>` | Register project directory(ies) — `logs`/`history` need a `launch-pad.toml` cwd. The launch cwd auto-registers when it holds one. |
+| `--no-open` | Don't open the browser. |
+
+Global `--cluster` / `--profile` / `--region` become the defaults for every read the
+dashboard performs. With `LAUNCH_PAD_DASHBOARD_TOKEN` set, every page requires the token
+(Bearer header, session cookie, or one-time `?token=…`); comparison is constant-time and
+failures are rate-limited. See [dashboard.md](dashboard.md) for pages, SSE streaming,
+and the VPS story.
+
 ## `completions`
 
 Print a shell-completion script for `launch-pad` / `lpd`, generated from the live command tree

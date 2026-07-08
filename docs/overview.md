@@ -295,8 +295,8 @@ auto-updates on new pushes.
 multi-node **cluster scheduler** (automatic bin-packing placement by free CPU/memory),
 **health-check-gated zero-downtime rollouts** (described below), the **secrets manager**
 (SSM SecureString + `launchpad secret`), node-local **persistent volumes**
-(`[[service.volumes]]` — data survives a container replace), and an experimental local
-**dashboard** (`packages/dashboard`).
+(`[[service.volumes]]` — data survives a container replace), and a built-in read-only
+**dashboard** (`launchpad dashboard`).
 
 **Still out of scope:** a hosted **API / control-plane** and managed **web app**, **billing**,
 and a central **orchestrator** (the agent is a per-node reconciler, not a central scheduler).
