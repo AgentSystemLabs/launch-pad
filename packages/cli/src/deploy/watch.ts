@@ -7,6 +7,7 @@ import {
   statusKey,
 } from "@agentsystemlabs/launch-pad-shared";
 import { getJson } from "../aws/s3-state";
+import { detectProtocolMismatch, type ProtocolMismatch } from "./protocol-mismatch";
 
 export interface WatchTarget {
   nodeId: string;
@@ -23,6 +24,12 @@ export interface WatchResult {
   state: ServiceState | "pending";
   ok: boolean;
   message: string;
+}
+
+export interface ConvergenceTick {
+  results: WatchResult[];
+  /** Nodes whose agent can't parse the published desired.json (CLI ahead of agent). */
+  protocolMismatches: ProtocolMismatch[];
 }
 
 function evaluate(status: NodeStatus | null, target: WatchTarget): WatchResult {
@@ -72,7 +79,11 @@ function evaluate(status: NodeStatus | null, target: WatchTarget): WatchResult {
 
 /**
  * Poll the nodes' status.json until every target service is running the deployed
- * image, any target errors, or the timeout elapses. Returns the final results.
+ * image, any target errors, a protocol mismatch is detected, or the timeout elapses.
+ * Returns the final results.
+ *
+ * A protocol mismatch (CLI PROTOCOL_VERSION ahead of the on-box agent) can never
+ * converge — fail closed immediately so deploy doesn't hang for the full timeout.
  */
 export async function waitForConvergence(
   s3: S3Client,
@@ -80,7 +91,7 @@ export async function waitForConvergence(
   clusterId: string,
   targets: WatchTarget[],
   timeoutMs: number,
-  onTick?: (results: WatchResult[]) => void,
+  onTick?: (tick: ConvergenceTick) => void,
 ): Promise<WatchResult[]> {
   const deadline = Date.now() + timeoutMs;
   const nodeIds = [...new Set(targets.map((t) => t.nodeId))];
@@ -101,10 +112,16 @@ export async function waitForConvergence(
       statusByNode.set(nodeId, status);
     }
 
+    const protocolMismatches = nodeIds
+      .map((id) => detectProtocolMismatch(id, statusByNode.get(id) ?? null))
+      .filter((m): m is ProtocolMismatch => m !== null);
+
     results = targets.map((target) => evaluate(statusByNode.get(target.nodeId) ?? null, target));
-    onTick?.(results);
+    onTick?.({ results, protocolMismatches });
 
     if (results.every((r) => r.ok)) return results;
+    // Protocol skew never heals on its own — fail fast instead of waiting out the timeout.
+    if (protocolMismatches.length > 0) return results;
     if (results.some((r) => r.state === "error")) return results;
     if (Date.now() > deadline) return results;
 

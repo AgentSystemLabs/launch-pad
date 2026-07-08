@@ -16,6 +16,7 @@ import {
 import { type AwsEnv, prepareAws } from "../aws/context";
 import { getJson, listNodeIds } from "../aws/s3-state";
 import { loadDeployedPlacement } from "../deploy/deployed-footprint";
+import { detectProtocolMismatch, protocolMismatchHint } from "../deploy/protocol-mismatch";
 import { findConfigPath, loadConfig } from "../config/load";
 import { CliError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
@@ -101,6 +102,11 @@ function render(views: NodeView[], filterProject?: string): void {
     const age = formatAge(view.status.lastSeen, now);
     const beat = stale ? color.yellow(`stale (${age})`) : color.green(`live · ${age}`);
     log.plain(`  ${color.cyan(view.id)}  ${color.dim(view.status.agentId)}  ${beat}`);
+
+    const mismatch = detectProtocolMismatch(view.id, view.status);
+    if (mismatch) {
+      log.warn(`    ${protocolMismatchHint(mismatch)}`);
+    }
 
     const services = filterProject
       ? view.status.services.filter((s) => s.project === filterProject)

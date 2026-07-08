@@ -3,13 +3,13 @@ import { type NodeStatus } from "@agentsystemlabs/launch-pad-shared";
 import { describe, expect, it, vi } from "vitest";
 import { waitForConvergence, type WatchTarget } from "./watch";
 
-function status(containerIds: string[]): NodeStatus {
+function status(containerIds: string[], opts?: { caddyError?: string | null }): NodeStatus {
   return {
     nodeId: "app-1",
     agentId: "agent-app-1",
     agentVersion: "0.0.0",
     lastSeen: new Date().toISOString(),
-    caddy: { managed: false, lastReloadAt: null, error: null },
+    caddy: { managed: false, lastReloadAt: null, error: opts?.caddyError ?? null },
     edgeRoutes: [],
     services: [
       {
@@ -75,6 +75,38 @@ describe("waitForConvergence", () => {
     const results = await waitForConvergence({ send } as never, "bucket", "default", [target], 20_000);
 
     expect(results[0]?.ok).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails fast when the agent cannot parse the published desired.json protocol version", async () => {
+    const send = vi.fn().mockResolvedValue({
+      Body: body(
+        status([], {
+          caddyError: "unsupported desired.json version 3 (expected 2)",
+        }),
+      ),
+    });
+    const target: WatchTarget = {
+      nodeId: "app-1",
+      project: "app",
+      service: "web",
+      image: "repo:web",
+      expectedReplicas: 1,
+    };
+
+    const ticks: Array<{ mismatches: number }> = [];
+    const results = await waitForConvergence(
+      { send } as never,
+      "bucket",
+      "default",
+      [target],
+      60_000,
+      (tick) => ticks.push({ mismatches: tick.protocolMismatches.length }),
+    );
+
+    expect(results[0]?.ok).toBe(false);
+    expect(ticks.some((t) => t.mismatches > 0)).toBe(true);
+    // Must not spin for the full timeout — one status read is enough.
     expect(send).toHaveBeenCalledTimes(1);
   });
 });

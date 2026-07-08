@@ -36,6 +36,7 @@ import {
   diffPlacement,
 } from "../deploy/rebalance-plan";
 import { type WatchTarget, waitForConvergence } from "../deploy/watch";
+import { protocolMismatchHint } from "../deploy/protocol-mismatch";
 import { enforceConfigLock, publishDesired, publishEdgeConfig, toServiceConfig } from "./deploy";
 import { CliError, EvacuationBlockedError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
@@ -361,18 +362,27 @@ async function waitForRebalanceConvergence(
 
   const timeoutMs = (opts.timeout ?? DEFAULT_REBALANCE_TIMEOUT_SECONDS) * 1000;
   const spin = isJsonMode() ? null : spinner("waiting for the footprint to converge elsewhere…").start();
-  const results = await waitForConvergence(aws.s3, aws.bucket, aws.clusterId, targets, timeoutMs, (rs) => {
+  let protocolMismatch: ReturnType<typeof protocolMismatchHint> | null = null;
+  const results = await waitForConvergence(aws.s3, aws.bucket, aws.clusterId, targets, timeoutMs, (tick) => {
     if (!spin) return;
-    const ready = rs.filter((r) => r.ok).length;
-    spin.text = `converging: ${ready}/${rs.length} placements ready`;
+    if (tick.protocolMismatches[0]) {
+      protocolMismatch = protocolMismatchHint(tick.protocolMismatches[0]);
+      spin.text = `agent protocol mismatch on ${tick.protocolMismatches[0].nodeId}…`;
+      return;
+    }
+    const ready = tick.results.filter((r) => r.ok).length;
+    spin.text = `converging: ${ready}/${tick.results.length} placements ready`;
   });
   const failed = results.filter((r) => !r.ok);
   if (failed.length > 0) {
     spin?.fail("the footprint did not converge in time");
     throw new CliError(
-      `evacuation published but ${failed.length} placement(s) haven't converged yet`,
+      protocolMismatch ??
+        `evacuation published but ${failed.length} placement(s) haven't converged yet`,
       {
-        hint: "the desired state is written; watch `launchpad status` and re-run the destroy once it's running — nothing was torn down",
+        hint: protocolMismatch
+          ? "upgrade the node agent, then re-run the drain/destroy once it can apply desired.json"
+          : "the desired state is written; watch `launchpad status` and re-run the destroy once it's running — nothing was torn down",
       },
     );
   }

@@ -109,6 +109,10 @@ import { formatNodeMonthlyCost } from "../cost/estimate";
 import { buildDnsChecklist, type DnsTarget, wildcardForPattern } from "../deploy/dns-panel";
 import { buildProvisionPlan, type NodeAction, type NodeDemand, planEdgeAction } from "../deploy/provision-plan";
 import { waitForConvergence, type WatchResult, type WatchTarget } from "../deploy/watch";
+import {
+  type ProtocolMismatch,
+  protocolMismatchHint,
+} from "../deploy/protocol-mismatch";
 import { CliError } from "../errors";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
 import { DEFAULT_AGENT_TYPE } from "../provision/agent-bundle";
@@ -2018,13 +2022,20 @@ async function watchAndReport(
 ): Promise<boolean> {
   const spin = spinner("waiting for nodes to converge…").start();
   let final: WatchResult[] = [];
-  await waitForConvergence(aws.s3, aws.bucket, aws.clusterId, targets, timeoutMs, (results) => {
-    final = results;
-    const running = results.filter((r) => r.ok).length;
-    spin.text = `converging ${running}/${results.length} services…`;
+  let protocolMismatches: ProtocolMismatch[] = [];
+  await waitForConvergence(aws.s3, aws.bucket, aws.clusterId, targets, timeoutMs, (tick) => {
+    final = tick.results;
+    protocolMismatches = tick.protocolMismatches;
+    const running = tick.results.filter((r) => r.ok).length;
+    if (tick.protocolMismatches.length > 0) {
+      const node = tick.protocolMismatches[0]!.nodeId;
+      spin.text = `agent protocol mismatch on ${node}…`;
+      return;
+    }
+    spin.text = `converging ${running}/${tick.results.length} services…`;
   });
 
-  const allConverged = final.every((r) => r.ok);
+  const allConverged = final.every((r) => r.ok) && protocolMismatches.length === 0;
   if (allConverged) {
     spin.succeed("all services running");
   } else {
@@ -2035,11 +2046,21 @@ async function watchAndReport(
     printJson({
       converged: allConverged,
       services: final.map((r) => ({ ...r.target, state: r.state, ok: r.ok, message: r.message })),
+      protocolMismatches: protocolMismatches.map((m) => ({
+        nodeId: m.nodeId,
+        publishedVersion: m.publishedVersion,
+        agentExpectedVersion: m.agentExpectedVersion,
+        message: m.message,
+      })),
       placementPlan,
       dns: dnsTargets,
     });
     if (!allConverged) process.exitCode = 1;
     return allConverged;
+  }
+
+  for (const m of protocolMismatches) {
+    log.error(protocolMismatchHint(m));
   }
 
   for (const r of final) {
@@ -2060,7 +2081,11 @@ async function watchAndReport(
 
   if (!allConverged) {
     process.exitCode = 1;
-    log.dim("not all services converged — check `launchpad status` or the node's agent logs");
+    if (protocolMismatches.length > 0) {
+      log.dim("deploy published desired state, but the node agent cannot apply it until upgraded");
+    } else {
+      log.dim("not all services converged — check `launchpad status` or the node's agent logs");
+    }
   }
   return allConverged;
 }
