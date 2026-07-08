@@ -20,7 +20,8 @@ describe("securityGroupIngressPermissions", () => {
       role: "edge",
       sshCidr: "203.0.113.10/32",
     });
-    for (const p of perms) {
+    // Only the SSH rule is under test — an edge legitimately serves 80/443 publicly.
+    for (const p of perms.filter((p) => p.FromPort === 22)) {
       for (const r of p.IpRanges ?? []) {
         expect(r.CidrIp).not.toBe("0.0.0.0/0");
       }

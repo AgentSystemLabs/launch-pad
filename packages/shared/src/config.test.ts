@@ -373,12 +373,22 @@ describe("domainPattern validation", () => {
     ).toThrow(/domainPattern must resolve to a DNS hostname/);
   });
 
-  it("rejects patterns whose labels overflow 63 chars with max-length token values", () => {
-    // 24 static chars + "-" + {env} max 40 = 65 > 63 — must be caught at parse time
+  it("accepts long-label patterns at parse but rejects overflow at projection", () => {
+    // Parse can't know the real env/service names, so multi-token or long-static
+    // patterns parse fine (a max-length projection would forbid legitimate
+    // `{service}-{env}` patterns). The overflow is caught when the ACTUAL names
+    // are projected — resolveServiceDomain throws on a >63-char label.
     const longPrefix = "a".repeat(24);
+    const pattern = `${longPrefix}-{env}.acme.com`;
     expect(() =>
-      parseLaunchPadConfig({ project: "p", service: [{ ...web, domainPattern: `${longPrefix}-{env}.acme.com` }] }),
-    ).toThrow(/domainPattern must resolve to a DNS hostname/);
+      parseLaunchPadConfig({ project: "p", service: [{ ...web, domainPattern: pattern }] }),
+    ).not.toThrow();
+    expect(() =>
+      resolveServiceDomain({ domain: "api.acme.com", domainPattern: pattern, service: "api" }, "e".repeat(40)),
+    ).toThrow(/projected domain .* is not a DNS hostname/);
+    expect(
+      resolveServiceDomain({ domain: "api.acme.com", domainPattern: pattern, service: "api" }, "staging"),
+    ).toBe(`${longPrefix}-staging.acme.com`);
   });
 
   it("rejects a domainPattern on a worker", () => {

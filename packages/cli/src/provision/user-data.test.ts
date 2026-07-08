@@ -48,7 +48,7 @@ describe("renderUserData (edge)", () => {
 
   it("shell-quotes the binary url before embedding it in user data", () => {
     const hostileUrl = "https://example.com/agent?sig='$(touch /tmp/pwn)'";
-    const hostileScript = renderUserData({ agent: edgeAgent, agentBinaryUrl: hostileUrl });
+    const hostileScript = renderUserData({ agent: edgeAgent, architecture: "x86_64", agentBinaryUrl: hostileUrl });
 
     expect(hostileScript).toContain(`curl -fsSL ${shellQuote(hostileUrl)} -o /opt/launch-pad/agent`);
     expect(hostileScript).not.toContain(`curl -fsSL "${hostileUrl}"`);

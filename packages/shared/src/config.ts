@@ -81,9 +81,12 @@ export function domainPatternError(pattern: string): string | null {
   if (!tokens.includes("env")) {
     return "domainPattern must include the {env} token so environments don't collide on one domain";
   }
-  // Project each token to its maximum allowed length (LABEL_REGEX max = 40 chars) so
-  // label-length overflow is caught at parse time rather than silently at deploy time.
-  const projected = pattern.replace(/\{(env|service)\}/g, () => "a".repeat(40));
+  // Syntax check with a minimal 1-char token projection — catches schemes, paths,
+  // ports, wildcards, and whitespace. Label-length overflow depends on the ACTUAL
+  // env/service names, so it is validated at projection time (resolveServiceDomain);
+  // a max-length projection here would reject legitimate multi-token patterns like
+  // `{service}-{env}.example.com` that fit fine for every real name pair.
+  const projected = pattern.replace(/\{(env|service)\}/g, () => "a");
   if (!HOSTNAME_REGEX.test(projected)) {
     return `domainPattern must resolve to ${HOSTNAME_HINT}`;
   }
@@ -764,8 +767,21 @@ export interface ServiceDomainInput {
 export function resolveServiceDomain(input: ServiceDomainInput, env: string | undefined): string | undefined {
   if (input.domain === undefined) return undefined;
   if (env === undefined) return input.domain;
+  let projected: string;
   if (input.domainPattern) {
-    return input.domainPattern.replace(/\{(env|service)\}/g, (_, k: string) => (k === "env" ? env : input.service));
+    projected = input.domainPattern.replace(/\{(env|service)\}/g, (_, k: string) =>
+      k === "env" ? env : input.service,
+    );
+  } else {
+    projected = input.domain.replace(/^([^.]+)/, `$1-${env}`);
   }
-  return input.domain.replace(/^([^.]+)/, `$1-${env}`);
+  // The pattern's syntax was validated at parse time with placeholder tokens; the
+  // REAL names can still overflow a 63-char DNS label — reject here, where we can
+  // name the offending combination, instead of shipping an unissuable domain.
+  if (!HOSTNAME_REGEX.test(projected)) {
+    throw new Error(
+      `projected domain "${projected}" for service "${input.service}" (env "${env}") is not ${HOSTNAME_HINT} — shorten the env/service name or the domainPattern`,
+    );
+  }
+  return projected;
 }
