@@ -53,10 +53,21 @@ export interface BuildAppOpts {
   token?: string;
 }
 
+const SECURITY_HEADERS = {
+  "Content-Security-Policy": "frame-ancestors 'none'",
+  "X-Frame-Options": "DENY",
+} as const;
+
 export function buildDashboardApp(opts: BuildAppOpts): Hono {
   const { ctx } = opts;
   const app = new Hono();
 
+  app.use("*", async (c, next) => {
+    await next();
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+      c.header(name, value);
+    }
+  });
   if (opts.token) app.use("*", authMiddleware(opts.token));
 
   app.get("/healthz", (c) => c.json({ ok: true }));

@@ -3,6 +3,7 @@ export * from "./cron";
 export * from "./architecture";
 export * from "./capacity";
 export * from "./health";
+export * from "./time";
 export * from "./config";
 export * from "./config-lock";
 export * from "./desired";

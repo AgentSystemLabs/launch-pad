@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { shellQuote } from "./shell-quote";
 import { renderSystemdUnit } from "./systemd-unit";
 import { type AgentConfig, renderUserData } from "./user-data";
 
@@ -18,8 +19,10 @@ const agentBinaryUrl = "https://example.s3.amazonaws.com/nodes/node-prod-1/agent
 describe("renderUserData (edge)", () => {
   const script = renderUserData({ agent: edgeAgent, architecture: "x86_64", agentBinaryUrl });
 
-  it("is a bash script", () => {
+  it("is a bash script with strict mode and no xtrace", () => {
     expect(script.startsWith("#!/bin/bash")).toBe(true);
+    expect(script).toContain("set -euo pipefail");
+    expect(script).not.toMatch(/set\s+-[a-z]*x/);
   });
 
   it("embeds the agent config including cluster + role", () => {
@@ -41,6 +44,14 @@ describe("renderUserData (edge)", () => {
     expect(script).toContain("-o /opt/launch-pad/agent");
     expect(script).toContain("chmod +x /opt/launch-pad/agent");
     expect(script).toContain("systemctl enable --now launch-pad-agent");
+  });
+
+  it("shell-quotes the binary url before embedding it in user data", () => {
+    const hostileUrl = "https://example.com/agent?sig='$(touch /tmp/pwn)'";
+    const hostileScript = renderUserData({ agent: edgeAgent, agentBinaryUrl: hostileUrl });
+
+    expect(hostileScript).toContain(`curl -fsSL ${shellQuote(hostileUrl)} -o /opt/launch-pad/agent`);
+    expect(hostileScript).not.toContain(`curl -fsSL "${hostileUrl}"`);
   });
 
   it("runs Caddy on an edge node", () => {

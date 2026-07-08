@@ -31,6 +31,19 @@ function safeOrigin(url: string): string {
   }
 }
 
+/** Webhook URLs carry alert details and often embed secret tokens, so require TLS.
+ *  Loopback addresses (127.0.0.1, localhost) are exempt so e2e tests can use a local HTTP receiver. */
+export function isSecureWebhookUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:") return true;
+    if (parsed.protocol === "http:" && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 /** POST an alert payload to a webhook URL. Throws on a non-2xx response. */
 export async function postWebhook(url: string, payload: AlertPayload): Promise<void> {
   const res = await fetch(url, {

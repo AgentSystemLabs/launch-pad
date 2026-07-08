@@ -7,6 +7,7 @@
  * same fragment on every sample. A paused/stopped node falls back to a
  * one-shot historic read (`--since 15m`) instead of a live watch.
  */
+import { hostMemoryPercent } from "@agentsystemlabs/launch-pad-shared";
 import type { Handler } from "hono";
 import { runLaunchPad, streamLaunchPad } from "../cli-driver";
 import { Breadcrumbs } from "../components/breadcrumbs";
@@ -25,7 +26,7 @@ interface NodeShowProbe {
 }
 
 function memPercent(s: StatsSample): number {
-  return s.host.memoryTotalMb > 0 ? (s.host.memoryUsedMb / s.host.memoryTotalMb) * 100 : 0;
+  return hostMemoryPercent(s.host);
 }
 
 /** Sum a service's cpu% / memory across its replicas in one sample. */

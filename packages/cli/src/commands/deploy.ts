@@ -114,6 +114,7 @@ import {
   protocolMismatchHint,
 } from "../deploy/protocol-mismatch";
 import { CliError } from "../errors";
+import { parseTimeoutSeconds } from "../parse-timeout.js";
 import { applyGlobalOptions, type GlobalOpts, mergedOpts } from "../globals";
 import { DEFAULT_AGENT_TYPE } from "../provision/agent-bundle";
 import { nodeAmiLookupKey, provisionRoleOf, resolveNodeAmiByRole } from "../provision/golden-ami";
@@ -1954,23 +1955,8 @@ export async function runDeploy(opts: DeployOptions): Promise<void> {
     await recordDeployEvent(aws, { ownerProject, env, kind: deployKind, services: eventServices, converged: null });
     return;
   }
-  const converged = await watchAndReport(aws, targets, resolveTimeoutMs(opts.timeout), built, placementPlan, dnsTargets, dnsWildcard, hideEdgeIp(opts));
+  const converged = await watchAndReport(aws, targets, parseTimeoutSeconds(opts.timeout, DEFAULT_CONVERGE_TIMEOUT_SECONDS), built, placementPlan, dnsTargets, dnsWildcard, hideEdgeIp(opts));
   await recordDeployEvent(aws, { ownerProject, env, kind: deployKind, services: eventServices, converged });
-}
-
-/**
- * Parse the --timeout flag (seconds) to milliseconds. A bare `Number()` here would
- * turn a typo like `--timeout abc` into NaN, which `waitForConvergence` reads as an
- * instantly-elapsed deadline — a deploy that "times out" the moment it starts with
- * no explanation. Validate to a positive integer instead (mirrors --tail/--interval).
- */
-function resolveTimeoutMs(raw: string | undefined): number {
-  if (raw === undefined) return DEFAULT_CONVERGE_TIMEOUT_SECONDS * 1000;
-  const seconds = Number.parseInt(raw, 10);
-  if (!Number.isInteger(seconds) || seconds < 1) {
-    throw new CliError(`invalid --timeout "${raw}"`, { hint: "pass whole seconds ≥ 1, e.g. --timeout 180" });
-  }
-  return seconds * 1000;
 }
 
 /**

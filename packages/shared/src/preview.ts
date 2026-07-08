@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PREVIEW_MARKER_VERSION } from "./constants";
-import { componentOwner, envProject, LABEL_REGEX } from "./config";
+import { DAY_MS, HOUR_MS, MINUTE_MS } from "./time";
+import { componentOwner, envProject, HOSTNAME_REGEX, LABEL_REGEX } from "./config";
 
 /**
  * Strict field shapes: the marker is read back from S3 and drives DESTRUCTIVE actions
@@ -9,7 +10,10 @@ import { componentOwner, envProject, LABEL_REGEX } from "./config";
  * of the CLI's own runtime guards.
  */
 const OWNER_REGEX = /^[a-z0-9][a-z0-9-]*$/;
-const HOSTNAME_REGEX = /^[a-z0-9]([a-z0-9-]{0,62})?(\.[a-z0-9]([a-z0-9-]{0,62})?)+$/i;
+// HOSTNAME_REGEX (from config.ts) is intentionally stricter than the local regex it replaced:
+// labels must end with [a-z0-9], so hostnames like "foo-.example.com" are now rejected. Any
+// pre-existing S3 marker with a hyphen-terminated label is RFC-violating and can be re-written
+// by re-deploying the environment.
 
 /**
  * Preview-environment marker: one `projects/<project>-<env>/preview.json` per env
@@ -72,9 +76,9 @@ export function parsePreviewMarker(input: unknown): PreviewMarker {
 }
 
 /** Inclusive TTL bounds: a preview lives at least a minute and at most 90 days. */
-const TTL_MIN_MS = 60_000;
-const TTL_MAX_MS = 90 * 86_400_000;
-const TTL_UNIT_MS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000 };
+const TTL_MIN_MS = MINUTE_MS;
+const TTL_MAX_MS = 90 * DAY_MS;
+const TTL_UNIT_MS: Record<string, number> = { m: MINUTE_MS, h: HOUR_MS, d: DAY_MS };
 
 /** Human hint for an invalid `--ttl`; kept next to the parser so the two can't drift. */
 export const PREVIEW_TTL_HINT = "pass <n>m, <n>h, or <n>d between 1m and 90d, e.g. --ttl 72h";

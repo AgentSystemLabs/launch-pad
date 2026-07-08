@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AutoscalePolicySchema } from "./autoscale";
+import { ClusterIdSchema } from "./config";
 
 /**
  * `cluster.json` at `clusters/<clusterId>/cluster.json` — the authoritative
@@ -10,7 +11,7 @@ import { AutoscalePolicySchema } from "./autoscale";
  */
 export const ClusterConfigSchema = z
   .object({
-    clusterId: z.string().min(1),
+    clusterId: ClusterIdSchema,
     /** Node id of the edge that fronts this cluster's web services, or null. */
     defaultEdge: z.string().min(1).nullable().default(null),
     region: z.string().min(1),

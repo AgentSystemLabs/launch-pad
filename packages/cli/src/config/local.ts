@@ -2,7 +2,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { DEFAULT_CLUSTER } from "@agentsystemlabs/launch-pad-shared";
+import {
+  CLUSTER_ID_HINT,
+  ClusterIdSchema,
+  DEFAULT_CLUSTER,
+} from "@agentsystemlabs/launch-pad-shared";
 import { z } from "zod";
 import { CliError } from "../errors";
 
@@ -26,8 +30,8 @@ export type ClusterTarget = z.infer<typeof ClusterTargetSchema>;
 const LocalConfigSchema = z
   .object({
     /** Cluster used when `--cluster` is omitted. */
-    defaultCluster: z.string().min(1).optional(),
-    clusters: z.record(z.string(), ClusterTargetSchema).default({}),
+    defaultCluster: ClusterIdSchema.optional(),
+    clusters: z.record(ClusterIdSchema, ClusterTargetSchema).default({}),
   })
   .strict();
 
@@ -37,6 +41,11 @@ export type LocalConfig = z.infer<typeof LocalConfigSchema>;
 export function localConfigPath(): string {
   const home = process.env.LAUNCHPAD_HOME ?? homedir();
   return join(home, ".launch-pad", "config.toml");
+}
+
+export function assertValidClusterId(clusterId: string): void {
+  if (ClusterIdSchema.safeParse(clusterId).success) return;
+  throw new CliError(`invalid cluster name "${clusterId}" (${CLUSTER_ID_HINT})`);
 }
 
 /** Load local prefs, or an empty config when the file doesn't exist. */
@@ -78,6 +87,7 @@ export function upsertClusterTarget(
   target: ClusterTarget,
   options: { setDefaultIfFirst?: boolean } = {},
 ): LocalConfig {
+  assertValidClusterId(clusterId);
   const { setDefaultIfFirst = true } = options;
   const config = loadLocalConfig();
   config.clusters[clusterId] = { ...config.clusters[clusterId], ...target };
@@ -109,6 +119,7 @@ export function rememberClusterTarget(
 
 /** Set the cluster used when `--cluster` is omitted. */
 export function setDefaultCluster(clusterId: string): void {
+  assertValidClusterId(clusterId);
   const config = loadLocalConfig();
   config.defaultCluster = clusterId;
   writeLocalConfig(config);
@@ -155,6 +166,7 @@ export function effectiveCluster(
 ): EffectiveCluster {
   const persistedDefault = local.defaultCluster ?? DEFAULT_CLUSTER;
   const cluster = opts.cluster ?? persistedDefault;
+  assertValidClusterId(cluster);
   const target = local.clusters[cluster];
   return {
     cluster,

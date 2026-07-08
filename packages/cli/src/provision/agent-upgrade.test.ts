@@ -64,4 +64,10 @@ describe("external upgrade helpers", () => {
     expect(hint).toContain("re-run `launchpad node upgrade-agent <name> --host <user@host> --ssh-key <path>`");
     expect(hint).toContain("Presigned URL valid for ~15 min");
   });
+
+  it("escapes single quotes in manual upgrade hint URLs", () => {
+    const hint = manualUpgradeHint("byos-app", "https://example.com/agent'file", 900, "external");
+
+    expect(hint).toContain("curl -fsSL 'https://example.com/agent'\\''file'");
+  });
 });

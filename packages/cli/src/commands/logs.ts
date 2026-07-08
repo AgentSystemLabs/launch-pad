@@ -5,6 +5,8 @@ import {
   LABEL_REGEX,
   logGroupName,
   parseLogStreamName,
+  type RelativeTimeUnit,
+  RELATIVE_TIME_UNIT_MS,
 } from "@agentsystemlabs/launch-pad-shared";
 import { type AwsEnv, prepareAws } from "../aws/context";
 import {
@@ -46,9 +48,8 @@ export function parseSince(input: string): number {
     });
   }
   const n = Number.parseInt(match[1] as string, 10);
-  const unit = match[2];
-  const ms = unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
-  return n * ms;
+  const unit = match[2] as RelativeTimeUnit;
+  return n * RELATIVE_TIME_UNIT_MS[unit];
 }
 
 /**

@@ -14,8 +14,18 @@ import { cronExpressionError, nextCronFire, parseCronExpression } from "./cron";
 import { HealthCheckSchema, RolloutSchema } from "./health";
 import { SECRET_KEY_HINT, SECRET_KEY_REGEX } from "./secrets";
 
-/** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1–40 chars. */
+/** DNS/label-safe identifier: lowercase alphanumeric + hyphen, 1-40 chars. */
 export const LABEL_REGEX = /^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/;
+export const LABEL_HINT = "lowercase letters, numbers and hyphens (1-40 chars)";
+export const CLUSTER_ID_HINT = LABEL_HINT;
+export const ClusterIdSchema = z.string().regex(LABEL_REGEX, `cluster id must be ${CLUSTER_ID_HINT}`);
+
+/** Public hostname accepted for edge routing. Rejects IPv4 addresses, schemes, paths, ports, and wildcards. */
+export const HOSTNAME_REGEX =
+  /^(?!(\d{1,3}\.){3}\d{1,3}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+export const HOSTNAME_HINT =
+  "a DNS hostname like api.example.com (no scheme, path, port, wildcard, or whitespace)";
 
 /**
  * Separator between project and component in a derived footprint owner
@@ -50,7 +60,9 @@ export function nodeIdError(id: string): string | null {
 }
 
 const label = (what: string) =>
-  z.string().regex(LABEL_REGEX, `${what} must be lowercase letters, numbers and hyphens (1–40 chars)`);
+  z.string().regex(LABEL_REGEX, `${what} must be ${LABEL_HINT}`);
+
+const hostname = (what: string) => z.string().regex(HOSTNAME_REGEX, `${what} must be ${HOSTNAME_HINT}`);
 
 /** Tokens a `domainPattern` may interpolate. `{env}` is required; `{service}` is optional. */
 const DOMAIN_PATTERN_TOKENS = new Set(["env", "service"]);
@@ -68,6 +80,12 @@ export function domainPatternError(pattern: string): string | null {
   }
   if (!tokens.includes("env")) {
     return "domainPattern must include the {env} token so environments don't collide on one domain";
+  }
+  // Project each token to its maximum allowed length (LABEL_REGEX max = 40 chars) so
+  // label-length overflow is caught at parse time rather than silently at deploy time.
+  const projected = pattern.replace(/\{(env|service)\}/g, () => "a".repeat(40));
+  if (!HOSTNAME_REGEX.test(projected)) {
+    return `domainPattern must resolve to ${HOSTNAME_HINT}`;
   }
   return null;
 }
@@ -382,6 +400,11 @@ export const JobDeclSchema = z
   .strict();
 export type JobDecl = z.infer<typeof JobDeclSchema>;
 
+/** True when a service declaration exposes ingress (domain + port). */
+function serviceHasIngress(s: { domain?: unknown; port?: unknown }): boolean {
+  return s.domain !== undefined && s.port !== undefined;
+}
+
 /** One `[[service]]` block in launch-pad.toml. */
 export const ServiceDeclSchema = z
   .object({
@@ -406,7 +429,7 @@ export const ServiceDeclSchema = z
     secrets: z
       .array(z.string().regex(SECRET_KEY_REGEX, `secret name must be ${SECRET_KEY_HINT}`))
       .default([]),
-    domain: z.string().min(1).optional(),
+    domain: hostname("domain").optional(),
     /** Template for the domain under `--env <e>`; `{env}`/`{service}` are interpolated. */
     domainPattern: z.string().min(1).optional(),
     port: z.number().int().min(1).max(65535).optional(),
@@ -425,8 +448,8 @@ export const ServiceDeclSchema = z
   })
   .strict()
   .superRefine((s, ctx) => {
+    const isWeb = serviceHasIngress(s);
     if (s.database !== undefined) {
-      const isWeb = s.domain !== undefined && s.port !== undefined;
       if (isWeb || s.cron !== undefined) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -456,7 +479,6 @@ export const ServiceDeclSchema = z
         path: ["domain"],
       });
     }
-    const isWeb = s.domain !== undefined && s.port !== undefined;
     if (s.domainPattern !== undefined) {
       if (!isWeb) {
         ctx.addIssue({
@@ -631,7 +653,7 @@ export function parseLaunchPadConfig(input: unknown): LaunchPadConfig {
 
 /** True when the service declares ingress (web) rather than being a worker. */
 export function isWebService(s: ServiceDecl): boolean {
-  return s.domain !== undefined && s.port !== undefined;
+  return serviceHasIngress(s);
 }
 
 /** Pinned engine image for a managed database — pulled, never built. */
