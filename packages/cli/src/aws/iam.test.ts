@@ -33,15 +33,29 @@ describe("node IAM least privilege", () => {
     expect(writeStatus?.Resource).toEqual([`arn:aws:s3:::${bucket}/nodes/app-1/status.json`]);
 
     const publish = policy.Statement.find((s) => s.Sid === "PublishUpstream");
+    // Default cluster: own (un-prefixed) node root only — no cross-cluster wildcard.
     expect(publish?.Resource).toEqual([
       `arn:aws:s3:::${bucket}/nodes/*/upstream/app-1.json`,
-      `arn:aws:s3:::${bucket}/clusters/*/nodes/*/upstream/app-1.json`,
     ]);
 
     const listOwn = policy.Statement.find((s) => s.Sid === "ListOwnPrefix");
     expect(listOwn?.Condition).toEqual({
       StringLike: { "s3:prefix": ["nodes/app-1/*"] },
     });
+  });
+
+  it("scopes upstream shard writes to the node's OWN named cluster (no cross-cluster grant)", () => {
+    const policy = JSON.parse(buildAppPolicy(bucket, "prod", "app-1", region, accountId)) as {
+      Statement: Array<{ Sid?: string; Resource?: string | string[] }>;
+    };
+    const publish = policy.Statement.find((s) => s.Sid === "PublishUpstream");
+    expect(publish?.Resource).toEqual([
+      `arn:aws:s3:::${bucket}/clusters/prod/nodes/*/upstream/app-1.json`,
+    ]);
+    // Must NOT be able to write into another cluster's or the default cluster's edges.
+    const resources = (publish?.Resource as string[]) ?? [];
+    expect(resources.some((r) => r.includes("clusters/*"))).toBe(false);
+    expect(resources).not.toContain(`arn:aws:s3:::${bucket}/nodes/*/upstream/app-1.json`);
   });
 
   it("grants app nodes cluster-scoped CloudWatch Logs write", () => {

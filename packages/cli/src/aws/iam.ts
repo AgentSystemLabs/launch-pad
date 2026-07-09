@@ -23,6 +23,7 @@ import {
 } from "@aws-sdk/client-iam";
 import {
   backupsBucketName,
+  clusterNodesPrefix,
   desiredKey,
   nodePrefix,
   nodeResourceTags,
@@ -237,13 +238,19 @@ export function buildAppPolicy(
         Resource: [`${bucketArn}/${statusKey(clusterId, nodeId)}`],
       },
       {
+        // Publish this node's own routing shard into an edge's `upstream/` prefix.
+        // SECURITY: scope to THIS node's own cluster only. The previous
+        // `nodes/*/upstream/...` + `clusters/*/nodes/*/upstream/...` wildcards let an
+        // app node write a shard into ANY cluster's, ANY edge's upstream prefix in the
+        // account — a compromised node could inject a backend for a victim cluster's
+        // domain and have that edge (which terminates TLS) round-robin traffic to an
+        // attacker IP. `clusterNodesPrefix` resolves to the node's own cluster root
+        // (`nodes/` for the default cluster, `clusters/<id>/nodes/` for a named one);
+        // the filename stays pinned to this node's own id.
         Sid: "PublishUpstream",
         Effect: "Allow",
         Action: ["s3:PutObject"],
-        Resource: [
-          `${bucketArn}/nodes/*/upstream/${nodeId}.json`,
-          `${bucketArn}/clusters/*/nodes/*/upstream/${nodeId}.json`,
-        ],
+        Resource: [`${bucketArn}/${clusterNodesPrefix(clusterId)}*/upstream/${nodeId}.json`],
       },
       {
         // Required so GetObject on a missing desired.json returns 404 (not 403).
