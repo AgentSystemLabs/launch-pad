@@ -8,7 +8,7 @@
  */
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
-import { joinRoom, leaveRoom, subscribeRoom, type RoomSpec } from "./stream-registry";
+import { joinRoom, leaveRoom, RoomCapExceededError, subscribeRoom, type RoomSpec } from "./stream-registry";
 
 const COALESCE_MS = 150;
 const KEEPALIVE_MS = 25_000;
@@ -24,7 +24,19 @@ export interface SseRoomOpts<T> {
 
 export function sseRoomResponse<T>(c: Context, opts: SseRoomOpts<T>): Response {
   return streamSSE(c, async (stream) => {
-    joinRoom<T>({ key: opts.key, max: opts.max, start: opts.start });
+    try {
+      joinRoom<T>({ key: opts.key, max: opts.max, start: opts.start });
+    } catch (err) {
+      // At capacity: refuse to spawn another subprocess. Tell the client and end the
+      // stream cleanly — do NOT subscribe/leave, since we never held a room ref.
+      if (err instanceof RoomCapExceededError) {
+        await stream
+          .writeSSE({ data: JSON.stringify("<div class=\"alert alert-warning\">dashboard is at its live-stream capacity — close another live view and retry</div>") })
+          .catch(() => {});
+        return;
+      }
+      throw err;
+    }
 
     let closed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;

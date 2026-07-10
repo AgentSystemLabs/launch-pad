@@ -20,6 +20,25 @@ interface Room<T> {
 
 const rooms = new Map<string, Room<unknown>>();
 
+/**
+ * Hard cap on the number of simultaneously-live rooms. Each new room spawns a shared
+ * CLI subprocess (an AWS/SSM call), and room keys are derived from request path params
+ * that only have to pass a loose `[A-Za-z0-9._-]` filter — they need NOT name a resource
+ * that exists. Without a ceiling, a client could open many SSE connections with distinct
+ * `cluster`/`node`/`service` strings and spawn an unbounded number of subprocesses,
+ * exhausting PIDs/CPU/memory on the dashboard host. Existing viewers of already-live
+ * rooms are unaffected (they just increment a ref count).
+ */
+export const MAX_LIVE_ROOMS = 64;
+
+/** Thrown by {@link joinRoom} when opening a NEW room would exceed {@link MAX_LIVE_ROOMS}. */
+export class RoomCapExceededError extends Error {
+  constructor() {
+    super("dashboard live-stream capacity reached");
+    this.name = "RoomCapExceededError";
+  }
+}
+
 export interface RoomSpec<T> {
   /** unique room id, e.g. `monitor:<cluster>:<node>` */
   key: string;
@@ -40,6 +59,9 @@ export interface RoomSpec<T> {
 export function joinRoom<T>(spec: RoomSpec<T>): { closed: { code: number; stderr: string } | null } {
   let room = rooms.get(spec.key) as Room<T> | undefined;
   if (!room) {
+    // Only NEW rooms are gated — joining an existing room is always allowed so live
+    // viewers never get evicted by an attacker cycling through bogus keys.
+    if (rooms.size >= MAX_LIVE_ROOMS) throw new RoomCapExceededError();
     const created: Room<T> = {
       key: spec.key,
       refs: 0,
