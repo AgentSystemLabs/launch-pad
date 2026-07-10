@@ -1,8 +1,9 @@
 import type { NodeRegistryEntry, NodeStatus } from "@agentsystemlabs/launch-pad-shared";
 import { HOST_PORT_MIN } from "@agentsystemlabs/launch-pad-shared";
 import type { AwsEnv } from "../aws/context";
+import { isIpv4 } from "../dns/classify";
+import { CliError } from "../errors";
 import { runShellScriptOnInstances } from "../aws/run-command";
-import { shellQuote } from "./shell-quote";
 
 export interface ReachabilityTarget {
   nodeId: string;
@@ -44,10 +45,24 @@ export function renderEdgeProbeScript(targets: ReachabilityTarget[]): string[] {
     "fail=0",
   ];
   for (const target of targets) {
+    // SECURITY: advertiseIp is interpolated into a `bash -lc '...'` command run on the
+    // edge node via SSM. `shellQuote` alone is NOT sufficient here — its wrapping quotes
+    // are nested inside the already single-quoted `-lc` argument, so a leading quote
+    // toggles out of that context and turns the value into executable shell
+    // (e.g. `$(...)`, `;`). Only accept a strict dotted-quad IPv4, which cannot contain
+    // any shell metacharacter, before it ever reaches the script. `--advertise-ip` and
+    // the persisted node registry are otherwise unvalidated on this path.
+    if (!isIpv4(target.advertiseIp)) {
+      throw new CliError(`refusing to probe node "${target.nodeId}": advertiseIp "${target.advertiseIp}" is not a valid IPv4 address`, {
+        hint: "re-run `launchpad node init` with a valid --advertise-ip (dotted-quad, e.g. 10.0.1.50)",
+      });
+    }
     for (const port of target.ports) {
+      // `port` is a number from the schema; `advertiseIp` is validated above — both are
+      // now safe to interpolate. The label reuses the same validated values.
       const label = `${target.nodeId} ${target.advertiseIp}:${port}`;
       lines.push(
-        `if timeout 5 bash -lc '</dev/tcp/${shellQuote(target.advertiseIp)}/${port}' 2>/dev/null; then`,
+        `if timeout 5 bash -lc '</dev/tcp/${target.advertiseIp}/${port}' 2>/dev/null; then`,
         `  echo "OK ${label}"`,
         "else",
         `  echo "FAIL ${label}"`,
