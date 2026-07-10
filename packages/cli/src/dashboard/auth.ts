@@ -13,11 +13,38 @@ const COOKIE_NAME = "lp_dashboard_token";
 const MAX_FAILS = 10;
 const FAIL_WINDOW_MS = 60_000;
 
+/** Minimum length for a dashboard token. The only brute-force control is a per-IP
+ *  rate limit, so a short/low-entropy token is realistically guessable by a
+ *  distributed attacker (each source IP gets its own budget). Enforced at startup. */
+export const MIN_TOKEN_LENGTH = 16;
+
 /** Constant-time string comparison via fixed-length digests. */
 export function tokenMatches(candidate: string, token: string): boolean {
   const a = createHash("sha256").update(candidate).digest();
   const b = createHash("sha256").update(token).digest();
   return timingSafeEqual(a, b);
+}
+
+/** True when the request reached us over TLS, so the session cookie can be marked
+ *  `Secure`. The dashboard is served directly (no proxy), so the request URL scheme
+ *  is the trustworthy signal. Marking Secure on a plain-HTTP dev/loopback bind would
+ *  make the browser silently drop the cookie and loop the login. */
+function isHttpsRequest(c: Context): boolean {
+  try {
+    return new URL(c.req.url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** Set the authenticated session cookie (shared by the `?token=` and POST-form paths). */
+function setSessionCookie(c: Context, value: string): void {
+  setCookie(c, COOKIE_NAME, value, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: isHttpsRequest(c),
+    path: "/",
+  });
 }
 
 export function isLoopbackHost(host: string): boolean {
@@ -64,7 +91,7 @@ function escapeHtml(s: string): string {
 
 function unauthorized(c: Context, message: string): Response {
   return c.html(
-    `<!doctype html><html lang="en" data-theme="night"><head><meta charset="utf-8"><title>Launch Pad</title><link rel="stylesheet" href="/dashboard.css"></head><body><div class="min-h-screen flex items-center justify-center bg-base-100"><div class="card bg-base-200 w-96"><div class="card-body"><h1 class="card-title">🚀 Launch Pad</h1><p class="text-sm opacity-70">${escapeHtml(message)}</p><form method="get" class="flex gap-2 mt-2"><input type="password" name="token" placeholder="access token" class="input input-bordered input-sm flex-1" autofocus /><button type="submit" class="btn btn-primary btn-sm">Unlock</button></form></div></div></div></body></html>`,
+    `<!doctype html><html lang="en" data-theme="night"><head><meta charset="utf-8"><title>Launch Pad</title><link rel="stylesheet" href="/dashboard.css"></head><body><div class="min-h-screen flex items-center justify-center bg-base-100"><div class="card bg-base-200 w-96"><div class="card-body"><h1 class="card-title">🚀 Launch Pad</h1><p class="text-sm opacity-70">${escapeHtml(message)}</p><form method="post" class="flex gap-2 mt-2"><input type="password" name="token" placeholder="access token" class="input input-bordered input-sm flex-1" autofocus /><button type="submit" class="btn btn-primary btn-sm">Unlock</button></form></div></div></div></body></html>`,
     401,
   );
 }
@@ -85,10 +112,11 @@ export function authMiddleware(token: string): MiddlewareHandler {
     const cookie = getCookie(c, COOKIE_NAME);
     if (cookie) {
       if (tokenMatches(cookie, token)) return next();
-      // A stale cookie (rotated token) shouldn't count once per page asset —
-      // clear it so the user gets the token form on the next request.
+      // A stale cookie (rotated token) is re-sent by the browser on EVERY asset/page
+      // load, so counting it as a failed attempt would trip the per-IP limiter after
+      // ~10 loads and lock the (possibly NAT-shared) user out for a minute. Clear it
+      // and fall through to an explicit credential path — don't record a failure.
       deleteCookie(c, COOKIE_NAME, { path: "/" });
-      recordFailure(key);
     }
 
     const header = c.req.header("authorization");
@@ -98,14 +126,28 @@ export function authMiddleware(token: string): MiddlewareHandler {
       return unauthorized(c, "That token didn't match. Check LAUNCH_PAD_DASHBOARD_TOKEN on the server.");
     }
 
+    // Human login form posts the token in the request BODY (see `unauthorized`), so the
+    // secret never lands in the URL / browser history / access logs — unlike a `?token=`
+    // query, which is only kept as a convenience bootstrap for curl/API callers and is
+    // immediately swapped for the cookie + redirected away.
+    if (c.req.method === "POST") {
+      const body = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
+      const bodyToken = typeof body.token === "string" ? body.token : undefined;
+      if (bodyToken) {
+        if (tokenMatches(bodyToken, token)) {
+          setSessionCookie(c, bodyToken);
+          const url = new URL(c.req.url);
+          return c.redirect(url.pathname + url.search);
+        }
+        recordFailure(key);
+        return unauthorized(c, "That token didn't match. Check LAUNCH_PAD_DASHBOARD_TOKEN on the server.");
+      }
+    }
+
     const query = c.req.query("token");
     if (query) {
       if (tokenMatches(query, token)) {
-        setCookie(c, COOKIE_NAME, query, {
-          httpOnly: true,
-          sameSite: "Lax",
-          path: "/",
-        });
+        setSessionCookie(c, query);
         const url = new URL(c.req.url);
         url.searchParams.delete("token");
         return c.redirect(url.pathname + url.search);

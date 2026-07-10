@@ -16,7 +16,7 @@ import { serve } from "@hono/node-server";
 import type { Command } from "commander";
 import { parse as parseToml } from "smol-toml";
 import { checkProjectDir, upsertProject } from "../../dashboard/app-config";
-import { isLoopbackHost } from "../../dashboard/auth";
+import { isLoopbackHost, MIN_TOKEN_LENGTH } from "../../dashboard/auth";
 import { buildDashboardApp } from "../../dashboard/server";
 import { wireRoomCleanup } from "../../dashboard/stream-registry";
 import { CliError } from "../../errors";
@@ -78,6 +78,14 @@ export function registerDashboard(program: Command): void {
     if (!isLoopbackHost(host) && !token) {
       throw new CliError(`refusing to bind ${host} without auth`, {
         hint: "set LAUNCH_PAD_DASHBOARD_TOKEN to enable token auth, or bind 127.0.0.1",
+      });
+    }
+    // A non-loopback bind is reachable over the network where the only brute-force
+    // control is a per-IP rate limit, so reject a weak token up front rather than
+    // letting a 3-char secret guard the dashboard.
+    if (token && !isLoopbackHost(host) && token.length < MIN_TOKEN_LENGTH) {
+      throw new CliError(`LAUNCH_PAD_DASHBOARD_TOKEN is too short (min ${MIN_TOKEN_LENGTH} chars) for a non-loopback bind`, {
+        hint: "use a long random token, e.g. `openssl rand -hex 32`",
       });
     }
 
