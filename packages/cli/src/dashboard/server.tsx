@@ -56,17 +56,24 @@ export interface BuildAppOpts {
 const SECURITY_HEADERS = {
   "Content-Security-Policy": "frame-ancestors 'none'",
   "X-Frame-Options": "DENY",
+  // Stop MIME sniffing on the CSS/text routes (content-type confusion).
+  "X-Content-Type-Options": "nosniff",
+  // Never leak the URL (which can carry a bootstrap `?token=`) to linked/CSS origins.
+  "Referrer-Policy": "no-referrer",
 } as const;
 
 export function buildDashboardApp(opts: BuildAppOpts): Hono {
   const { ctx } = opts;
   const app = new Hono();
 
+  // Set security headers BEFORE the handler runs. A streamed SSE response flushes its
+  // headers as soon as the handler starts writing, so setting them after `next()` would
+  // skip every live monitor/log stream — the long-lived responses that most want them.
   app.use("*", async (c, next) => {
-    await next();
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
       c.header(name, value);
     }
+    await next();
   });
   if (opts.token) app.use("*", authMiddleware(opts.token));
 
