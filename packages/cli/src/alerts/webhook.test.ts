@@ -48,4 +48,19 @@ describe("isSecureWebhookUrl", () => {
     expect(isSecureWebhookUrl("ftp://example.com/hook")).toBe(false);
     expect(isSecureWebhookUrl("not a url")).toBe(false);
   });
+
+  it("rejects HTTPS to private / link-local / metadata hosts (SSRF)", () => {
+    expect(isSecureWebhookUrl("https://169.254.169.254/latest/meta-data/")).toBe(false);
+    expect(isSecureWebhookUrl("https://10.0.0.5/hook")).toBe(false);
+    expect(isSecureWebhookUrl("https://192.168.1.1/hook")).toBe(false);
+    expect(isSecureWebhookUrl("https://172.16.0.1/hook")).toBe(false);
+    expect(isSecureWebhookUrl("https://[::1]/hook")).toBe(false);
+    expect(isSecureWebhookUrl("https://[fd00::1]/hook")).toBe(false);
+  });
+
+  it("still accepts HTTPS to public webhook hosts", () => {
+    expect(isSecureWebhookUrl("https://hooks.slack.com/services/T/B/xxx")).toBe(true);
+    expect(isSecureWebhookUrl("https://discord.com/api/webhooks/1/xxx")).toBe(true);
+    expect(isSecureWebhookUrl("https://8.8.8.8/hook")).toBe(true);
+  });
 });
